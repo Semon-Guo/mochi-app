@@ -334,79 +334,153 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
   const isDragging = dragFrom === t.id;
   const isDragOver = dragOver === t.id && dragFrom !== t.id;
 
+  const REVEAL = 72;
+  const [tx, setTx] = useState(0);
+  const swipe = useRef({ startX: 0, startY: 0, active: false, moving: false, baseTx: 0 });
+
+  useEffect(() => { if (dragFrom) setTx(0); }, [dragFrom]);
+
+  const onSwipeStart = (e) => {
+    if (dragFrom) return;
+    const touch = e.touches[0];
+    swipe.current = { startX: touch.clientX, startY: touch.clientY, active: true, moving: false, baseTx: tx };
+  };
+  const onSwipeMove = (e) => {
+    if (!swipe.current.active) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - swipe.current.startX;
+    const dy = touch.clientY - swipe.current.startY;
+    if (!swipe.current.moving) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      if (Math.abs(dy) > Math.abs(dx)) { swipe.current.active = false; return; }
+      swipe.current.moving = true;
+    }
+    e.preventDefault();
+    setTx(Math.max(-REVEAL, Math.min(REVEAL, swipe.current.baseTx + dx)));
+  };
+  const onSwipeEnd = () => {
+    if (!swipe.current.moving) {
+      if (Math.abs(tx) > 10) setTx(0);
+      swipe.current = { ...swipe.current, active: false };
+      return;
+    }
+    swipe.current = { ...swipe.current, active: false, moving: false };
+    setTx(prev => prev < -REVEAL * 0.5 ? -REVEAL : prev > REVEAL * 0.5 ? REVEAL : 0);
+  };
+  const closeSwipe = () => setTx(0);
+
   return (
     <>
       <div
         data-todo-id={t.id}
         style={{
-          borderBottom: "1px solid #F0EDE6", padding: "4px 0", paddingLeft: depth * 24,
-          animation: "slideUp .3s ease both",
-          opacity: isDragging ? 0.4 : 1,
+          position: "relative", overflow: "hidden",
+          borderBottom: "1px solid #F0EDE6",
           borderTop: isDragOver ? "2px solid #E8A838" : undefined,
+          paddingLeft: depth * 24,
+          opacity: isDragging ? 0.25 : 1,
           transition: "opacity 0.15s",
+          animation: "slideUp .3s ease both",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0" }}>
-          {/* Drag handle */}
-          {!isActive && (
-            <div
-              onTouchStart={(e) => { e.stopPropagation(); onDragStart(t.id); }}
-              onMouseDown={(e) => { e.preventDefault(); onDragStart(t.id); }}
-              style={{ cursor: "grab", touchAction: "none", padding: "4px 2px", color: "#CCC", flexShrink: 0, userSelect: "none" }}
-            ><Ic.Drag s={13}/></div>
-          )}
-          {/* Urgency dot */}
-          <div style={{ width: depth ? 8 : 10, height: depth ? 8 : 10, borderRadius: "50%", background: urg.color, flexShrink: 0, boxShadow: `0 0 0 ${depth?2:3}px ${urg.ring}` }} />
-          {/* Content */}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: depth ? 14 : 15, lineHeight: 1.4, color: "#2C2C2C", display: "flex", alignItems: "center", gap: 6 }}>
-              {depth > 0 && <span style={{ color: "#CCC", fontSize: 12 }}>↳</span>}
-              {t.text}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 10, color: urg.color, fontWeight: 600, background: urg.bg, padding: "2px 8px", borderRadius: 5 }}>{urg.label}</span>
-              <span style={{ fontSize: 10, color: "#BBB", display: "flex", alignItems: "center", gap: 2 }}><Ic.Clock s={10}/>{fmtMin(t.duration)}</span>
-              {t.elapsed > 0 && !isActive && <span style={{ fontSize: 10, color: "#AAA" }}>已用{fmtSec(t.elapsed)}</span>}
-              {isPaused && !isActive && <span style={{ fontSize: 10, color: "#E8A838", fontWeight: 600 }}>⏸暂停中</span>}
-              {hasKids && <span style={{ fontSize: 10, color: "#BBB" }}>{kidTodos.filter(c=>c.done).length}/{kidTodos.length}子任务</span>}
-            </div>
-          </div>
-          {/* Expand toggle */}
-          {hasKids && (
-            <button style={S.ib} onClick={() => toggleExpand(t.id)}>
-              {expanded ? <Ic.Up s={14}/> : <Ic.Down s={14}/>}
-            </button>
-          )}
-          {/* Actions */}
-          {!depth && <button style={{ ...S.ib, color: "#CCC" }} onClick={() => onAddSub(t.id)} title="拆解"><Ic.Split s={14}/></button>}
-          <button style={{ ...S.ib, color: "#CCC" }} onClick={() => { setEditingTodo(t.id); setShowAdd(false); }}><Ic.Edit s={14}/></button>
-          {!isActive && !isPaused && (
-            <button onClick={() => startTodo(t.id)} style={{
-              width: 34, height: 34, borderRadius: 10, border: "none",
-              background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
-              color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer",
-            }}><Ic.Play s={13}/></button>
-          )}
-          {isPaused && !isActive && (
-            <button onClick={() => resumeTodo(t.id)} style={{
-              width: 34, height: 34, borderRadius: 10, border: "none",
-              background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
-              color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer",
-            }}><Ic.Play s={13}/></button>
-          )}
-          <button style={{ ...S.ib, color: "#E0DCD3" }} onClick={() => deleteTodo(t.id)}><Ic.Trash s={14}/></button>
+        {/* Delete action – right side (swipe left to reveal) */}
+        <div style={{
+          position: "absolute", right: 0, top: 0, bottom: 0, width: REVEAL,
+          background: "#FF3B30", display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <button onClick={() => { closeSwipe(); deleteTodo(t.id); }} style={{
+            background: "none", border: "none", color: "#FFF", cursor: "pointer",
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: 8,
+          }}>
+            <Ic.Trash s={19}/>
+            <span style={{ fontSize: 10, fontWeight: 700 }}>删除</span>
+          </button>
         </div>
-        {/* Active timer */}
-        {isActive && (
-          <FocusTimer
-            todo={t}
-            onComplete={el => completeTodo(t.id, el)}
-            onPause={el => pauseTodo(t.id, el)}
-            onUpdate={type => { if (type === "resume") resumeTodo(t.id); }}
-          />
+
+        {/* Drag action – left side (swipe right to reveal) */}
+        {!isActive && (
+          <div style={{
+            position: "absolute", left: 0, top: 0, bottom: 0, width: REVEAL,
+            background: "#5B7FC7", display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <button
+              onTouchStart={(e) => { e.stopPropagation(); closeSwipe(); onDragStart(t.id, e); }}
+              style={{
+                background: "none", border: "none", color: "#FFF", cursor: "grab",
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: 8,
+                touchAction: "none",
+              }}>
+              <Ic.Drag s={19}/>
+              <span style={{ fontSize: 10, fontWeight: 700 }}>拖动</span>
+            </button>
+          </div>
         )}
+
+        {/* Main content – translates on swipe */}
+        <div
+          style={{
+            transform: `translateX(${tx}px)`,
+            transition: swipe.current.moving ? "none" : "transform 0.25s cubic-bezier(0.25,1,0.5,1)",
+            background: "#FDFBF7",
+            padding: "4px 0",
+          }}
+          onTouchStart={onSwipeStart}
+          onTouchMove={onSwipeMove}
+          onTouchEnd={onSwipeEnd}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0" }}>
+            {/* Urgency dot */}
+            <div style={{ width: depth ? 8 : 10, height: depth ? 8 : 10, borderRadius: "50%", background: urg.color, flexShrink: 0, boxShadow: `0 0 0 ${depth?2:3}px ${urg.ring}` }} />
+            {/* Content */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: depth ? 14 : 15, lineHeight: 1.4, color: "#2C2C2C", display: "flex", alignItems: "center", gap: 6 }}>
+                {depth > 0 && <span style={{ color: "#CCC", fontSize: 12 }}>↳</span>}
+                {t.text}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 10, color: urg.color, fontWeight: 600, background: urg.bg, padding: "2px 8px", borderRadius: 5 }}>{urg.label}</span>
+                <span style={{ fontSize: 10, color: "#BBB", display: "flex", alignItems: "center", gap: 2 }}><Ic.Clock s={10}/>{fmtMin(t.duration)}</span>
+                {t.elapsed > 0 && !isActive && <span style={{ fontSize: 10, color: "#AAA" }}>已用{fmtSec(t.elapsed)}</span>}
+                {isPaused && !isActive && <span style={{ fontSize: 10, color: "#E8A838", fontWeight: 600 }}>⏸暂停中</span>}
+                {hasKids && <span style={{ fontSize: 10, color: "#BBB" }}>{kidTodos.filter(c=>c.done).length}/{kidTodos.length}子任务</span>}
+              </div>
+            </div>
+            {/* Expand toggle */}
+            {hasKids && (
+              <button style={S.ib} onClick={() => toggleExpand(t.id)}>
+                {expanded ? <Ic.Up s={14}/> : <Ic.Down s={14}/>}
+              </button>
+            )}
+            {/* Actions */}
+            {!depth && <button style={{ ...S.ib, color: "#CCC" }} onClick={() => { closeSwipe(); onAddSub(t.id); }} title="拆解"><Ic.Split s={14}/></button>}
+            <button style={{ ...S.ib, color: "#CCC" }} onClick={() => { closeSwipe(); setEditingTodo(t.id); setShowAdd(false); }}><Ic.Edit s={14}/></button>
+            {!isActive && !isPaused && (
+              <button onClick={() => startTodo(t.id)} style={{
+                width: 34, height: 34, borderRadius: 10, border: "none",
+                background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
+                color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}><Ic.Play s={13}/></button>
+            )}
+            {isPaused && !isActive && (
+              <button onClick={() => resumeTodo(t.id)} style={{
+                width: 34, height: 34, borderRadius: 10, border: "none",
+                background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
+                color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}><Ic.Play s={13}/></button>
+            )}
+          </div>
+          {/* Active timer */}
+          {isActive && (
+            <FocusTimer
+              todo={t}
+              onComplete={el => completeTodo(t.id, el)}
+              onPause={el => pauseTodo(t.id, el)}
+              onUpdate={type => { if (type === "resume") resumeTodo(t.id); }}
+            />
+          )}
+        </div>
       </div>
       {/* Children */}
       {expanded && subs}
@@ -430,8 +504,11 @@ export default function MochiApp() {
   const [celebration, setCelebration] = useState(null); // { msg, elapsed }
   const [dragFrom, setDragFrom] = useState(null);
   const [dragOver, setDragOver] = useState(null);
+  const [dragY, setDragY] = useState(0);
+  const [dragHalfH, setDragHalfH] = useState(30);
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
+  const dragYRef = useRef(0);
   const ntRef = useRef(null);
 
   useEffect(() => { save(data); }, [data]);
@@ -443,6 +520,8 @@ export default function MochiApp() {
       const p = e.touches ? e.touches[0] : e;
       if (!p) return;
       e.preventDefault();
+      dragYRef.current = p.clientY;
+      setDragY(p.clientY);
       const el = document.elementFromPoint(p.clientX, p.clientY);
       const row = el?.closest('[data-todo-id]');
       if (row) {
@@ -480,7 +559,19 @@ export default function MochiApp() {
     };
   }, [dragFrom]);
 
-  const startDrag = (id) => { dragFromRef.current = id; dragOverRef.current = null; setDragFrom(id); setDragOver(null); };
+  const startDrag = (id, e) => {
+    const touch = e?.touches?.[0];
+    if (!touch) return;
+    const el = document.querySelector(`[data-todo-id="${id}"]`);
+    const rect = el ? el.getBoundingClientRect() : { height: 60 };
+    dragFromRef.current = id;
+    dragOverRef.current = null;
+    dragYRef.current = touch.clientY;
+    setDragFrom(id);
+    setDragOver(null);
+    setDragY(touch.clientY);
+    setDragHalfH(rect.height / 2);
+  };
 
   const toggleExpand = (id) => {
     setExpandedIds(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -812,6 +903,34 @@ export default function MochiApp() {
           }}>专注了 {fmtSec(celebration.elapsed)}</div>
         </div>
       )}
+
+      {/* Drag ghost overlay */}
+      {dragFrom && (() => {
+        const todo = data.todos.find(t => t.id === dragFrom);
+        if (!todo) return null;
+        const urg = UM[todo.urgency] || URG[0];
+        return (
+          <div style={{
+            position: "fixed", left: 16, right: 16,
+            top: dragY - dragHalfH,
+            zIndex: 1000, background: "#FDFBF7", borderRadius: 16,
+            padding: "12px 16px",
+            boxShadow: `0 16px 48px rgba(0,0,0,0.22), 0 0 0 2px ${urg.ring}`,
+            transform: "scale(1.03)", pointerEvents: "none",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: urg.color, flexShrink: 0, boxShadow: `0 0 0 3px ${urg.ring}` }}/>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: "#2C2C2C" }}>{todo.text}</div>
+                <div style={{ display: "flex", gap: 6, marginTop: 3 }}>
+                  <span style={{ fontSize: 10, color: urg.color, fontWeight: 600, background: urg.bg, padding: "2px 8px", borderRadius: 5 }}>{urg.label}</span>
+                  <span style={{ fontSize: 10, color: "#BBB" }}>{fmtMin(todo.duration)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <style>{CSS}</style>
     </div>
