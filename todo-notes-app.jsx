@@ -50,6 +50,7 @@ const Ic = {
   ChevR:({s=18})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18"/></svg>,
   Down:({s=14})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>,
   Up:({s=14})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="18 15 12 9 6 15"/></svg>,
+  Drag:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="7" y1="6" x2="17" y2="6"/><line x1="7" y1="10" x2="17" y2="10"/><line x1="7" y1="14" x2="17" y2="14"/><line x1="7" y1="18" x2="17" y2="18"/></svg>,
 };
 
 /* ── Focus Timer ── */
@@ -322,7 +323,7 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
 /* ── Todo Item Row (reusable for parent & child) ── */
 function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowAdd,
   deleteTodo, startTodo, onAddSub, expandedIds, toggleExpand, children: subs, allTodos,
-  completeTodo, pauseTodo, resumeTodo, updateElapsed }) {
+  completeTodo, pauseTodo, resumeTodo, updateElapsed, dragFrom, dragOver, onDragStart }) {
   const urg = UM[t.urgency] || URG[0];
   const isActive = activeTodo === t.id;
   const kidTodos = allTodos.filter(c => c.parentId === t.id);
@@ -330,11 +331,30 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
   const expanded = expandedIds.has(t.id);
   const lastEvt = t.timeline?.[t.timeline.length - 1];
   const isPaused = lastEvt?.type === "pause";
+  const isDragging = dragFrom === t.id;
+  const isDragOver = dragOver === t.id && dragFrom !== t.id;
 
   return (
     <>
-      <div style={{ borderBottom: "1px solid #F0EDE6", padding: "4px 0", paddingLeft: depth * 24, animation: "slideUp .3s ease both" }}>
+      <div
+        data-todo-id={t.id}
+        style={{
+          borderBottom: "1px solid #F0EDE6", padding: "4px 0", paddingLeft: depth * 24,
+          animation: "slideUp .3s ease both",
+          opacity: isDragging ? 0.4 : 1,
+          borderTop: isDragOver ? "2px solid #E8A838" : undefined,
+          transition: "opacity 0.15s",
+        }}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0" }}>
+          {/* Drag handle */}
+          {!isActive && (
+            <div
+              onTouchStart={(e) => { e.stopPropagation(); onDragStart(t.id); }}
+              onMouseDown={(e) => { e.preventDefault(); onDragStart(t.id); }}
+              style={{ cursor: "grab", touchAction: "none", padding: "4px 2px", color: "#CCC", flexShrink: 0, userSelect: "none" }}
+            ><Ic.Drag s={13}/></div>
+          )}
           {/* Urgency dot */}
           <div style={{ width: depth ? 8 : 10, height: depth ? 8 : 10, borderRadius: "50%", background: urg.color, flexShrink: 0, boxShadow: `0 0 0 ${depth?2:3}px ${urg.ring}` }} />
           {/* Content */}
@@ -408,10 +428,59 @@ export default function MochiApp() {
   const [weekOffset, setWeekOffset] = useState(0);
   const [doneViewMode, setDoneViewMode] = useState("list"); // list | week
   const [celebration, setCelebration] = useState(null); // { msg, elapsed }
+  const [dragFrom, setDragFrom] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+  const dragFromRef = useRef(null);
+  const dragOverRef = useRef(null);
   const ntRef = useRef(null);
 
   useEffect(() => { save(data); }, [data]);
   useEffect(() => { if (editingNote && ntRef.current) ntRef.current.focus(); }, [editingNote]);
+
+  useEffect(() => {
+    if (!dragFrom) return;
+    const onMove = (e) => {
+      const p = e.touches ? e.touches[0] : e;
+      if (!p) return;
+      e.preventDefault();
+      const el = document.elementFromPoint(p.clientX, p.clientY);
+      const row = el?.closest('[data-todo-id]');
+      if (row) {
+        const overId = row.dataset.todoId;
+        if (overId !== dragFromRef.current) { dragOverRef.current = overId; setDragOver(overId); }
+      }
+    };
+    const onEnd = () => {
+      const from = dragFromRef.current, over = dragOverRef.current;
+      if (from && over && from !== over) {
+        setData(d => {
+          const arr = [...d.todos];
+          const fi = arr.findIndex(t => t.id === from);
+          const ti = arr.findIndex(t => t.id === over);
+          if (fi < 0 || ti < 0) return d;
+          const a = arr[fi], b = arr[ti];
+          if (a.urgency !== b.urgency || a.parentId !== b.parentId) return d;
+          arr.splice(fi, 1);
+          arr.splice(arr.findIndex(t => t.id === over), 0, a);
+          return { ...d, todos: arr };
+        });
+      }
+      dragFromRef.current = null; dragOverRef.current = null;
+      setDragFrom(null); setDragOver(null);
+    };
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('touchend', onEnd);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onEnd);
+    return () => {
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend', onEnd);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onEnd);
+    };
+  }, [dragFrom]);
+
+  const startDrag = (id) => { dragFromRef.current = id; dragOverRef.current = null; setDragFrom(id); setDragOver(null); };
 
   const toggleExpand = (id) => {
     setExpandedIds(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -495,16 +564,19 @@ export default function MochiApp() {
   done.forEach(t => { const k = toBJ(t.doneTs||t.ts).toDateString(); if(!doneByDate[k]) doneByDate[k]=[]; doneByDate[k].push(t); });
   const sortedDK = Object.keys(doneByDate).sort((a,b)=>new Date(b)-new Date(a));
 
+  const urgSort = (a, b) => { const o = {critical:0,medium:1,low:2}; return (o[a.urgency]??3)-(o[b.urgency]??3); };
+
   // Helper to render todo tree
   const renderTodo = (t, depth = 0) => {
-    const kids = data.todos.filter(c => c.parentId === t.id && !c.done);
+    const kids = data.todos.filter(c => c.parentId === t.id && !c.done).sort(urgSort);
     return (
       <TodoRow key={t.id} t={t} depth={depth} activeTodo={activeTodo} setActiveTodo={setActiveTodo}
         setEditingTodo={setEditingTodo} setShowAdd={setShowAdd} deleteTodo={deleteTodo}
         startTodo={startTodo} onAddSub={id => { setAddSubParent(id); setShowAdd(false); setEditingTodo(null); setExpandedIds(s => { const n = new Set(s); n.add(id); return n; }); }}
         expandedIds={expandedIds} toggleExpand={toggleExpand} allTodos={data.todos}
         completeTodo={completeTodo} pauseTodo={pauseTodo} resumeTodo={resumeTodo}
-        updateElapsed={(id,e) => setData(d=>({...d,todos:d.todos.map(x=>x.id===id?{...x,elapsed:e}:x)}))}>
+        updateElapsed={(id,e) => setData(d=>({...d,todos:d.todos.map(x=>x.id===id?{...x,elapsed:e}:x)}))}
+        dragFrom={dragFrom} dragOver={dragOver} onDragStart={startDrag}>
         {kids.map(c => renderTodo(c, depth + 1))}
         {addSubParent === t.id && (
           <div style={{ paddingLeft: (depth + 1) * 24 }}>
