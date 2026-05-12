@@ -17,7 +17,8 @@ export default defineConfig({
         background_color: '#FDFBF7',
         display: 'standalone',
         orientation: 'portrait',
-        start_url: '/',
+        start_url: '/mochi-app/',
+        scope: '/mochi-app/',
         icons: [
           {
             src: 'icon-192.png',
