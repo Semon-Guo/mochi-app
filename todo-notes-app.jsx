@@ -1,7 +1,24 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 
 const SK = "mochi_v3";
-function load() { try { const r = localStorage.getItem(SK); if (r) return JSON.parse(r); } catch {} return { todos: [], notes: [] }; }
+const TIMER_SK = "mochi_timer";
+function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
+function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); } catch {} }
+function loadAll() {
+  let data = { todos: [], notes: [] };
+  let activeTodoId = null;
+  try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
+  try {
+    const s = localStorage.getItem(TIMER_SK);
+    if (s) {
+      const { todoId, startTs, baseElapsed } = JSON.parse(s);
+      const elapsedNow = baseElapsed + Math.floor((Date.now() - startTs) / 1000);
+      data = { ...data, todos: data.todos.map(t => t.id === todoId ? { ...t, elapsed: elapsedNow } : t) };
+      activeTodoId = todoId;
+    }
+  } catch {}
+  return { data, activeTodoId };
+}
 function save(d) { try { localStorage.setItem(SK, JSON.stringify(d)); } catch {} }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
@@ -70,6 +87,25 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
     }, 250);
     return () => { if (iv.current) clearInterval(iv.current); };
   }, []);
+
+  // Re-sync elapsed when app comes back from background (iOS suspends JS without killing it)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const s = localStorage.getItem(TIMER_SK);
+        if (!s) return;
+        const { todoId, startTs, baseElapsed } = JSON.parse(s);
+        if (todoId !== todo.id) return;
+        const restoredElapsed = baseElapsed + Math.floor((Date.now() - startTs) / 1000);
+        base.current = restoredElapsed;
+        stRef.current = Date.now();
+        setElapsed(restoredElapsed);
+      } catch {}
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [todo.id]);
 
   const doPause = () => {
     setRunning(false);
@@ -490,13 +526,14 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
 
 /* ── Main App ── */
 export default function MochiApp() {
-  const [data, setData] = useState(load);
+  const [initState] = useState(loadAll);
+  const [data, setData] = useState(initState.data);
   const [tab, setTab] = useState("todo");
   const [editingNote, setEditingNote] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addSubParent, setAddSubParent] = useState(null);
   const [editingTodo, setEditingTodo] = useState(null);
-  const [activeTodo, setActiveTodo] = useState(null);
+  const [activeTodo, setActiveTodo] = useState(initState.activeTodoId);
   const [view, setView] = useState("main"); // main | done | timetable
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [weekOffset, setWeekOffset] = useState(0);
@@ -600,6 +637,8 @@ export default function MochiApp() {
   const updateTodoInfo = (id, info) => { setData(d => ({ ...d, todos: d.todos.map(t => t.id===id?{...t,...info}:t) })); setEditingTodo(null); };
 
   const startTodo = (id) => {
+    const todo = data.todos.find(t => t.id === id);
+    saveTimerSession(id, Date.now(), todo?.elapsed || 0);
     setData(d => ({ ...d, todos: d.todos.map(t => {
       if (t.id !== id) return t;
       const tl = [...(t.timeline||[]), { type: "start", at: Date.now() }];
@@ -609,6 +648,7 @@ export default function MochiApp() {
   };
 
   const pauseTodo = (id, elapsed) => {
+    clearTimerSession();
     setData(d => ({ ...d, todos: d.todos.map(t => {
       if (t.id !== id) return t;
       const tl = [...(t.timeline||[]), { type: "pause", at: Date.now() }];
@@ -618,6 +658,8 @@ export default function MochiApp() {
   };
 
   const resumeTodo = (id) => {
+    const todo = data.todos.find(t => t.id === id);
+    saveTimerSession(id, Date.now(), todo?.elapsed || 0);
     setData(d => ({ ...d, todos: d.todos.map(t => {
       if (t.id !== id) return t;
       const tl = [...(t.timeline||[]), { type: "resume", at: Date.now() }];
@@ -628,6 +670,7 @@ export default function MochiApp() {
 
   const CHEERS = ["干得漂亮！🔥","太强了！💪","完美收工！✨","效率拉满！🚀","又搞定一个！🎯","你就是传说！⚡","节奏起来了！🎶","无人能挡！💥"];
   const completeTodo = (id, elapsed) => {
+    clearTimerSession();
     setData(d => ({ ...d, todos: d.todos.map(t => {
       if (t.id !== id) return t;
       const tl = [...(t.timeline||[]), { type: "complete", at: Date.now() }];
