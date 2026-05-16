@@ -721,6 +721,14 @@ export default function MochiApp() {
   // Helper to render todo tree
   const renderTodo = (t, depth = 0) => {
     const kids = data.todos.filter(c => c.parentId === t.id && !c.done).sort(urgSort);
+    if (editingTodo === t.id) {
+      return (
+        <div key={t.id} style={{ paddingLeft: depth * 24 }}>
+          <TaskForm initial={t} onSave={info=>updateTodoInfo(t.id,info)} onCancel={()=>setEditingTodo(null)} isSubtask={!!t.parentId}/>
+          {kids.map(c => renderTodo(c, depth + 1))}
+        </div>
+      );
+    }
     return (
       <TodoRow key={t.id} t={t} depth={depth} activeTodo={activeTodo} setActiveTodo={setActiveTodo}
         setEditingTodo={setEditingTodo} setShowAdd={setShowAdd} deleteTodo={deleteTodo}
@@ -870,9 +878,8 @@ export default function MochiApp() {
         {tab==="todo"?(
           <>
             {showAdd && !addSubParent && <TaskForm onSave={info=>addTodo(info)} onCancel={()=>setShowAdd(false)} />}
-            {editingTodo && (()=>{ const t=data.todos.find(x=>x.id===editingTodo); if(!t) return null; return <TaskForm initial={t} onSave={info=>updateTodoInfo(editingTodo,info)} onCancel={()=>setEditingTodo(null)} isSubtask={!!t.parentId}/>; })()}
 
-            {pending.length===0 && !showAdd && !editingTodo && (
+            {pending.length===0 && !showAdd && (
               <div style={S.empty}>
                 <div style={{fontSize:48}}>📋</div>
                 <div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有待办事项</div>
