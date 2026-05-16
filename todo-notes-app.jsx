@@ -72,7 +72,16 @@ const Ic = {
 
 /* ── Focus Timer ── */
 function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
-  const [elapsed, setElapsed] = useState(todo.elapsed || 0);
+  const [elapsed, setElapsed] = useState(() => {
+    try {
+      const s = localStorage.getItem(TIMER_SK);
+      if (s) {
+        const { todoId, startTs, baseElapsed } = JSON.parse(s);
+        if (todoId === todo.id) return baseElapsed + Math.floor((Date.now() - startTs) / 1000);
+      }
+    } catch {}
+    return todo.elapsed || 0;
+  });
   const [running, setRunning] = useState(true);
   const iv = useRef(null);
   const stRef = useRef(Date.now());
@@ -81,7 +90,7 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
 
   useEffect(() => {
     stRef.current = Date.now();
-    base.current = todo.elapsed || 0;
+    base.current = elapsed; // use restored elapsed, not todo.elapsed
     iv.current = setInterval(() => {
       setElapsed(base.current + Math.floor((Date.now() - stRef.current) / 1000));
     }, 250);
