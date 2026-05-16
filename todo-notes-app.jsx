@@ -45,7 +45,7 @@ const NC = [
 ];
 
 const WDAYS = ["周一","周二","周三","周四","周五","周六","周日"];
-const HOURS = Array.from({length:17},(_,i)=>i+6); // 6:00~22:00
+const HOURS = Array.from({length:17},(_,i)=>i+9); // 9:00~25:00 (24=0:00, 25=1:00 next day)
 
 // SVG Icons
 const Ic = {
@@ -338,7 +338,7 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
           <div style={{ position:"relative" }}>
             {HOURS.map(h=>(
               <div key={h} style={{ display:"flex",height:ROW_H,borderTop:"1px solid #F0EDE6" }}>
-                <div style={{ width:36,fontSize:10,color:"#BBB",textAlign:"right",paddingRight:6,paddingTop:2,flexShrink:0 }}>{h}:00</div>
+                <div style={{ width:36,fontSize:10,color:"#BBB",textAlign:"right",paddingRight:6,paddingTop:2,flexShrink:0 }}>{h<24?`${h}:00`:`${h-24}:00`}</div>
                 {WDAYS.map((_,i)=>(
                   <div key={i} style={{ flex:"1 0 0",borderLeft:"1px solid #F5F2EC" }} />
                 ))}
@@ -347,14 +347,15 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
 
             {/* Task blocks */}
             {blocks.map((b,i)=>{
-              const top = (b.startH - 6) * ROW_H;
+              const virtualH = b.startH < 9 ? b.startH + 24 : b.startH; // 0:00→24, 1:00→25, 2:00→26
+              if (virtualH < 9 || virtualH >= 26) return null;
+              const top = (virtualH - 9) * ROW_H;
               const height = Math.max(b.durH * ROW_H, 22);
               const left = `calc(36px + ${b.dayIdx} * ((100% - 36px) / 7) + 2px)`;
               const width = `calc((100% - 36px) / 7 - 4px)`;
-              if (b.startH < 6 || b.startH > 22) return null;
               return (
                 <div key={i} style={{
-                  position:"absolute", top, left, width, height: Math.min(height, (22 - b.startH) * ROW_H),
+                  position:"absolute", top, left, width, height: Math.min(height, (26 - virtualH) * ROW_H),
                   background: `linear-gradient(135deg, ${b.color}ee, ${b.color}bb)`,
                   borderRadius: 6, padding: "3px 5px", overflow: "hidden",
                   fontSize: 10, fontWeight: 600, color: "#FFF", lineHeight: 1.3,
