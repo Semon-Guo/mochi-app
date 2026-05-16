@@ -213,10 +213,18 @@ function TaskForm({ initial, onSave, onCancel, isSubtask }) {
   const [duration, setDuration] = useState(initial?.duration || 30);
   const [urgency, setUrgency] = useState(initial?.urgency || "medium");
   const ref = useRef(null);
-  useEffect(() => { if (ref.current) ref.current.focus(); }, []);
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (ref.current) ref.current.focus();
+    // Wait for iOS keyboard to finish animating, then scroll into view
+    const t = setTimeout(() => {
+      if (formRef.current) formRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }, 350);
+    return () => clearTimeout(t);
+  }, []);
   const presets = [10, 15, 20, 30, 45, 60, 90, 120];
   return (
-    <div style={{ animation: "slideUp .3s ease both", padding: "12px 0 16px", marginLeft: isSubtask ? 24 : 0 }}>
+    <div ref={formRef} style={{ animation: "slideUp .3s ease both", padding: "12px 0 16px", marginLeft: isSubtask ? 24 : 0 }}>
       {isSubtask && <div style={{ fontSize: 12, color: "#999", marginBottom: 6, fontWeight: 600 }}>↳ 添加子任务</div>}
       <input ref={ref} value={text} onChange={e=>setText(e.target.value)}
         placeholder={isSubtask ? "子任务名称..." : "任务名称..."}
