@@ -963,6 +963,7 @@ export default function MochiApp() {
         <div style={{ display:"flex",alignItems:"center",gap:10 }}>
           <span style={{ fontSize:28,color:"#E8A838" }}>✦</span>
           <span style={{ fontSize:28,fontWeight:700,letterSpacing:"-0.5px" }}>Mochi</span>
+          <span style={{ fontSize:11,color:"#CCC",marginLeft:4,alignSelf:"flex-end",marginBottom:4 }}>v2</span>
         </div>
         <div style={{ fontSize:14,color:"#999",marginTop:4,paddingLeft:38,fontFamily:"'Noto Serif SC',serif" }}>
           {new Date().toLocaleDateString("zh-CN",{month:"long",day:"numeric",weekday:"long"})}
