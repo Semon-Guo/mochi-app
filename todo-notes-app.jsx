@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 const SK = "mochi_v3";
 const TIMER_SK = "mochi_timer";
 const BG_TS_SK = "mochi_bg_ts";
-const BG_LIMIT_SEC = 5 * 60;
+const BG_LIMIT_SEC = 10;
 function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
 function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); localStorage.removeItem(BG_TS_SK); } catch {} }
 function loadAll() {
