@@ -93,10 +93,24 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
 
   useEffect(() => {
     stRef.current = Date.now();
-    base.current = elapsed; // use restored elapsed, not todo.elapsed
+    base.current = elapsed;
     iv.current = setInterval(() => {
       setElapsed(base.current + Math.floor((Date.now() - stRef.current) / 1000));
     }, 250);
+
+    // iOS kills the page when backgrounded too long — check on mount too
+    try {
+      const bgTs = localStorage.getItem(BG_TS_SK);
+      if (bgTs) {
+        const hiddenSec = Math.floor((Date.now() - parseInt(bgTs, 10)) / 1000);
+        localStorage.removeItem(BG_TS_SK);
+        if (hiddenSec > BG_LIMIT_SEC) {
+          clearInterval(iv.current);
+          setBgAlert({ hiddenSec });
+        }
+      }
+    } catch {}
+
     return () => { if (iv.current) clearInterval(iv.current); };
   }, []);
 
