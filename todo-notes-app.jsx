@@ -2,8 +2,10 @@ import { useState, useEffect, useRef, useMemo } from "react";
 
 const SK = "mochi_v3";
 const TIMER_SK = "mochi_timer";
+const BG_TS_SK = "mochi_bg_ts";
+const BG_LIMIT_SEC = 5 * 60;
 function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
-function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); } catch {} }
+function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); localStorage.removeItem(BG_TS_SK); } catch {} }
 function loadAll() {
   let data = { todos: [], notes: [] };
   let activeTodoId = null;
@@ -71,7 +73,7 @@ const Ic = {
 };
 
 /* ── Focus Timer ── */
-function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
+function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
   const [elapsed, setElapsed] = useState(() => {
     try {
       const s = localStorage.getItem(TIMER_SK);
@@ -83,6 +85,7 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
     return todo.elapsed || 0;
   });
   const [running, setRunning] = useState(true);
+  const [bgAlert, setBgAlert] = useState(null); // { hiddenSec }
   const iv = useRef(null);
   const stRef = useRef(Date.now());
   const base = useRef(todo.elapsed || 0);
@@ -97,10 +100,30 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
     return () => { if (iv.current) clearInterval(iv.current); };
   }, []);
 
-  // Re-sync elapsed when app comes back from background (iOS suspends JS without killing it)
+  // Track background time; cancel session if away > BG_LIMIT_SEC
   useEffect(() => {
-    const onVisible = () => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        try { localStorage.setItem(BG_TS_SK, Date.now().toString()); } catch {}
+        return;
+      }
       if (document.visibilityState !== 'visible') return;
+
+      // Check how long app was in background
+      try {
+        const bgTs = localStorage.getItem(BG_TS_SK);
+        if (bgTs) {
+          const hiddenSec = Math.floor((Date.now() - parseInt(bgTs, 10)) / 1000);
+          localStorage.removeItem(BG_TS_SK);
+          if (hiddenSec > BG_LIMIT_SEC) {
+            if (iv.current) clearInterval(iv.current);
+            setBgAlert({ hiddenSec });
+            return;
+          }
+        }
+      } catch {}
+
+      // Normal re-sync after short background
       try {
         const s = localStorage.getItem(TIMER_SK);
         if (!s) return;
@@ -112,9 +135,33 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
         setElapsed(restoredElapsed);
       } catch {}
     };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [todo.id]);
+
+  const doResumeFocus = () => {
+    try {
+      const s = localStorage.getItem(TIMER_SK);
+      if (s) {
+        const { todoId, startTs: savedTs, baseElapsed } = JSON.parse(s);
+        if (todoId === todo.id) {
+          const restoredElapsed = baseElapsed + Math.floor((Date.now() - savedTs) / 1000);
+          base.current = restoredElapsed;
+          stRef.current = Date.now();
+          setElapsed(restoredElapsed);
+        }
+      }
+    } catch {}
+    iv.current = setInterval(() => {
+      setElapsed(base.current + Math.floor((Date.now() - stRef.current) / 1000));
+    }, 250);
+    setBgAlert(null);
+  };
+
+  const doCancelFocus = () => {
+    setBgAlert(null);
+    onCancel();
+  };
 
   const doPause = () => {
     setRunning(false);
@@ -203,6 +250,41 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate }) {
           justifyContent: "center", gap: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
         }}><Ic.Check s={16}/> 完成</button>
       </div>
+
+      {/* Background alert dialog */}
+      {bgAlert && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(0,0,0,0.45)", display: "flex",
+          alignItems: "center", justifyContent: "center", padding: "0 32px",
+        }}>
+          <div style={{
+            background: "#FDFBF7", borderRadius: 24, padding: "28px 24px",
+            width: "100%", maxWidth: 340, boxShadow: "0 24px 64px rgba(0,0,0,0.2)",
+            animation: "slideUp .25s ease both",
+          }}>
+            <div style={{ fontSize: 36, textAlign: "center", marginBottom: 12 }}>📵</div>
+            <div style={{ fontSize: 17, fontWeight: 700, textAlign: "center", marginBottom: 8 }}>
+              你离开了 {Math.round(bgAlert.hiddenSec / 60)} 分钟
+            </div>
+            <div style={{ fontSize: 14, color: "#888", textAlign: "center", marginBottom: 24, lineHeight: 1.6 }}>
+              是锁屏专注，还是在玩手机？
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <button onClick={doResumeFocus} style={{
+                padding: "14px 0", borderRadius: 16, border: "none",
+                background: "#2C2C2C", color: "#FFF", fontSize: 15, fontWeight: 600,
+                fontFamily: "inherit", cursor: "pointer",
+              }}>🔒 锁屏专注，继续计时</button>
+              <button onClick={doCancelFocus} style={{
+                padding: "14px 0", borderRadius: 16, border: "2px solid #F0EDE6",
+                background: "#FFF", color: "#C02556", fontSize: 15, fontWeight: 600,
+                fontFamily: "inherit", cursor: "pointer",
+              }}>📱 在玩手机，取消本次</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -377,7 +459,7 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
 /* ── Todo Item Row (reusable for parent & child) ── */
 function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowAdd,
   deleteTodo, startTodo, onAddSub, expandedIds, toggleExpand, children: subs, allTodos,
-  completeTodo, pauseTodo, resumeTodo, updateElapsed, dragFrom, dragOver, onDragStart }) {
+  completeTodo, pauseTodo, resumeTodo, cancelTodo, updateElapsed, dragFrom, dragOver, onDragStart }) {
   const urg = UM[t.urgency] || URG[0];
   const isActive = activeTodo === t.id;
   const kidTodos = allTodos.filter(c => c.parentId === t.id);
@@ -532,6 +614,7 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
               onComplete={el => completeTodo(t.id, el)}
               onPause={el => pauseTodo(t.id, el)}
               onUpdate={type => { if (type === "resume") resumeTodo(t.id); }}
+              onCancel={() => cancelTodo(t.id)}
             />
           )}
         </div>
@@ -557,6 +640,7 @@ export default function MochiApp() {
   const [weekOffset, setWeekOffset] = useState(0);
   const [doneViewMode, setDoneViewMode] = useState("list"); // list | week
   const [celebration, setCelebration] = useState(null); // { msg, elapsed }
+  const [canceledTimer, setCanceledTimer] = useState(false);
   const [dragFrom, setDragFrom] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [dragY, setDragY] = useState(0);
@@ -704,6 +788,30 @@ export default function MochiApp() {
     if (activeTodo === id) setActiveTodo(null);
   };
 
+  const cancelTodo = (id) => {
+    // Restore elapsed to what it was before this session (baseElapsed from saved session)
+    let preSessionElapsed = 0;
+    try {
+      const s = localStorage.getItem(TIMER_SK);
+      if (s) {
+        const { todoId, baseElapsed } = JSON.parse(s);
+        if (todoId === id) preSessionElapsed = baseElapsed;
+      }
+    } catch {}
+    clearTimerSession();
+    setData(d => ({ ...d, todos: d.todos.map(t => {
+      if (t.id !== id) return t;
+      // Strip the last start event so timeline stays clean
+      const tl = [...(t.timeline || [])];
+      const lastStartIdx = [...tl].map(e => e.type).lastIndexOf("start");
+      if (lastStartIdx >= 0) tl.splice(lastStartIdx, 1);
+      return { ...t, elapsed: preSessionElapsed, timeline: tl };
+    })}));
+    setActiveTodo(null);
+    setCanceledTimer(true);
+    setTimeout(() => setCanceledTimer(false), 3000);
+  };
+
   // Notes
   const createNote = () => { const c=NC[Math.floor(Math.random()*NC.length)]; const n={id:uid(),title:"",body:"",ts:Date.now(),color:c}; setData(d=>({...d,notes:[n,...d.notes]})); setEditingNote(n.id); };
   const updateNote = (id,f,v) => { setData(d=>({...d,notes:d.notes.map(n=>n.id===id?{...n,[f]:v,ts:Date.now()}:n)})); };
@@ -734,7 +842,7 @@ export default function MochiApp() {
         setEditingTodo={setEditingTodo} setShowAdd={setShowAdd} deleteTodo={deleteTodo}
         startTodo={startTodo} onAddSub={id => { setAddSubParent(id); setShowAdd(false); setEditingTodo(null); setExpandedIds(s => { const n = new Set(s); n.add(id); return n; }); }}
         expandedIds={expandedIds} toggleExpand={toggleExpand} allTodos={data.todos}
-        completeTodo={completeTodo} pauseTodo={pauseTodo} resumeTodo={resumeTodo}
+        completeTodo={completeTodo} pauseTodo={pauseTodo} resumeTodo={resumeTodo} cancelTodo={cancelTodo}
         updateElapsed={(id,e) => setData(d=>({...d,todos:d.todos.map(x=>x.id===id?{...x,elapsed:e}:x)}))}
         dragFrom={dragFrom} dragOver={dragOver} onDragStart={startDrag}>
         {kids.map(c => renderTodo(c, depth + 1))}
@@ -969,6 +1077,19 @@ export default function MochiApp() {
             animation:"msgPop 0.5s 0.3s ease both",opacity:0,
             fontFamily:"'Outfit',sans-serif",
           }}>专注了 {fmtSec(celebration.elapsed)}</div>
+        </div>
+      )}
+
+      {/* Cancelled timer toast */}
+      {canceledTimer && (
+        <div style={{
+          position: "fixed", bottom: 110, left: "50%", transform: "translateX(-50%)",
+          zIndex: 9999, background: "#2C2C2C", color: "#FFF",
+          padding: "12px 20px", borderRadius: 16, fontSize: 14, fontWeight: 600,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
+          animation: "slideUp .3s ease both",
+        }}>
+          📵 离开超过5分钟，本次专注已取消
         </div>
       )}
 
