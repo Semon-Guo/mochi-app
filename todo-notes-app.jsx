@@ -4,7 +4,7 @@ const SK = "mochi_v3";
 const TIMER_SK = "mochi_timer";
 const BG_TS_SK = "mochi_bg_ts";
 const BG_LIMIT_SEC = 5 * 60;
-function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
+function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.removeItem(BG_TS_SK); localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
 function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); localStorage.removeItem(BG_TS_SK); } catch {} }
 function loadAll() {
   let data = { todos: [], notes: [] };
@@ -384,26 +384,27 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
   const monLabel = `${monday.getMonth()+1}/${monday.getDate()}`;
   const sunLabel = `${sunday.getMonth()+1}/${sunday.getDate()}`;
 
-  // Filter done todos in this week
+  // Filter done todos in this week (use completion time for week grouping)
   const weekTodos = todos.filter(t => {
-    if (!t.done || !t.timeline?.length) return false;
-    const st = t.timeline.find(e => e.type === "start");
-    if (!st) return false;
-    const d = toBJ(st.at);
+    if (!t.done) return false;
+    const doneTime = t.doneTs || t.timeline?.find(e => e.type === "complete")?.at;
+    if (!doneTime) return false;
+    const d = toBJ(doneTime);
     return d >= monday && d <= sunday;
   });
 
-  // Build blocks: each todo → {dayIdx 0-6, startHour (float), durationHours, text, color}
+  // Build blocks: position at last session start (last "start" or "resume" event)
   const blocks = weekTodos.map(t => {
-    const st = t.timeline.find(e => e.type === "start");
-    const d = toBJ(st.at);
+    const sessionStart = [...(t.timeline || [])].reverse().find(e => e.type === "start" || e.type === "resume");
+    if (!sessionStart) return null;
+    const d = toBJ(sessionStart.at);
     const dayIdx = (d.getDay() === 0 ? 6 : d.getDay() - 1);
     const startH = d.getHours() + d.getMinutes() / 60;
     const durSec = t.actualDuration || (t.duration || 30) * 60;
     const durH = Math.max(durSec / 3600, 0.25);
     const urg = UM[t.urgency] || URG[0];
     return { dayIdx, startH, durH, text: t.text, color: urg.color, bg: urg.bg };
-  });
+  }).filter(Boolean);
 
   const ROW_H = 48;
   const COL_W = "calc((100% - 36px) / 7)";
