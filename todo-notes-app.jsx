@@ -393,18 +393,42 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
     return d >= monday && d <= sunday;
   });
 
-  // Build blocks: position at last session start (last "start" or "resume" event)
-  const blocks = weekTodos.map(t => {
-    const sessionStart = [...(t.timeline || [])].reverse().find(e => e.type === "start" || e.type === "resume");
-    if (!sessionStart) return null;
-    const d = toBJ(sessionStart.at);
-    const dayIdx = (d.getDay() === 0 ? 6 : d.getDay() - 1);
-    const startH = d.getHours() + d.getMinutes() / 60;
-    const durSec = t.actualDuration || (t.duration || 30) * 60;
-    const durH = Math.max(durSec / 3600, 0.25);
+  // Build blocks: split timeline into segments (start→pause, resume→complete, etc.)
+  const blocks = weekTodos.flatMap(t => {
+    const tl = t.timeline || [];
+    const segments = [];
+    let segStart = null;
+    for (const ev of tl) {
+      if (ev.type === "start" || ev.type === "resume") {
+        segStart = ev.at;
+      } else if ((ev.type === "pause" || ev.type === "complete") && segStart) {
+        segments.push({ startAt: segStart, endAt: ev.at });
+        segStart = null;
+      }
+    }
+    if (segments.length === 0) {
+      const last = [...tl].reverse().find(e => e.type === "start" || e.type === "resume");
+      if (!last) return [];
+      const d = toBJ(last.at);
+      const dayIdx = (d.getDay() === 0 ? 6 : d.getDay() - 1);
+      const startH = d.getHours() + d.getMinutes() / 60;
+      const durSec = t.actualDuration || (t.duration || 30) * 60;
+      const durH = Math.max(durSec / 3600, 0.25);
+      const urg = UM[t.urgency] || URG[0];
+      return [{ dayIdx, startH, durH, text: t.text, color: urg.color, bg: urg.bg }];
+    }
     const urg = UM[t.urgency] || URG[0];
-    return { dayIdx, startH, durH, text: t.text, color: urg.color, bg: urg.bg };
-  }).filter(Boolean);
+    return segments
+      .filter(seg => { const d = toBJ(seg.startAt); return d >= monday && d <= sunday; })
+      .map(seg => {
+        const d = toBJ(seg.startAt);
+        const dayIdx = (d.getDay() === 0 ? 6 : d.getDay() - 1);
+        const startH = d.getHours() + d.getMinutes() / 60;
+        const durSec = (seg.endAt - seg.startAt) / 1000;
+        const durH = Math.max(durSec / 3600, 0.25);
+        return { dayIdx, startH, durH, text: t.text, color: urg.color, bg: urg.bg };
+      });
+  });
 
   const ROW_H = 48;
   const COL_W = "calc((100% - 36px) / 7)";
