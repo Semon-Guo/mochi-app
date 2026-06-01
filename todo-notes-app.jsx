@@ -552,7 +552,7 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
           position: "relative", overflow: "hidden",
           borderBottom: "1px solid #F0EDE6",
           borderTop: isDragOver ? "2px solid #E8A838" : undefined,
-          paddingLeft: depth * 24,
+          paddingLeft: Math.min(depth, 4) * 20,
           opacity: isDragging ? 0.25 : 1,
           transition: "opacity 0.15s",
           animation: "slideUp .3s ease both",
@@ -627,23 +627,23 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
               </button>
             )}
             {/* Actions */}
-            {!depth && <button style={{ ...S.ib, color: "#CCC" }} onClick={() => { closeSwipe(); onAddSub(t.id); }} title="拆解"><Ic.Split s={14}/></button>}
-            <button style={{ ...S.ib, color: "#CCC" }} onClick={() => { closeSwipe(); setEditingTodo(t.id); setShowAdd(false); }}><Ic.Edit s={14}/></button>
+            <button style={S.actBtn} onClick={() => { closeSwipe(); onAddSub(t.id); }} title="拆解子任务"><Ic.Split s={18}/></button>
+            <button style={S.actBtn} onClick={() => { closeSwipe(); setEditingTodo(t.id); setShowAdd(false); }} title="编辑"><Ic.Edit s={18}/></button>
             {!isActive && !isPaused && (
               <button onClick={() => startTodo(t.id)} style={{
-                width: 34, height: 34, borderRadius: 10, border: "none",
+                width: 38, height: 38, borderRadius: 12, border: "none",
                 background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
                 color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
-                cursor: "pointer",
-              }}><Ic.Play s={13}/></button>
+                cursor: "pointer", flexShrink: 0,
+              }}><Ic.Play s={15}/></button>
             )}
             {isPaused && !isActive && (
               <button onClick={() => resumeTodo(t.id)} style={{
-                width: 34, height: 34, borderRadius: 10, border: "none",
+                width: 38, height: 38, borderRadius: 12, border: "none",
                 background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
                 color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
-                cursor: "pointer",
-              }}><Ic.Play s={13}/></button>
+                cursor: "pointer", flexShrink: 0,
+              }}><Ic.Play s={15}/></button>
             )}
           </div>
           {/* Active timer */}
@@ -870,7 +870,7 @@ export default function MochiApp() {
     const kids = data.todos.filter(c => c.parentId === t.id && !c.done).sort(urgSort);
     if (editingTodo === t.id) {
       return (
-        <div key={t.id} style={{ paddingLeft: depth * 24 }}>
+        <div key={t.id} style={{ paddingLeft: Math.min(depth, 4) * 20 }}>
           <TaskForm initial={t} onSave={info=>updateTodoInfo(t.id,info)} onCancel={()=>setEditingTodo(null)} isSubtask={!!t.parentId}/>
           {kids.map(c => renderTodo(c, depth + 1))}
         </div>
@@ -886,7 +886,7 @@ export default function MochiApp() {
         dragFrom={dragFrom} dragOver={dragOver} onDragStart={startDrag}>
         {kids.map(c => renderTodo(c, depth + 1))}
         {addSubParent === t.id && (
-          <div style={{ paddingLeft: (depth + 1) * 24 }}>
+          <div style={{ paddingLeft: Math.min(depth + 1, 4) * 20 }}>
             <TaskForm isSubtask onSave={info => addTodo(info, t.id)} onCancel={() => setAddSubParent(null)} />
           </div>
         )}
@@ -1197,6 +1197,7 @@ const S = {
   tabA:{background:"#2C2C2C",color:"#FFF"},
   bdg:{background:"#E8A838",color:"#FFF",fontSize:11,fontWeight:600,borderRadius:10,padding:"1px 7px",marginLeft:2},
   ib:{background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",padding:6,borderRadius:10,color:"#555"},
+  actBtn:{width:38,height:38,borderRadius:12,border:"none",background:"#F2EFE8",color:"#999",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0},
   fab:{position:"fixed",bottom:32,right:"calc(50% - 195px + 24px)",width:56,height:56,borderRadius:"50%",border:"none",background:"#2C2C2C",color:"#FFF",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",animation:"fabPulse 3s ease infinite",zIndex:100},
   empty:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:80,gap:4},
   edH:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"52px 20px 12px"},
