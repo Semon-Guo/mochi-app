@@ -470,9 +470,13 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
             {blocks.map((b,i)=>{
               const virtualH = b.startH < 9 ? b.startH + 24 : b.startH; // 0:00→24, 1:00→25, 2:00→26
               if (virtualH < 9 || virtualH >= 26) return null;
+              // Early-morning blocks render in the 24:00–26:00 zone, which is the
+              // late-night continuation of the *previous* day → shift one column left.
+              const dayIdx = b.startH < 9 ? b.dayIdx - 1 : b.dayIdx;
+              if (dayIdx < 0) return null; // belongs to previous week's Sunday
               const top = (virtualH - 9) * ROW_H;
               const height = Math.max(b.durH * ROW_H, 22);
-              const left = `calc(36px + ${b.dayIdx} * ((100% - 36px) / 7) + 2px)`;
+              const left = `calc(36px + ${dayIdx} * ((100% - 36px) / 7) + 2px)`;
               const width = `calc((100% - 36px) / 7 - 4px)`;
               return (
                 <div key={i} style={{
