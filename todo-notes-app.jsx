@@ -1,14 +1,46 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 
 const SK = "mochi_v3";
-const TIMER_SK = "mochi_timer";
+const TIMER_SK = "mochi_timer";     // legacy single-session key, migrated on first read
+const TIMERS_SK = "mochi_timers";   // { [todoId]: { startTs, baseElapsed } } — several at once
 const BG_TS_SK = "mochi_bg_ts";
 const BG_LIMIT_SEC = 5 * 60;
-function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.removeItem(BG_TS_SK); localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
-function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); localStorage.removeItem(BG_TS_SK); } catch {} }
+
+// Timer sessions live in a map so any number of tasks can run in parallel.
+function readSessions() {
+  try { const r = localStorage.getItem(TIMERS_SK); if (r) return JSON.parse(r) || {}; } catch {}
+  return {};
+}
+function writeSessions(map) { try { localStorage.setItem(TIMERS_SK, JSON.stringify(map)); } catch {} }
+function loadTimerSessions() {
+  const map = readSessions();
+  try {
+    const legacy = localStorage.getItem(TIMER_SK);
+    if (legacy) {
+      const { todoId, startTs, baseElapsed } = JSON.parse(legacy);
+      if (todoId && startTs) map[todoId] = { startTs, baseElapsed: baseElapsed || 0 };
+      localStorage.removeItem(TIMER_SK);
+      writeSessions(map);
+    }
+  } catch {}
+  return map;
+}
+function getTimerSession(todoId) { const s = readSessions()[todoId]; return s && s.startTs ? s : null; }
+function sessionElapsed(s) { return s ? (s.baseElapsed || 0) + Math.max(0, Math.floor((Date.now() - s.startTs) / 1000)) : 0; }
+function saveTimerSession(todoId, startTs, baseElapsed) {
+  const map = loadTimerSessions();
+  map[todoId] = { startTs, baseElapsed: baseElapsed || 0 };
+  writeSessions(map);
+  try { localStorage.removeItem(BG_TS_SK); } catch {}   // user is clearly here
+}
+function clearTimerSession(...todoIds) {
+  const map = loadTimerSessions();
+  todoIds.forEach(id => { delete map[id]; });
+  writeSessions(map);
+  if (!Object.keys(map).length) { try { localStorage.removeItem(BG_TS_SK); } catch {} }
+}
 function loadAll() {
   let data = { todos: [], notes: [], projects: [], experiments: [] };
-  let activeTodoId = null;
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
   data = {
     todos: (data.todos || []).map(migrateTodo),
@@ -16,16 +48,18 @@ function loadAll() {
     projects: data.projects || [],
     experiments: (data.experiments || []).map(migrateExp),
   };
-  try {
-    const s = localStorage.getItem(TIMER_SK);
-    if (s) {
-      const { todoId, startTs, baseElapsed } = JSON.parse(s);
-      const elapsedNow = baseElapsed + Math.floor((Date.now() - startTs) / 1000);
-      data = { ...data, todos: data.todos.map(t => t.id === todoId ? { ...t, elapsed: elapsedNow } : t) };
-      activeTodoId = todoId;
-    }
-  } catch {}
-  return { data, activeTodoId };
+  // Every live session keeps counting while the app is closed — fold the time back in,
+  // and drop sessions whose task is gone or already finished.
+  const sessions = loadTimerSessions();
+  const alive = new Set(data.todos.filter(t => !t.done).map(t => t.id));
+  const stale = Object.keys(sessions).filter(id => !alive.has(id));
+  if (stale.length) { stale.forEach(id => { delete sessions[id]; }); writeSessions(sessions); }
+  const activeTodoIds = Object.keys(sessions);
+  if (activeTodoIds.length) {
+    data = { ...data, todos: data.todos.map(t =>
+      sessions[t.id] ? { ...t, elapsed: sessionElapsed(sessions[t.id]) } : t) };
+  }
+  return { data, activeTodoIds };
 }
 function save(d) { try { localStorage.setItem(SK, JSON.stringify(d)); } catch {} }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -244,137 +278,30 @@ const Ic = {
 };
 
 /* ── Focus Timer ── */
-function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
-  const [elapsed, setElapsed] = useState(() => {
-    try {
-      const s = localStorage.getItem(TIMER_SK);
-      if (s) {
-        const { todoId, startTs, baseElapsed } = JSON.parse(s);
-        if (todoId === todo.id) return baseElapsed + Math.floor((Date.now() - startTs) / 1000);
-      }
-    } catch {}
-    return todo.elapsed || 0;
-  });
-  const [running, setRunning] = useState(true);
-  const [bgAlert, setBgAlert] = useState(null); // { hiddenSec }
-  const iv = useRef(null);
-  const stRef = useRef(Date.now());
-  const base = useRef(todo.elapsed || 0);
-  const startTs = todo.timeline?.find(e => e.type === "start")?.at || Date.now();
+// Elapsed is always derived from the task's own stored session ({startTs, baseElapsed}),
+// so several timers can run side by side and none of them drifts while backgrounded.
+function FocusTimer({ todo, frozen, onComplete, onPause }) {
+  const read = () => {
+    const s = getTimerSession(todo.id);
+    return s ? sessionElapsed(s) : (todo.elapsed || 0);
+  };
+  const [elapsed, setElapsed] = useState(read);
 
   useEffect(() => {
-    stRef.current = Date.now();
-    base.current = elapsed;
-    iv.current = setInterval(() => {
-      setElapsed(base.current + Math.floor((Date.now() - stRef.current) / 1000));
-    }, 250);
-
-    // iOS kills the page when backgrounded too long — check on mount too
-    try {
-      const bgTs = localStorage.getItem(BG_TS_SK);
-      if (bgTs) {
-        const hiddenSec = Math.floor((Date.now() - parseInt(bgTs, 10)) / 1000);
-        localStorage.removeItem(BG_TS_SK);
-        if (hiddenSec > BG_LIMIT_SEC) {
-          clearInterval(iv.current);
-          setBgAlert({ hiddenSec });
-        }
-      }
-    } catch {}
-
-    return () => { if (iv.current) clearInterval(iv.current); };
-  }, []);
-
-  // Track background time; cancel session if away > BG_LIMIT_SEC
-  useEffect(() => {
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') {
-        try { localStorage.setItem(BG_TS_SK, Date.now().toString()); } catch {}
-        return;
-      }
-      if (document.visibilityState !== 'visible') return;
-
-      // Check how long app was in background
-      try {
-        const bgTs = localStorage.getItem(BG_TS_SK);
-        if (bgTs) {
-          const hiddenSec = Math.floor((Date.now() - parseInt(bgTs, 10)) / 1000);
-          localStorage.removeItem(BG_TS_SK);
-          if (hiddenSec > BG_LIMIT_SEC) {
-            if (iv.current) clearInterval(iv.current);
-            setBgAlert({ hiddenSec });
-            return;
-          }
-        }
-      } catch {}
-
-      // Normal re-sync after short background
-      try {
-        const s = localStorage.getItem(TIMER_SK);
-        if (!s) return;
-        const { todoId, startTs, baseElapsed } = JSON.parse(s);
-        if (todoId !== todo.id) return;
-        const restoredElapsed = baseElapsed + Math.floor((Date.now() - startTs) / 1000);
-        base.current = restoredElapsed;
-        stRef.current = Date.now();
-        setElapsed(restoredElapsed);
-      } catch {}
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [todo.id]);
-
-  const doResumeFocus = () => {
-    try {
-      const s = localStorage.getItem(TIMER_SK);
-      if (s) {
-        const { todoId, startTs: savedTs, baseElapsed } = JSON.parse(s);
-        if (todoId === todo.id) {
-          const restoredElapsed = baseElapsed + Math.floor((Date.now() - savedTs) / 1000);
-          base.current = restoredElapsed;
-          stRef.current = Date.now();
-          setElapsed(restoredElapsed);
-        }
-      }
-    } catch {}
-    iv.current = setInterval(() => {
-      setElapsed(base.current + Math.floor((Date.now() - stRef.current) / 1000));
-    }, 250);
-    setBgAlert(null);
-  };
-
-  const doCancelFocus = () => {
-    setBgAlert(null);
-    onCancel();
-  };
-
-  const doPause = () => {
-    setRunning(false);
-    if (iv.current) clearInterval(iv.current);
-    const cur = base.current + Math.floor((Date.now() - stRef.current) / 1000);
-    setElapsed(cur);
-    onPause(cur);
-  };
-
-  const doResume = () => {
-    setRunning(true);
-    stRef.current = Date.now();
-    base.current = elapsed;
-    iv.current = setInterval(() => {
-      setElapsed(base.current + Math.floor((Date.now() - stRef.current) / 1000));
-    }, 250);
-    onUpdate("resume");
-  };
-
-  const doFinish = () => {
-    if (iv.current) clearInterval(iv.current);
-    const cur = base.current + Math.floor((Date.now() - stRef.current) / 1000);
-    onComplete(running ? cur : elapsed);
-  };
+    if (frozen) return;                      // "you were away" dialog is up — hold the clock
+    setElapsed(read());
+    const iv = setInterval(() => setElapsed(read()), 250);
+    const onVis = () => { if (document.visibilityState === "visible") setElapsed(read()); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, [frozen, todo.id]);
 
   const imp = impOf(todo);
   const expected = (todo.duration || 30) * 60;
   const isOver = elapsed > expected;
+  const startTs = getTimerSession(todo.id)?.startTs
+    || [...(todo.timeline || [])].reverse().find(e => e.type === "start" || e.type === "resume")?.at
+    || Date.now();
 
   return (
     <div style={{ padding: "14px 0 8px", animation: "slideUp .3s ease both" }}>
@@ -407,69 +334,74 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
       <div style={{ display: "flex", justifyContent: "center", gap: 16, fontSize: 12, color: "#AAA", marginBottom: 16 }}>
         <span>目标 {fmtMin(todo.duration)}</span>
         {isOver && <span style={{ color: "#3BA55C", fontWeight: 600 }}>+{fmtSec(elapsed - expected)}</span>}
-        {!running && <span style={{ color: "#E8A838", fontWeight: 600 }}>⏸ 已暂停</span>}
       </div>
 
       {/* Controls */}
       <div style={{ display: "flex", gap: 10 }}>
-        {running ? (
-          <button onClick={doPause} style={{
-            flex: 1, padding: "14px 0", borderRadius: 16, border: `2px solid ${imp.ring}`,
-            background: "#FFF", color: imp.color, fontSize: 15, fontWeight: 600,
-            fontFamily: "inherit", cursor: "pointer", display: "flex", alignItems: "center",
-            justifyContent: "center", gap: 8,
-          }}><Ic.Pause s={16}/> 暂停</button>
-        ) : (
-          <button onClick={doResume} style={{
-            flex: 1, padding: "14px 0", borderRadius: 16, border: "none",
-            background: `linear-gradient(135deg, ${imp.color}, ${imp.color}dd)`, color: "#FFF",
-            fontSize: 15, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            boxShadow: `0 4px 16px ${imp.color}44`,
-          }}><Ic.Play s={16}/> 恢复</button>
-        )}
-        <button onClick={doFinish} style={{
+        <button onClick={() => onPause(read())} style={{
+          flex: 1, padding: "14px 0", borderRadius: 16, border: `2px solid ${imp.ring}`,
+          background: "#FFF", color: imp.color, fontSize: 15, fontWeight: 600,
+          fontFamily: "inherit", cursor: "pointer", display: "flex", alignItems: "center",
+          justifyContent: "center", gap: 8,
+        }}><Ic.Pause s={16}/> 暂停</button>
+        <button onClick={() => onComplete(read())} style={{
           flex: 1, padding: "14px 0", borderRadius: 16, border: "none",
           background: "#2C2C2C", color: "#FFF", fontSize: 15, fontWeight: 600,
           fontFamily: "inherit", cursor: "pointer", display: "flex", alignItems: "center",
           justifyContent: "center", gap: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
         }}><Ic.Check s={16}/> 完成</button>
       </div>
+    </div>
+  );
+}
 
-      {/* Background alert dialog */}
-      {bgAlert && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 9999,
-          background: "rgba(0,0,0,0.45)", display: "flex",
-          alignItems: "center", justifyContent: "center", padding: "0 32px",
-        }}>
-          <div style={{
-            background: "#FDFBF7", borderRadius: 24, padding: "28px 24px",
-            width: "100%", maxWidth: 340, boxShadow: "0 24px 64px rgba(0,0,0,0.2)",
-            animation: "slideUp .25s ease both",
-          }}>
-            <div style={{ fontSize: 36, textAlign: "center", marginBottom: 12 }}>📵</div>
-            <div style={{ fontSize: 17, fontWeight: 700, textAlign: "center", marginBottom: 8 }}>
-              你离开了 {Math.round(bgAlert.hiddenSec / 60)} 分钟
-            </div>
-            <div style={{ fontSize: 14, color: "#888", textAlign: "center", marginBottom: 24, lineHeight: 1.6 }}>
-              是锁屏专注，还是在玩手机？
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <button onClick={doResumeFocus} style={{
-                padding: "14px 0", borderRadius: 16, border: "none",
-                background: "#2C2C2C", color: "#FFF", fontSize: 15, fontWeight: 600,
-                fontFamily: "inherit", cursor: "pointer",
-              }}>🔒 锁屏专注，继续计时</button>
-              <button onClick={doCancelFocus} style={{
-                padding: "14px 0", borderRadius: 16, border: "2px solid #F0EDE6",
-                background: "#FFF", color: "#C02556", fontSize: 15, fontWeight: 600,
-                fontFamily: "inherit", cursor: "pointer",
-              }}>📱 在玩手机，取消本次</button>
-            </div>
-          </div>
+/* ── Running tasks bar — every parallel timer at a glance ── */
+function RunningBar({ ids, todos, onOpen, onPauseAll }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const iv = setInterval(() => tick(n => n + 1), 500); return () => clearInterval(iv); }, []);
+  const items = ids.map(id => todos.find(t => t.id === id)).filter(Boolean);
+  if (!items.length) return null;
+  return (
+    <div style={{
+      position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
+      width: "100%", maxWidth: 430, zIndex: 99, pointerEvents: "none",
+      padding: "0 24px calc(env(safe-area-inset-bottom, 0px) + 26px)",
+    }}>
+      <div style={{
+        pointerEvents: "auto", marginRight: 68,
+        background: "linear-gradient(140deg,#302B26,#1B1917)", borderRadius: 18,
+        boxShadow: "0 12px 34px rgba(0,0,0,0.28)", padding: "9px 10px 9px 12px",
+        display: "flex", alignItems: "center", gap: 8,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+          <span className="run-pulse" style={{ width: 7, height: 7, borderRadius: "50%", background: "#5A9E4B" }}/>
+          <span style={{ fontSize: 11, color: "#8A8480", fontWeight: 600 }}>{items.length}个</span>
         </div>
-      )}
+        <div className="run-strip" style={{ display: "flex", gap: 6, overflowX: "auto", flex: 1, minWidth: 0, scrollbarWidth: "none" }}>
+          {items.map(t => {
+            const imp = impOf(t);
+            const s = getTimerSession(t.id);
+            return (
+              <button key={t.id} onClick={() => onOpen(t.id)} style={{
+                flexShrink: 0, display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+                background: hexA(imp.color, 0.16), border: `1px solid ${hexA(imp.color, 0.3)}`,
+                borderRadius: 11, padding: "5px 9px", fontFamily: "inherit", maxWidth: 168,
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: imp.color, flexShrink: 0 }}/>
+                <span style={{ fontSize: 11.5, color: "#EDE8E2", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.text}</span>
+                <span style={{ fontSize: 11.5, color: "#FFF", fontWeight: 700, fontFamily: MONO, flexShrink: 0 }}>{fmtSec(sessionElapsed(s))}</span>
+              </button>
+            );
+          })}
+        </div>
+        {items.length > 1 && (
+          <button onClick={onPauseAll} style={{
+            flexShrink: 0, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.14)",
+            borderRadius: 11, padding: "6px 9px", color: "#CFC9C3", fontSize: 11, fontWeight: 600,
+            cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
+          }}><Ic.Pause s={11}/>全部</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -717,6 +649,38 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
       });
   });
 
+  // Tasks can be timed in parallel, so blocks overlap. Give each cluster of
+  // overlapping blocks its own set of lanes and split the column between them.
+  const laid = blocks.map(b => {
+    // Early-morning blocks render in the 24:00–26:00 zone — the late-night
+    // continuation of the *previous* day → one column left.
+    const vh = b.startH < 9 ? b.startH + 24 : b.startH;
+    return { ...b, vh, col: b.startH < 9 ? b.dayIdx - 1 : b.dayIdx, lane: 0, lanes: 1 };
+  }).filter(b => b.col >= 0 && b.vh >= 9 && b.vh < 26);
+
+  const byCol = {};
+  laid.forEach(b => { (byCol[b.col] = byCol[b.col] || []).push(b); });
+  Object.values(byCol).forEach(list => {
+    list.sort((a, b) => a.vh - b.vh);
+    let cluster = [], laneEnds = [], clusterEnd = -Infinity;
+    const flush = () => {
+      const n = Math.max(laneEnds.length, 1);
+      cluster.forEach(b => { b.lanes = n; });
+      cluster = []; laneEnds = []; clusterEnd = -Infinity;
+    };
+    list.forEach(b => {
+      if (b.vh >= clusterEnd) flush();            // no overlap with the cluster so far
+      let lane = laneEnds.findIndex(end => end <= b.vh);
+      if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
+      const end = b.vh + b.durH;
+      laneEnds[lane] = end;
+      b.lane = lane;
+      cluster.push(b);
+      clusterEnd = Math.max(clusterEnd, end);
+    });
+    flush();
+  });
+
   const ROW_H = 48;
   const COL_W = "calc((100% - 36px) / 7)";
 
@@ -754,20 +718,16 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
             ))}
 
             {/* Task blocks */}
-            {blocks.map((b,i)=>{
-              const virtualH = b.startH < 9 ? b.startH + 24 : b.startH; // 0:00→24, 1:00→25, 2:00→26
-              if (virtualH < 9 || virtualH >= 26) return null;
-              // Early-morning blocks render in the 24:00–26:00 zone, which is the
-              // late-night continuation of the *previous* day → shift one column left.
-              const dayIdx = b.startH < 9 ? b.dayIdx - 1 : b.dayIdx;
-              if (dayIdx < 0) return null; // belongs to previous week's Sunday
-              const top = (virtualH - 9) * ROW_H;
+            {laid.map((b,i)=>{
+              const top = (b.vh - 9) * ROW_H;
               const height = Math.max(b.durH * ROW_H, 22);
-              const left = `calc(36px + ${dayIdx} * ((100% - 36px) / 7) + 2px)`;
-              const width = `calc((100% - 36px) / 7 - 4px)`;
+              // Overlapping (parallel) blocks share the column, side by side.
+              const slot = `((100% - 36px) / 7 - 4px) / ${b.lanes}`;
+              const left = `calc(36px + ${b.col} * ((100% - 36px) / 7) + 2px + ${b.lane} * (${slot}))`;
+              const width = `calc(${slot} - ${b.lanes > 1 ? 2 : 0}px)`;
               return (
                 <div key={i} style={{
-                  position:"absolute", top, left, width, height: Math.min(height, (26 - virtualH) * ROW_H),
+                  position:"absolute", top, left, width, height: Math.min(height, (26 - b.vh) * ROW_H),
                   background: `linear-gradient(135deg, ${b.color}ee, ${b.color}bb)`,
                   borderRadius: 6, padding: "3px 5px", overflow: "hidden",
                   fontSize: 10, fontWeight: 600, color: "#FFF", lineHeight: 1.3,
@@ -775,7 +735,7 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
                   cursor: "default",
                 }}>
                   <div style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{b.text}</div>
-                  {height > 28 && <div style={{ fontSize: 9, opacity: 0.8, marginTop: 1 }}>{Math.round(b.durH * 60)}m</div>}
+                  {height > 28 && b.lanes === 1 && <div style={{ fontSize: 9, opacity: 0.8, marginTop: 1 }}>{Math.round(b.durH * 60)}m</div>}
                 </div>
               );
             })}
@@ -787,14 +747,14 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
 }
 
 /* ── Todo Item Row (reusable for parent & child) ── */
-function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowAdd,
+function TodoRow({ t, depth, activeIds, timersFrozen, setEditingTodo, setShowAdd,
   deleteTodo, startTodo, onAddSub, expandedIds, toggleExpand, children: subs, allTodos,
-  completeTodo, pauseTodo, resumeTodo, cancelTodo, updateElapsed, dragFrom, dragOver, onDragStart, onRemind }) {
+  completeTodo, pauseTodo, resumeTodo, dragFrom, dragOver, onDragStart, onRemind }) {
   const imp = impOf(t);
   const rem = t.remind || null;
   const lit = !!rem;                            // reminder on → row carries the flowing light
   const hot = lit && rem.fired && !rem.ack;     // fired and not acknowledged → faster, brighter
-  const isActive = activeTodo === t.id;
+  const isActive = activeIds.has(t.id);
   const kidTodos = allTodos.filter(c => c.parentId === t.id);
   const hasKids = kidTodos.length > 0;
   const expanded = expandedIds.has(t.id);
@@ -982,10 +942,9 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
           {isActive && (<div style={{ position: "relative", zIndex: 1 }}>
             <FocusTimer
               todo={t}
+              frozen={timersFrozen}
               onComplete={el => completeTodo(t.id, el)}
               onPause={el => pauseTodo(t.id, el)}
-              onUpdate={type => { if (type === "resume") resumeTodo(t.id); }}
-              onCancel={() => cancelTodo(t.id)}
             />
           </div>)}
         </div>
@@ -1211,7 +1170,8 @@ export default function MochiApp() {
   const [showAdd, setShowAdd] = useState(false);
   const [addSubParent, setAddSubParent] = useState(null);
   const [editingTodo, setEditingTodo] = useState(null);
-  const [activeTodo, setActiveTodo] = useState(initState.activeTodoId);
+  const [activeIds, setActiveIds] = useState(() => new Set(initState.activeTodoIds));
+  const [bgAlert, setBgAlert] = useState(null); // { hiddenSec } — away too long while timers ran
   const [view, setView] = useState("main"); // main | done | timetable
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [weekOffset, setWeekOffset] = useState(0);
@@ -1237,15 +1197,41 @@ export default function MochiApp() {
   const dragYRef = useRef(0);
   const ntRef = useRef(null);
   const todosRef = useRef(initState.data.todos);
+  const activeRef = useRef(new Set(initState.activeTodoIds));
   const firedRef = useRef(new Set());
 
   useEffect(() => { save(data); }, [data]);
   useEffect(() => { todosRef.current = data.todos; }, [data.todos]);
+  useEffect(() => { activeRef.current = activeIds; }, [activeIds]);
   useEffect(() => {
     if (!openExp) return;
     const t = setTimeout(() => window.scrollTo({ top: document.body.scrollHeight }), 60);
     return () => clearTimeout(t);
   }, [openExp]);
+
+  // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
+  // backgrounded PWA, so on return we ask whether the gap was real focus or a detour.
+  useEffect(() => {
+    const checkAway = () => {
+      try {
+        const bg = localStorage.getItem(BG_TS_SK);
+        if (!bg) return;
+        localStorage.removeItem(BG_TS_SK);
+        const hiddenSec = Math.floor((Date.now() - parseInt(bg, 10)) / 1000);
+        if (hiddenSec > BG_LIMIT_SEC && activeRef.current.size) setBgAlert({ hiddenSec });
+      } catch {}
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") {
+        if (activeRef.current.size) { try { localStorage.setItem(BG_TS_SK, Date.now().toString()); } catch {} }
+        return;
+      }
+      if (document.visibilityState === "visible") checkAway();
+    };
+    checkAway();   // app may have been killed outright and relaunched
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
 
   // Reminder scheduler — polls while the app is alive, and re-checks whenever it
   // comes back to the foreground (a backgrounded PWA gets its timers frozen).
@@ -1383,7 +1369,12 @@ export default function MochiApp() {
 
   const updateTodoInfo = (id, info) => { setData(d => ({ ...d, todos: d.todos.map(t => t.id===id?{...t,...info}:t) })); setEditingTodo(null); };
 
+  // Timers run in parallel: starting one never stops the others.
+  const addActive = (id) => setActiveIds(s => { const n = new Set(s); n.add(id); return n; });
+  const dropActive = (ids) => setActiveIds(s => { const n = new Set(s); ids.forEach(i => n.delete(i)); return n; });
+
   const startTodo = (id) => {
+    if (activeIds.has(id)) return;
     const todo = data.todos.find(t => t.id === id);
     saveTimerSession(id, Date.now(), todo?.elapsed || 0);
     setData(d => ({ ...d, todos: d.todos.map(t => {
@@ -1391,20 +1382,37 @@ export default function MochiApp() {
       const tl = [...(t.timeline||[]), { type: "start", at: Date.now() }];
       return { ...t, timeline: tl };
     })}));
-    setActiveTodo(id);
+    addActive(id);
   };
 
   const pauseTodo = (id, elapsed) => {
-    clearTimerSession();
+    clearTimerSession(id);
     setData(d => ({ ...d, todos: d.todos.map(t => {
       if (t.id !== id) return t;
       const tl = [...(t.timeline||[]), { type: "pause", at: Date.now() }];
       return { ...t, timeline: tl, elapsed };
     })}));
-    setActiveTodo(null);
+    dropActive([id]);
+  };
+
+  // Pause every running task at once — one timeline event and one write each.
+  const pauseAll = () => {
+    const ids = [...activeIds];
+    if (!ids.length) return;
+    const at = Date.now();
+    const stops = {};
+    ids.forEach(id => { const s = getTimerSession(id); stops[id] = s ? sessionElapsed(s) : null; });
+    clearTimerSession(...ids);
+    setData(d => ({ ...d, todos: d.todos.map(t => {
+      if (!(t.id in stops)) return t;
+      const tl = [...(t.timeline||[]), { type: "pause", at }];
+      return { ...t, timeline: tl, elapsed: stops[t.id] != null ? stops[t.id] : (t.elapsed || 0) };
+    })}));
+    dropActive(ids);
   };
 
   const resumeTodo = (id) => {
+    if (activeIds.has(id)) return;
     const todo = data.todos.find(t => t.id === id);
     saveTimerSession(id, Date.now(), todo?.elapsed || 0);
     setData(d => ({ ...d, todos: d.todos.map(t => {
@@ -1412,47 +1420,45 @@ export default function MochiApp() {
       const tl = [...(t.timeline||[]), { type: "resume", at: Date.now() }];
       return { ...t, timeline: tl };
     })}));
-    setActiveTodo(id);
+    addActive(id);
   };
 
   const CHEERS = ["干得漂亮！🔥","太强了！💪","完美收工！✨","效率拉满！🚀","又搞定一个！🎯","你就是传说！⚡","节奏起来了！🎶","无人能挡！💥"];
   const completeTodo = (id, elapsed) => {
-    clearTimerSession();
+    clearTimerSession(id);
     setData(d => ({ ...d, todos: d.todos.map(t => {
       if (t.id !== id) return t;
       const tl = [...(t.timeline||[]), { type: "complete", at: Date.now() }];
       return { ...t, done: true, elapsed, actualDuration: elapsed, doneTs: Date.now(), timeline: tl };
     })}));
-    setActiveTodo(null);
+    dropActive([id]);
     setCelebration({ msg: CHEERS[Math.floor(Math.random()*CHEERS.length)], elapsed });
     setTimeout(() => setCelebration(null), 2200);
   };
 
   const deleteTodo = (id) => {
+    const gone = [id, ...data.todos.filter(t => t.parentId === id).map(t => t.id)];
+    clearTimerSession(...gone);
     setData(d => ({ ...d, todos: d.todos.filter(t => t.id !== id && t.parentId !== id) }));
-    if (activeTodo === id) setActiveTodo(null);
+    dropActive(gone);
   };
 
-  const cancelTodo = (id) => {
-    // Restore elapsed to what it was before this session (baseElapsed from saved session)
-    let preSessionElapsed = 0;
-    try {
-      const s = localStorage.getItem(TIMER_SK);
-      if (s) {
-        const { todoId, baseElapsed } = JSON.parse(s);
-        if (todoId === id) preSessionElapsed = baseElapsed;
-      }
-    } catch {}
-    clearTimerSession();
+  // Discard the current session(s) — used when the away-time check says "我在玩手机".
+  const cancelTodos = (ids) => {
+    if (!ids.length) return;
+    // Roll elapsed back to what it was before each session started
+    const before = {};
+    ids.forEach(id => { const s = getTimerSession(id); before[id] = s ? (s.baseElapsed || 0) : 0; });
+    clearTimerSession(...ids);
     setData(d => ({ ...d, todos: d.todos.map(t => {
-      if (t.id !== id) return t;
-      // Strip the last start event so timeline stays clean
+      if (!(t.id in before)) return t;
+      // Strip the last start/resume event so the timeline stays clean
       const tl = [...(t.timeline || [])];
-      const lastStartIdx = [...tl].map(e => e.type).lastIndexOf("start");
-      if (lastStartIdx >= 0) tl.splice(lastStartIdx, 1);
-      return { ...t, elapsed: preSessionElapsed, timeline: tl };
+      const lastIdx = tl.map(e => e.type).reduce((acc, ty, i) => (ty === "start" || ty === "resume") ? i : acc, -1);
+      if (lastIdx >= 0) tl.splice(lastIdx, 1);
+      return { ...t, elapsed: before[t.id], timeline: tl };
     })}));
-    setActiveTodo(null);
+    dropActive(ids);
     setCanceledTimer(true);
     setTimeout(() => setCanceledTimer(false), 3000);
   };
@@ -1572,12 +1578,11 @@ export default function MochiApp() {
       );
     }
     return (
-      <TodoRow key={t.id} t={t} depth={depth} activeTodo={activeTodo} setActiveTodo={setActiveTodo}
+      <TodoRow key={t.id} t={t} depth={depth} activeIds={activeIds} timersFrozen={!!bgAlert}
         setEditingTodo={setEditingTodo} setShowAdd={setShowAdd} deleteTodo={deleteTodo}
         startTodo={startTodo} onAddSub={id => { setAddSubParent(id); setShowAdd(false); setEditingTodo(null); setExpandedIds(s => { const n = new Set(s); n.add(id); return n; }); }}
         expandedIds={expandedIds} toggleExpand={toggleExpand} allTodos={data.todos}
-        completeTodo={completeTodo} pauseTodo={pauseTodo} resumeTodo={resumeTodo} cancelTodo={cancelTodo}
-        updateElapsed={(id,e) => setData(d=>({...d,todos:d.todos.map(x=>x.id===id?{...x,elapsed:e}:x)}))}
+        completeTodo={completeTodo} pauseTodo={pauseTodo} resumeTodo={resumeTodo}
         dragFrom={dragFrom} dragOver={dragOver} onDragStart={startDrag} onRemind={setRemindFor}>
         {kids.map(c => renderTodo(c, depth + 1))}
         {addSubParent === t.id && (
@@ -1588,6 +1593,76 @@ export default function MochiApp() {
       </TodoRow>
     );
   };
+
+  // ── Running-timer overlays (rendered by every view) ──
+  // Jump to a running task from the bar: back to the list, parents unfolded, scrolled into view.
+  const revealTodo = (id) => {
+    setView("main"); setTab("todo"); setOpenProject(null); setOpenExp(null);
+    setExpandedIds(s => {
+      const n = new Set(s);
+      let cur = data.todos.find(t => t.id === id);
+      while (cur?.parentId) { n.add(cur.parentId); cur = data.todos.find(t => t.id === cur.parentId); }
+      return n;
+    });
+    setTimeout(() => {
+      document.querySelector(`[data-todo-id="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 60);
+  };
+  const awayTodos = bgAlert ? [...activeIds].map(id => data.todos.find(t => t.id === id)).filter(Boolean) : [];
+  const timerUI = (
+    <>
+      {!openExp && (
+        <RunningBar ids={[...activeIds]} todos={data.todos} onOpen={revealTodo} onPauseAll={pauseAll} />
+      )}
+      {bgAlert && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(0,0,0,0.45)", display: "flex",
+          alignItems: "center", justifyContent: "center", padding: "0 32px",
+        }}>
+          <div style={{
+            background: "#FDFBF7", borderRadius: 24, padding: "28px 24px",
+            width: "100%", maxWidth: 340, boxShadow: "0 24px 64px rgba(0,0,0,0.2)",
+            animation: "slideUp .25s ease both",
+          }}>
+            <div style={{ fontSize: 36, textAlign: "center", marginBottom: 12 }}>📵</div>
+            <div style={{ fontSize: 17, fontWeight: 700, textAlign: "center", marginBottom: 8 }}>
+              你离开了 {Math.round(bgAlert.hiddenSec / 60)} 分钟
+            </div>
+            <div style={{ fontSize: 14, color: "#888", textAlign: "center", marginBottom: 16, lineHeight: 1.6 }}>
+              {awayTodos.length > 1 ? `${awayTodos.length} 个任务还在计时 — 是锁屏专注，还是在玩手机？` : "是锁屏专注，还是在玩手机？"}
+            </div>
+            {awayTodos.length > 1 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center", marginBottom: 18 }}>
+                {awayTodos.map(t => {
+                  const imp = impOf(t);
+                  return (
+                    <span key={t.id} style={{
+                      fontSize: 11, fontWeight: 600, color: imp.color, background: imp.bg,
+                      border: `1px solid ${hexA(imp.color, 0.22)}`, borderRadius: 8, padding: "4px 9px",
+                      maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>{t.text}</span>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <button onClick={() => setBgAlert(null)} style={{
+                padding: "14px 0", borderRadius: 16, border: "none",
+                background: "#2C2C2C", color: "#FFF", fontSize: 15, fontWeight: 600,
+                fontFamily: "inherit", cursor: "pointer",
+              }}>🔒 锁屏专注，继续计时</button>
+              <button onClick={() => { cancelTodos([...activeIds]); setBgAlert(null); }} style={{
+                padding: "14px 0", borderRadius: 16, border: "2px solid #F0EDE6",
+                background: "#FFF", color: "#C02556", fontSize: 15, fontWeight: 600,
+                fontFamily: "inherit", cursor: "pointer",
+              }}>📱 在玩手机，取消{awayTodos.length > 1 ? "这些" : "本次"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   // ── Reminder overlays (rendered by every view) ──
   const alertTodo = remindAlert ? data.todos.find(t => t.id === remindAlert) : null;
@@ -1623,7 +1698,7 @@ export default function MochiApp() {
               <div style={{ display:"flex", gap:8, marginTop:12 }}>
                 <button onClick={()=>{
                   ackRemind(alertTodo.id); setView("main"); setTab("todo");
-                  if (activeTodo !== alertTodo.id) startTodo(alertTodo.id);
+                  startTodo(alertTodo.id);
                 }} style={{
                   flex:1.3, padding:"11px 0", borderRadius:13, border:"none",
                   background:`linear-gradient(135deg, ${alertImp.color}, ${alertImp.color}cc)`, color:"#FFF",
@@ -1671,7 +1746,8 @@ export default function MochiApp() {
           <div style={{ padding:"0 24px" }}>
             <ExpForm initial={ex} project={pr} onSave={saveExp} onCancel={()=>setExpForm(null)}/>
           </div>
-          {remindUI}
+          {timerUI}
+      {remindUI}
           <style>{CSS}</style>
         </div>
       );
@@ -1797,7 +1873,8 @@ export default function MochiApp() {
             : <button onClick={()=>addEntry(ex.id, "")} style={{ ...S.mini, padding:"10px 14px", fontSize:12.5, borderRadius:12 }}>打点</button>}
         </div>
 
-        {remindUI}
+        {timerUI}
+      {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -1821,7 +1898,8 @@ export default function MochiApp() {
           <div style={{ padding:"0 24px" }}>
             <ProjectForm initial={pr} onSave={saveProject} onCancel={()=>setProjForm(null)}/>
           </div>
-          {remindUI}
+          {timerUI}
+      {remindUI}
           <style>{CSS}</style>
         </div>
       );
@@ -1917,7 +1995,8 @@ export default function MochiApp() {
         </div>
 
         <button onClick={()=>setExpForm("new")} style={S.fab}><Ic.Plus s={26}/></button>
-        {remindUI}
+        {timerUI}
+      {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -1937,7 +2016,8 @@ export default function MochiApp() {
           <input ref={ntRef} style={{...S.neT,color:n.color.accent}} placeholder="标题" value={n.title} onChange={e=>updateNote(n.id,"title",e.target.value)} />
           <textarea style={S.neB} placeholder="写点什么..." value={n.body} onChange={e=>updateNote(n.id,"body",e.target.value)} />
         </div>
-        {remindUI}
+        {timerUI}
+      {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -2020,7 +2100,8 @@ export default function MochiApp() {
             </>
           )}
         </div>
-        {remindUI}
+        {timerUI}
+      {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -2206,7 +2287,7 @@ export default function MochiApp() {
           boxShadow: "0 8px 32px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
           animation: "slideUp .3s ease both",
         }}>
-          📵 离开超过5分钟，本次专注已取消
+          📵 离开超过5分钟，本次计时已取消
         </div>
       )}
 
@@ -2238,6 +2319,7 @@ export default function MochiApp() {
         );
       })()}
 
+      {timerUI}
       {remindUI}
 
       <style>{CSS}</style>
@@ -2251,6 +2333,9 @@ const CSS = `
   @keyframes slideUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
   @keyframes popIn { from{opacity:0;transform:scale(.92)} to{opacity:1;transform:scale(1)} }
   @keyframes fabPulse { 0%,100%{box-shadow:0 4px 20px rgba(51,51,51,.25)} 50%{box-shadow:0 4px 30px rgba(51,51,51,.4)} }
+  @keyframes runPulse { 0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(90,158,75,.55)} 50%{opacity:.65;box-shadow:0 0 0 5px rgba(90,158,75,0)} }
+  .run-pulse { animation: runPulse 1.8s ease-in-out infinite; }
+  .run-strip::-webkit-scrollbar { display:none; }
   @keyframes confettiFall {
     0% { opacity:1; transform:translateY(0) translateX(0) rotate(0deg) scale(0.5); }
     20% { opacity:1; transform:translateY(20vh) translateX(var(--drift)) rotate(180deg) scale(1); }
