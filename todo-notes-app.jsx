@@ -40,14 +40,15 @@ function clearTimerSession(...todoIds) {
   if (!Object.keys(map).length) { try { localStorage.removeItem(BG_TS_SK); } catch {} }
 }
 function loadAll() {
-  let data = { todos: [], notes: [], projects: [], experiments: [] };
+  let data = { todos: [], notes: [], projects: [], records: [] };
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
-  data = {
+  data = migrateLab({
     todos: (data.todos || []).map(migrateTodo),
     notes: data.notes || [],
     projects: data.projects || [],
-    experiments: (data.experiments || []).map(migrateExp),
-  };
+    experiments: data.experiments || [],
+    records: data.records || [],
+  });
   // Every live session keeps counting while the app is closed — fold the time back in,
   // and drop sessions whose task is gone or already finished.
   const sessions = loadTimerSessions();
@@ -61,7 +62,11 @@ function loadAll() {
   }
   return { data, activeTodoIds };
 }
-function save(d) { try { localStorage.setItem(SK, JSON.stringify(d)); } catch {} }
+let saveFailed = null;   // 写失败要能被看见，不能静默吞掉
+function save(d) {
+  try { localStorage.setItem(SK, JSON.stringify(d)); saveFailed = null; }
+  catch (e) { saveFailed = e?.name === "QuotaExceededError" ? "存储写满了，这次改动没保存" : "保存失败"; }
+}
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
 // Beijing time helpers
@@ -92,6 +97,95 @@ function hexA(hex, a) {
   const h = hex.replace("#","");
   const n = parseInt(h.length === 3 ? h.split("").map(c=>c+c).join("") : h, 16);
   return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+}
+
+const NC = [
+  {bg:"#FFF8E7",accent:"#E8A838"},{bg:"#F0F7EE",accent:"#5A9E4B"},
+  {bg:"#EEF2FA",accent:"#5B7FC7"},{bg:"#FBF0F0",accent:"#D4696A"},
+  {bg:"#F5F0FA",accent:"#8B6AAF"},{bg:"#F0F8F8",accent:"#4A9A96"},
+];
+
+const WDAYS = ["周一","周二","周三","周四","周五","周六","周日"];
+const HOURS = Array.from({length:17},(_,i)=>i+9); // 9:00~25:00 (24=0:00, 25=1:00 next day)
+
+const MONO = "'JetBrains Mono','SF Mono','Courier New',monospace";
+
+/* ── 记录本 ──────────────────────────────────────────────────────────
+   一个项目 = 一叠记录。一条记录 = 日期 + 天气 + 正文 + 照片，跟纸本子一页一样。 */
+const WEATHER = ["☀️ 晴", "⛅ 多云", "☁️ 阴", "🌧 雨", "⛈ 雷雨", "❄️ 雪"];
+
+/* 照片存 IndexedDB（按磁盘算容量），localStorage 只留 id —— 一张手机照片
+   转 base64 有 2–4MB，塞进 localStorage 两张就把整个 app 的数据写爆了。 */
+const PDB = "mochi_photos";
+function photoDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(PDB, 1);
+    r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains("p")) r.result.createObjectStore("p"); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+// fn 必须返回 IDBRequest，这样 rq.result 的含义才统一：
+// 取不到的 key 得到 undefined，而不是把请求对象本身漏出去
+function photoTx(mode, fn) {
+  return photoDB().then(db => new Promise((res, rej) => {
+    const tx = db.transaction("p", mode);
+    const rq = fn(tx.objectStore("p"));
+    tx.oncomplete = () => res(rq.result);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
+  }));
+}
+const putPhoto = (id, blob) => photoTx("readwrite", st => st.put(blob, id)).then(() => id);
+const getPhoto = (id) => photoTx("readonly", st => st.get(id));
+const delPhoto = (id) => photoTx("readwrite", st => st.delete(id)).then(() => true);
+
+// 长边压到 1600、JPEG q0.75，一张大约 200–400KB，看光路和示数完全够
+function shrinkImage(file, max = 1600, q = 0.75) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const sc = Math.min(1, max / Math.max(img.width, img.height));
+      const w = Math.max(1, Math.round(img.width * sc)), h = Math.max(1, Math.round(img.height * sc));
+      const cv = document.createElement("canvas");
+      cv.width = w; cv.height = h;
+      cv.getContext("2d").drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      cv.toBlob(b => b ? res(b) : rej(new Error("压缩失败")), "image/jpeg", q);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("这张图读不了")); };
+    img.src = url;
+  });
+}
+
+function dayKeyOf(ts) { return toBJ(ts).toDateString(); }
+function fmtRecDay(ts) {
+  const d = toBJ(ts);
+  const w = ["周日","周一","周二","周三","周四","周五","周六"][d.getDay()];
+  return `${d.getMonth()+1}月${d.getDate()}日 ${w}`;
+}
+
+// P1 的项目/实验/记录三层拍平成项目 + 记录两层，一条内容都不丢
+function migrateLab(d) {
+  const projects = (d.projects || []).map(pr => ({
+    id: pr.id, name: pr.name || pr.code || "未命名项目",
+    startedAt: pr.startedAt || Date.now(),
+    color: pr.color || NC[0],
+  }));
+  const records = [...(d.records || [])];
+  (d.projects || []).forEach(pr => {
+    [pr.setup, pr.stack].filter(Boolean).forEach((txt, i) =>
+      records.push({ id: uid(), projectId: pr.id, at: (pr.startedAt || Date.now()) + i, weather: "", text: txt, photos: [] }));
+  });
+  (d.experiments || []).forEach(ex => {
+    if (ex.title) records.push({ id: uid(), projectId: ex.projectId, at: ex.startedAt || Date.now(), weather: "", text: ex.title, photos: [] });
+    (ex.entries || []).forEach(e => {
+      if (!e.text) return;
+      records.push({ id: e.id, projectId: ex.projectId, at: e.at, weather: "", text: e.text, photos: [] });
+    });
+  });
+  return { ...d, projects, records: records.sort((a, b) => a.at - b.at), experiments: [] };
 }
 
 /* ── Notifications ── */
@@ -133,123 +227,6 @@ function migrateTodo(t) {
   const { urgency, ...rest } = t;
   return { ...rest, importance: t.importance || LEGACY_IMP[urgency] || "side" };
 }
-
-/* ── Lab notebook ─────────────────────────────────────────────────────
-   项目（几个月～一年）→ 实验（一次上手）→ 记录（一行一个时间戳，只增不删） */
-
-const PRJ_STATUS = [
-  { key:"running", label:"进行中", color:"#C08A1E", bg:"#FFF6E5" },
-  { key:"hold",    label:"搁置",   color:"#9A9184", bg:"#F1EFEB" },
-  { key:"done",    label:"已结题", color:"#4A8C3D", bg:"#EEFAE9" },
-];
-const PS = Object.fromEntries(PRJ_STATUS.map(x=>[x.key,x]));
-
-const EXP_STATUS = [
-  { key:"planning", label:"计划中", color:"#5B7FC7", bg:"#EEF2FA" },
-  { key:"running",  label:"进行中", color:"#C08A1E", bg:"#FFF6E5" },
-  { key:"done",     label:"已完成", color:"#4A8C3D", bg:"#EEFAE9" },
-  { key:"aborted",  label:"中止",   color:"#9A9184", bg:"#F1EFEB" },
-];
-const ES = Object.fromEntries(EXP_STATUS.map(x=>[x.key,x]));
-
-// 计算成像：采集在光路上，重建在电脑上，两边关心的字段不一样
-const EXP_KIND = [
-  { key:"acq",    label:"采集", icon:"◉" },
-  { key:"recon",  label:"重建", icon:"⛯" },
-  { key:"calib",  label:"标定", icon:"⊹" },
-  { key:"analys", label:"分析", icon:"∿" },
-];
-const EK = Object.fromEntries(EXP_KIND.map(x=>[x.key,x]));
-
-const ENTRY_TYPE = { obs:"obs", data:"data", step:"step", file:"file", issue:"issue" };
-
-function migrateExp(e) { return e.entries ? e : { ...e, entries: [] }; }
-function expCode(project, num) {
-  return `${(project?.code || "EXP").toUpperCase()}-${String(num).padStart(3, "0")}`;
-}
-
-/* key = value [unit] — 宽进严出：认不出来就当普通观察，绝不拦着输入 */
-const KEY_CH = "A-Za-z0-9\\u0370-\\u03FF\\u4e00-\\u9fa5_\\-.";
-const NUM = "-?\\d+(?:\\.\\d+)?(?:[eE][-+]?\\d+)?";
-const UNIT = "(?:[A-Za-zμµ%°/·^][A-Za-z0-9μµ%°/·^\\-]{0,7})?";
-const KV_RE = new RegExp(`([${KEY_CH}]{1,16}?)\\s*[=:：]\\s*(${NUM})(?:\\s*(?:→|->|~>)\\s*(${NUM}))?\\s*(${UNIT})`, "g");
-const FILE_RE = /[\w\-.\/]+\.(?:csv|txt|dat|mat|npy|npz|h5|hdf5|json|png|tif|tiff|jpg|jpeg|raw|bin|py|m|ipynb)\b/i;
-
-function parseEntry(raw) {
-  const text = raw.trim();
-  if (!text) return null;
-  const issue = /^[!！⚠]/.test(text);
-  const body = issue ? text.replace(/^[!！⚠]\s*/, "") : text;
-
-  const data = [];
-  KV_RE.lastIndex = 0;
-  let m;
-  while ((m = KV_RE.exec(body)) !== null) {
-    const [, key, v1, v2, unit] = m;
-    const value = parseFloat(v2 != null ? v2 : v1);
-    if (!Number.isFinite(value)) continue;
-    data.push({ key, value, unit: unit || "", from: v2 != null ? parseFloat(v1) : null });
-  }
-
-  const fileHit = body.match(FILE_RE);
-  const type = issue ? "issue" : data.length ? "data" : fileHit ? "file" : "obs";
-  return { text: body, data, fileRef: fileHit ? fileHit[0] : null, type };
-}
-
-/* 波长 chip 按真实光色着色 — 光学独有的免费信息通道 */
-function wlColor(nm) {
-  if (nm >= 380 && nm < 440) return "#6A2FA0";
-  if (nm < 490) return "#1F5FBF";
-  if (nm < 510) return "#0F8C86";
-  if (nm < 580) return "#3E9A2E";
-  if (nm < 645) return "#C46A12";
-  if (nm <= 780) return "#8E1520";
-  return "#5A5A5A";   // 不可见
-}
-function dataTone(d) {
-  const k = (d.key || "").toLowerCase();
-  if ((/^(λ|lambda|wl|wave)/.test(k) || /nm/i.test(d.unit)) && d.value >= 200 && d.value <= 2000) {
-    return { color: wlColor(d.value), swatch: wlColor(d.value) };
-  }
-  return { color: "#2C2C2C", swatch: null };
-}
-
-/* 跨天 */
-function fmtSpan(ms) {
-  const sec = Math.max(0, Math.floor(ms / 1000));
-  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
-  // 项目按年月算，实验按天时算 — 一年的项目说「240天0h」没人看得下去
-  if (d >= 365) { const yr = Math.floor(d / 365), mo = Math.round((d % 365) / 30); return mo ? `${yr}年${mo}个月` : `${yr}年`; }
-  if (d >= 60) return `${Math.round(d / 30)}个月`;
-  if (d >= 2) return `${d}天`;
-  if (d > 0) return h ? `${d}天${h}h` : `${d}天`;
-  if (h > 0) return `${h}h${m}m`;
-  return `${m}m`;
-}
-function fmtGap(ms) {
-  const m = Math.round(ms / 60000);
-  if (m < 1) return null;
-  if (m < 60) return `+${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return m % 60 ? `+${h}h${m % 60}m` : `+${h}h`;
-  const d = Math.floor(h / 24);
-  return h % 24 ? `+${d}天${h % 24}h` : `+${d}天`;
-}
-function dayKey(ts) { return toBJ(ts).toDateString(); }
-function fmtDayHead(ts) {
-  const d = toBJ(ts);
-  const w = ["周日","周一","周二","周三","周四","周五","周六"][d.getDay()];
-  return `${fmtDay(ts)} ${w}`;
-}
-
-const NC = [
-  {bg:"#FFF8E7",accent:"#E8A838"},{bg:"#F0F7EE",accent:"#5A9E4B"},
-  {bg:"#EEF2FA",accent:"#5B7FC7"},{bg:"#FBF0F0",accent:"#D4696A"},
-  {bg:"#F5F0FA",accent:"#8B6AAF"},{bg:"#F0F8F8",accent:"#4A9A96"},
-];
-
-const WDAYS = ["周一","周二","周三","周四","周五","周六","周日"];
-const HOURS = Array.from({length:17},(_,i)=>i+9); // 9:00~25:00 (24=0:00, 25=1:00 next day)
 
 // SVG Icons
 const Ic = {
@@ -955,207 +932,197 @@ function TodoRow({ t, depth, activeIds, timersFrozen, setEditingTodo, setShowAdd
   );
 }
 
-/* ── Collapsible section ── */
-function Fold({ title, count, open, onToggle, children }) {
+/* ── 一张照片 ── */
+function Photo({ id, size = 78, onOpen }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let alive = true, made = null;
+    getPhoto(id).then(b => {
+      if (!alive || !b) return;
+      made = URL.createObjectURL(b);
+      setUrl(made);
+    }).catch(()=>{});
+    return () => { alive = false; if (made) URL.revokeObjectURL(made); };
+  }, [id]);
   return (
-    <div style={{ marginBottom: 6 }}>
-      <button onClick={onToggle} style={{
-        width:"100%", display:"flex", alignItems:"center", gap:8, padding:"10px 12px",
-        border:"1px solid #EDE8DE", borderRadius:11, background:"#FFF", cursor:"pointer",
-        fontFamily:"inherit", fontSize:12.5, color:"#8C8478", textAlign:"left",
-      }}>
-        <span style={{ color:"#C0B8A8", fontSize:10 }}>{open ? "▾" : "▸"}</span>
-        <b style={{ color:"#2C2C2C", fontWeight:600 }}>{title}</b>
-        {count != null && <span style={{ marginLeft:"auto", fontSize:10.5, color:"#B0A99B", fontFamily:MONO }}>{count}</span>}
-      </button>
-      {open && <div style={{ padding:"10px 12px 4px", animation:"slideUp .2s ease both" }}>{children}</div>}
+    <div onClick={url && onOpen ? (e)=>{ e.stopPropagation(); onOpen(id); } : undefined} style={{
+      width:size, height:size, borderRadius:10, flexShrink:0, overflow:"hidden",
+      background:"#F0EDE6", border:"1px solid #E7E2D6",
+      backgroundImage: url ? `url(${url})` : "none", backgroundSize:"cover", backgroundPosition:"center",
+      cursor: url && onOpen ? "pointer" : "default",
+    }}/>
+  );
+}
+
+function FullPhoto({ id }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let alive = true, made = null;
+    getPhoto(id).then(b => { if (!alive || !b) return; made = URL.createObjectURL(b); setUrl(made); }).catch(()=>{});
+    return () => { alive = false; if (made) URL.revokeObjectURL(made); };
+  }, [id]);
+  return url
+    ? <img src={url} alt="" style={{ maxWidth:"100%", maxHeight:"100%", borderRadius:10, objectFit:"contain" }}/>
+    : <span style={{ color:"#888", fontSize:13 }}>载入中…</span>;
+}
+
+/* ── 写一条记录：日期是自动的，天气点一下，正文和照片 ── */
+function Compose({ lastWeather, onSave }) {
+  const [weather, setWeather] = useState(lastWeather || "");
+  const [text, setText] = useState("");
+  const [photos, setPhotos] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const fileRef = useRef(null);
+
+  const pick = async (e) => {
+    const files = [...(e.target.files || [])];
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy(true); setErr(null);
+    try {
+      const ids = [];
+      for (const f of files) {
+        const blob = await shrinkImage(f);
+        const id = uid();
+        await putPhoto(id, blob);
+        ids.push(id);
+      }
+      setPhotos(p => [...p, ...ids]);
+    } catch (ex) { setErr(ex?.message || "照片存不进去"); }
+    setBusy(false);
+  };
+
+  const drop = async (id) => {
+    setPhotos(p => p.filter(x => x !== id));
+    try { await delPhoto(id); } catch {}
+  };
+
+  const commit = () => {
+    if (!text.trim() && !photos.length) return;
+    onSave({ weather, text: text.trim(), photos });
+    setText(""); setPhotos([]);
+  };
+
+  return (
+    <div style={{ background:"#FFF", border:"1px solid #EDE8DE", borderRadius:16, padding:"14px 15px", marginBottom:18 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+        <span style={{ fontSize:14, fontWeight:700 }}>{fmtRecDay(Date.now())}</span>
+        <span style={{ fontSize:11, color:"#C0B8A8", fontFamily:MONO }}>{fmtBJ(Date.now())}</span>
+      </div>
+
+      <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:11 }}>
+        {WEATHER.map(w => (
+          <button key={w} onClick={()=>setWeather(weather === w ? "" : w)} style={{
+            padding:"6px 11px", borderRadius:10, fontSize:12, fontWeight:600, cursor:"pointer",
+            fontFamily:"inherit", background: weather === w ? "#2C2C2C" : "#F2EFE8",
+            color: weather === w ? "#FFF" : "#8C8478", border:"none",
+          }}>{w}</button>
+        ))}
+      </div>
+
+      <textarea value={text} onChange={e=>setText(e.target.value)} rows={4}
+        placeholder="今天做了什么…"
+        style={{ ...S.inp, resize:"vertical", fontSize:14.5, lineHeight:1.65 }}/>
+
+      {photos.length > 0 && (
+        <div style={{ display:"flex", gap:7, marginTop:10, flexWrap:"wrap" }}>
+          {photos.map(id => (
+            <div key={id} style={{ position:"relative" }}>
+              <Photo id={id} size={72}/>
+              <button onClick={()=>drop(id)} style={{
+                position:"absolute", top:-6, right:-6, width:22, height:22, borderRadius:"50%",
+                background:"#2C2C2C", color:"#FFF", border:"2px solid #FFF", cursor:"pointer",
+                fontSize:11, lineHeight:1, display:"flex", alignItems:"center", justifyContent:"center", padding:0,
+              }}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {err && <div style={{ fontSize:11.5, color:"#C02556", marginTop:8 }}>{err}</div>}
+
+      <input ref={fileRef} type="file" accept="image/*" multiple onChange={pick} style={{ display:"none" }}/>
+      <div style={{ display:"flex", gap:9, marginTop:12 }}>
+        <button onClick={()=>fileRef.current?.click()} disabled={busy} style={{
+          flex:1, padding:"12px 0", borderRadius:13, border:"2px solid #E8E4DA", background:"#FFF",
+          color:"#8C8478", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+          display:"flex", alignItems:"center", justifyContent:"center", gap:7, opacity: busy ? .5 : 1,
+        }}>📷 {busy ? "处理中…" : "加照片"}</button>
+        <button onClick={commit} style={{
+          flex:1, padding:"12px 0", borderRadius:13, border:"none", background:"#2C2C2C",
+          color:"#FFF", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+          opacity: (text.trim() || photos.length) ? 1 : .4,
+        }}>记下</button>
+      </div>
     </div>
   );
 }
 
-const MONO = "'JetBrains Mono','SF Mono','Courier New',monospace";
-
-/* ── key = value chip ── */
-function DataChip({ d }) {
-  const tone = dataTone(d);
-  return (
-    <span style={{
-      display:"inline-flex", alignItems:"baseline", gap:4, fontFamily:MONO, fontSize:11,
-      background:"#F2EFE8", border:"1px solid #E7E2D6", padding:"3px 8px",
-      borderRadius:5, margin:"2px 4px 2px 0",
-    }}>
-      {tone.swatch && <i style={{ width:7, height:7, borderRadius:2, background:tone.swatch, alignSelf:"center" }}/>}
-      <b style={{ fontWeight:500, color:"#8C8478" }}>{d.key}</b>
-      <u style={{ textDecoration:"none", color:tone.color, fontWeight:600 }}>
-        {d.from != null && <span style={{ color:"#C0B8A8" }}>{d.from} → </span>}{d.value}
-      </u>
-      {d.unit && <s style={{ textDecoration:"none", color:"#B0A99B", fontSize:10 }}>{d.unit}</s>}
-    </span>
-  );
-}
-
-/* ── one record in the stream ── */
-function EntryRow({ e, gap, onEdit }) {
+/* ── 已经记下的一条 ── */
+function RecordCard({ r, onSave, onDelete, onOpenPhoto }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(e.text);
-  const t = toBJ(e.at);
-  const hhmm = `${t.getHours().toString().padStart(2,"0")}:${t.getMinutes().toString().padStart(2,"0")}`;
-  const issue = e.type === "issue";
-
-  const body = editing ? (
-    <div>
-      <textarea value={draft} onChange={ev=>setDraft(ev.target.value)} rows={2} style={{
-        width:"100%", padding:"8px 10px", borderRadius:9, border:"2px solid #E8E4DA",
-        fontSize:12.5, fontFamily:"inherit", outline:"none", resize:"vertical", boxSizing:"border-box",
-      }}/>
-      <div style={{ display:"flex", gap:6, marginTop:6 }}>
-        <button onClick={()=>{ onEdit(e.id, { text: draft }); setEditing(false); }} style={S.miniD}>保存补充</button>
-        <button onClick={()=>{ setDraft(e.text); setEditing(false); }} style={S.mini}>取消</button>
-        {!e.voided && <button onClick={()=>{ onEdit(e.id, { voided:true }); setEditing(false); }}
-          style={{ ...S.mini, marginLeft:"auto", color:"#C02556" }}>作废</button>}
-        {e.voided && <button onClick={()=>{ onEdit(e.id, { voided:false }); setEditing(false); }}
-          style={{ ...S.mini, marginLeft:"auto" }}>撤销作废</button>}
-      </div>
-    </div>
-  ) : (
-    <div onClick={()=>setEditing(true)} style={{ cursor:"pointer" }}>
-      {e.type === "step" && <span style={{ color:"#4A8C3D", marginRight:5 }}>✓</span>}
-      {e.text
-        ? <span style={{ textDecoration: e.voided ? "line-through" : "none", opacity: e.voided ? .45 : 1 }}>{e.text}</span>
-        : (!e.data?.length && !e.fileRef) && <span style={{ color:"#C0B8A8", fontStyle:"italic" }}>（待补）</span>}
-      {e.fileRef && !e.voided && (
-        <div style={{
-          display:"inline-flex", alignItems:"center", gap:5, fontFamily:MONO, fontSize:10.5,
-          background:"#EEF2FA", color:"#4A6DAF", padding:"4px 8px", borderRadius:5,
-          border:"1px solid #DFE7F5", marginTop:4,
-        }}>📄 {e.fileRef}</div>
-      )}
-      {e.data?.length > 0 && !e.voided && (
-        <div style={{ marginTop:3 }}>{e.data.map((d,i)=><DataChip key={i} d={d}/>)}</div>
-      )}
-      {e.editedAt && <div style={{ fontSize:9.5, color:"#C0B8A8", marginTop:3, fontFamily:MONO }}>
-        {fmtBJ(e.at)} 记录 · {fmtBJ(e.editedAt)} 补充
-      </div>}
-    </div>
-  );
+  const [text, setText] = useState(r.text);
+  const [weather, setWeather] = useState(r.weather || "");
 
   return (
-    <>
-      {gap && <div style={{ fontFamily:MONO, fontSize:9.5, color:"#CFC7B8", paddingLeft:45, margin:"-1px 0" }}>{gap}</div>}
-      <div style={{ display:"flex", gap:9, padding:"6px 0" }}>
-        <span style={{ fontFamily:MONO, fontSize:10.5, color:"#B0A99B", flexShrink:0, width:36, paddingTop:2 }}>{hhmm}</span>
-        <div style={{
-          flex:1, minWidth:0, fontSize:12.5, lineHeight:1.5,
-          color: issue ? "#8E1B3E" : "#3A3630",
-          background: issue && !e.voided ? "#FDEBF0" : "transparent",
-          borderLeft: issue && !e.voided ? "2px solid #C02556" : "none",
-          padding: issue && !e.voided ? "6px 9px" : 0,
-          borderRadius: issue ? "0 5px 5px 0" : 0,
-        }}>
-          {body}
-        </div>
+    <div style={{ background:"#FFF", border:"1px solid #EDE8DE", borderRadius:14, padding:"13px 14px", marginBottom:10 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:7 }}>
+        <span style={{ fontSize:12.5, fontWeight:700, color:"#5A544A" }}>{fmtRecDay(r.at)}</span>
+        <span style={{ fontSize:11, color:"#C0B8A8", fontFamily:MONO }}>{fmtBJ(r.at)}</span>
+        {r.weather && !editing && <span style={{ fontSize:12, color:"#8C8478" }}>{r.weather}</span>}
+        <button onClick={()=>setEditing(v=>!v)} style={{ ...S.ib, marginLeft:"auto", color:"#C5BEB0", padding:4 }}>
+          <Ic.Edit s={14}/>
+        </button>
       </div>
-    </>
+
+      {editing ? (
+        <>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:9 }}>
+            {WEATHER.map(w => (
+              <button key={w} onClick={()=>setWeather(weather === w ? "" : w)} style={{
+                padding:"5px 9px", borderRadius:9, fontSize:11.5, fontWeight:600, cursor:"pointer",
+                fontFamily:"inherit", background: weather === w ? "#2C2C2C" : "#F2EFE8",
+                color: weather === w ? "#FFF" : "#8C8478", border:"none",
+              }}>{w}</button>
+            ))}
+          </div>
+          <textarea value={text} onChange={e=>setText(e.target.value)} rows={4}
+            style={{ ...S.inp, resize:"vertical", fontSize:14, lineHeight:1.65 }}/>
+          <div style={{ display:"flex", gap:7, marginTop:9 }}>
+            <button onClick={()=>{ onSave(r.id, { text: text.trim(), weather }); setEditing(false); }} style={S.miniD}>保存</button>
+            <button onClick={()=>{ setText(r.text); setWeather(r.weather||""); setEditing(false); }} style={S.mini}>取消</button>
+            <button onClick={()=>onDelete(r)} style={{ ...S.mini, marginLeft:"auto", color:"#C02556" }}>删除</button>
+          </div>
+        </>
+      ) : (
+        <>
+          {r.text && <div style={{ fontSize:14, lineHeight:1.7, color:"#3A3630", whiteSpace:"pre-wrap" }}>{r.text}</div>}
+          {r.photos?.length > 0 && (
+            <div style={{ display:"flex", gap:7, marginTop: r.text ? 10 : 0, flexWrap:"wrap" }}>
+              {r.photos.map(id => <Photo key={id} id={id} size={78} onOpen={onOpenPhoto}/>)}
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
-/* ── Project form ── */
+/* ── 项目：一个名字就够 ── */
 function ProjectForm({ initial, onSave, onCancel }) {
-  const [code, setCode] = useState(initial?.code || "");
   const [name, setName] = useState(initial?.name || "");
-  const [status, setStatus] = useState(initial?.status || "running");
-  const [setup, setSetup] = useState(initial?.setup || "");
-  const [stack, setStack] = useState(initial?.stack || "");
-  const ref = useRef(null);
-  useEffect(()=>{ if(ref.current) ref.current.focus(); }, []);
-  const ok = name.trim() && code.trim();
-  return (
-    <div style={{ animation:"slideUp .3s ease both", padding:"12px 0 16px" }}>
-      <input ref={ref} value={name} onChange={e=>setName(e.target.value)} placeholder="项目名称…" style={S.inp}/>
-      <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:10 }}>
-        <span style={{ fontSize:12, color:"#999", fontWeight:600 }}>代号</span>
-        <input value={code} onChange={e=>setCode(e.target.value.toUpperCase().slice(0,8))}
-          placeholder="FPM" style={{ ...S.inp, width:110, fontFamily:MONO, letterSpacing:"1px" }}/>
-        <span style={{ fontSize:11, color:"#BBB" }}>实验编号 {code.trim() ? `${code}-001` : "FPM-001"}</span>
-      </div>
-      <div style={{ marginTop:12 }}>
-        <div style={S.lbl}>状态</div>
-        <div style={{ display:"flex", gap:6 }}>
-          {PRJ_STATUS.map(x=>(
-            <button key={x.key} onClick={()=>setStatus(x.key)} style={{
-              flex:1, padding:"9px 0", borderRadius:12, fontSize:12, fontWeight:600, cursor:"pointer",
-              fontFamily:"inherit", background:x.bg, color:x.color,
-              border: status===x.key ? `2.5px solid ${x.color}` : "2.5px solid transparent",
-            }}>{x.label}</button>
-          ))}
-        </div>
-      </div>
-      <div style={{ marginTop:12 }}>
-        <div style={S.lbl}>装置与光路</div>
-        <textarea value={setup} onChange={e=>setSetup(e.target.value)} rows={3}
-          placeholder="相机型号、镜头、照明、编码方式…" style={{ ...S.inp, resize:"vertical" }}/>
-      </div>
-      <div style={{ marginTop:12 }}>
-        <div style={S.lbl}>代码与环境</div>
-        <textarea value={stack} onChange={e=>setStack(e.target.value)} rows={2}
-          placeholder="repo / commit / 依赖版本…" style={{ ...S.inp, resize:"vertical", fontFamily:MONO, fontSize:12.5 }}/>
-      </div>
-      <div style={{ display:"flex", gap:10, marginTop:16 }}>
-        <button onClick={onCancel} style={S.btnGhost}>取消</button>
-        <button onClick={()=>ok && onSave({ code:code.trim().toUpperCase(), name:name.trim(), status, setup, stack })}
-          style={{ ...S.btnDark, opacity: ok ? 1 : .4 }}>保存</button>
-      </div>
-    </div>
-  );
-}
-
-/* ── Experiment form ── */
-function ExpForm({ initial, project, onSave, onCancel }) {
-  const [title, setTitle] = useState(initial?.title || "");
-  const [kind, setKind] = useState(initial?.kind || "acq");
-  const [status, setStatus] = useState(initial?.status || "running");
-  const [purpose, setPurpose] = useState(initial?.purpose || "");
   const ref = useRef(null);
   useEffect(()=>{ if(ref.current) ref.current.focus(); }, []);
   return (
     <div style={{ animation:"slideUp .3s ease both", padding:"12px 0 16px" }}>
-      <div style={{ fontFamily:MONO, fontSize:11, color:"#B0A99B", marginBottom:8 }}>
-        {initial?.code || expCode(project, project?.seq || 1)}
-      </div>
-      <input ref={ref} value={title} onChange={e=>setTitle(e.target.value)} placeholder="这次要做什么…" style={S.inp}/>
-      <div style={{ marginTop:12 }}>
-        <div style={S.lbl}>类型</div>
-        <div style={{ display:"flex", gap:6 }}>
-          {EXP_KIND.map(x=>(
-            <button key={x.key} onClick={()=>setKind(x.key)} style={{
-              flex:1, padding:"9px 0", borderRadius:12, fontSize:12, fontWeight:600, cursor:"pointer",
-              fontFamily:"inherit", background:"#F2EFE8", color: kind===x.key ? "#2C2C2C" : "#9A9184",
-              border: kind===x.key ? "2.5px solid #2C2C2C" : "2.5px solid transparent",
-            }}>{x.icon} {x.label}</button>
-          ))}
-        </div>
-      </div>
-      <div style={{ marginTop:12 }}>
-        <div style={S.lbl}>状态</div>
-        <div style={{ display:"flex", gap:6 }}>
-          {EXP_STATUS.map(x=>(
-            <button key={x.key} onClick={()=>setStatus(x.key)} style={{
-              flex:1, padding:"8px 0", borderRadius:11, fontSize:11.5, fontWeight:600, cursor:"pointer",
-              fontFamily:"inherit", background:x.bg, color:x.color,
-              border: status===x.key ? `2.5px solid ${x.color}` : "2.5px solid transparent",
-            }}>{x.label}</button>
-          ))}
-        </div>
-      </div>
-      <div style={{ marginTop:12 }}>
-        <div style={S.lbl}>目的 / 假设</div>
-        <textarea value={purpose} onChange={e=>setPurpose(e.target.value)} rows={3}
-          placeholder="想验证什么…" style={{ ...S.inp, resize:"vertical" }}/>
-      </div>
-      <div style={{ display:"flex", gap:10, marginTop:16 }}>
+      <input ref={ref} value={name} onChange={e=>setName(e.target.value)}
+        onKeyDown={e=>{ if(e.key==="Enter" && name.trim()) onSave({ name:name.trim() }); }}
+        placeholder="项目名称…" style={S.inp}/>
+      <div style={{ display:"flex", gap:10, marginTop:14 }}>
         <button onClick={onCancel} style={S.btnGhost}>取消</button>
-        <button onClick={()=>title.trim() && onSave({ title:title.trim(), kind, status, purpose })}
-          style={{ ...S.btnDark, opacity: title.trim() ? 1 : .4 }}>保存</button>
+        <button onClick={()=>name.trim() && onSave({ name:name.trim() })}
+          style={{ ...S.btnDark, opacity: name.trim() ? 1 : .4 }}>保存</button>
       </div>
     </div>
   );
@@ -1185,13 +1152,9 @@ export default function MochiApp() {
   const [remindFor, setRemindFor] = useState(null);     // todo id whose reminder sheet is open
   const [remindAlert, setRemindAlert] = useState(null); // todo id of the in-app "到点了" banner
   const [openProject, setOpenProject] = useState(null);
-  const [openExp, setOpenExp] = useState(null);
   const [projForm, setProjForm] = useState(null);   // "new" | project id
-  const [expForm, setExpForm] = useState(null);     // "new" | experiment id
-  const [folds, setFolds] = useState({});
-  const [draft, setDraft] = useState("");
-  const draftRef = useRef(null);
-  const streamRef = useRef(null);
+  const [viewPhoto, setViewPhoto] = useState(null);
+  const [saveErr, setSaveErr] = useState(null);
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
   const dragYRef = useRef(0);
@@ -1203,11 +1166,7 @@ export default function MochiApp() {
   useEffect(() => { save(data); }, [data]);
   useEffect(() => { todosRef.current = data.todos; }, [data.todos]);
   useEffect(() => { activeRef.current = activeIds; }, [activeIds]);
-  useEffect(() => {
-    if (!openExp) return;
-    const t = setTimeout(() => window.scrollTo({ top: document.body.scrollHeight }), 60);
-    return () => clearTimeout(t);
-  }, [openExp]);
+  useEffect(() => { setSaveErr(saveFailed); }, [data]);
 
   // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
   // backgrounded PWA, so on return we ask whether the gap was real focus or a detour.
@@ -1463,94 +1422,27 @@ export default function MochiApp() {
     setTimeout(() => setCanceledTimer(false), 3000);
   };
 
-  // Lab notebook
-  const toggleFold = (k) => setFolds(f => ({ ...f, [k]: !f[k] }));
-
+  // 记录本
   const saveProject = (info) => {
-    setData(d => {
-      if (projForm === "new") {
-        const pr = { id:uid(), ...info, startedAt:Date.now(), seq:1, params:[], color:NC[d.projects.length % NC.length] };
-        return { ...d, projects: [pr, ...d.projects] };
-      }
-      return { ...d, projects: d.projects.map(x => x.id === projForm ? { ...x, ...info } : x) };
-    });
+    setData(d => projForm === "new"
+      ? { ...d, projects: [{ id:uid(), ...info, startedAt:Date.now(), color:NC[d.projects.length % NC.length] }, ...d.projects] }
+      : { ...d, projects: d.projects.map(x => x.id === projForm ? { ...x, ...info } : x) });
     setProjForm(null);
   };
   const deleteProject = (id) => {
-    setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id), experiments: d.experiments.filter(e=>e.projectId!==id) }));
-    setOpenProject(null); setOpenExp(null);
+    const gone = data.records.filter(r => r.projectId === id);
+    gone.forEach(r => (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{})));
+    setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id), records: d.records.filter(r=>r.projectId!==id) }));
+    setOpenProject(null);
   };
-  const setProjParams = (id, params) =>
-    setData(d => ({ ...d, projects: d.projects.map(x => x.id===id ? { ...x, params } : x) }));
-
-  const saveExp = (info) => {
-    setData(d => {
-      if (expForm === "new") {
-        const pr = d.projects.find(x => x.id === openProject);
-        if (!pr) return d;
-        const ex = {
-          id:uid(), projectId:pr.id, num:pr.seq, code:expCode(pr, pr.seq), ...info,
-          paramSnapshot: (pr.params || []).map(q => ({ ...q })),   // 冻结开工时的参数
-          protocol: [], entries: [], result:"", conclusion:"", next:"",
-          startedAt: Date.now(), endedAt: null,
-        };
-        return {
-          ...d,
-          projects: d.projects.map(x => x.id===pr.id ? { ...x, seq: pr.seq + 1 } : x),
-          experiments: [ex, ...d.experiments],
-        };
-      }
-      return { ...d, experiments: d.experiments.map(e => e.id === expForm ? { ...e, ...info,
-        endedAt: info.status === "done" || info.status === "aborted" ? (e.endedAt || Date.now()) : null } : e) };
-    });
-    setExpForm(null);
+  const addRecord = (projectId, info) =>
+    setData(d => ({ ...d, records: [...d.records, { id:uid(), projectId, at:Date.now(), ...info }] }));
+  const saveRecord = (id, patch) =>
+    setData(d => ({ ...d, records: d.records.map(r => r.id === id ? { ...r, ...patch } : r) }));
+  const deleteRecord = (r) => {
+    (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
+    setData(d => ({ ...d, records: d.records.filter(x => x.id !== r.id) }));
   };
-  const deleteExp = (id) => {
-    setData(d => ({ ...d, experiments: d.experiments.filter(e=>e.id!==id) }));
-    setOpenExp(null);
-  };
-
-  // 记录流只追加。作废保留原文，编辑留下补充时间。
-  const addEntry = (expId, raw, forced) => {
-    const parsed = forced || parseEntry(raw);
-    const e = parsed
-      ? { id:uid(), at:Date.now(), type:parsed.type, text:parsed.text, data:parsed.data || [], fileRef:parsed.fileRef || null, voided:false, editedAt:null }
-      : { id:uid(), at:Date.now(), type:"obs", text:"", data:[], fileRef:null, voided:false, editedAt:null };
-    setData(d => {
-      const ex = d.experiments.find(x => x.id === expId);
-      if (!ex) return d;
-      // 变更写法 P: 12.3 → 8.7 同时推进项目基线参数
-      let projects = d.projects;
-      const changes = (e.data || []).filter(q => q.from != null);
-      if (changes.length) {
-        projects = d.projects.map(pr => {
-          if (pr.id !== ex.projectId) return pr;
-          const params = [...(pr.params || [])];
-          changes.forEach(c => {
-            const i = params.findIndex(q => q.key === c.key);
-            const rec = { key:c.key, value:c.value, unit:c.unit, at:Date.now() };
-            if (i >= 0) params[i] = rec; else params.push(rec);
-          });
-          return { ...pr, params };
-        });
-      }
-      return { ...d, projects, experiments: d.experiments.map(x => x.id === expId ? { ...x, entries: [...x.entries, e] } : x) };
-    });
-  };
-  const editEntry = (expId, entryId, patch) => {
-    setData(d => ({ ...d, experiments: d.experiments.map(x => x.id !== expId ? x : {
-      ...x, entries: x.entries.map(e => {
-        if (e.id !== entryId) return e;
-        if (patch.text != null && patch.text !== e.text) {
-          const re = parseEntry(patch.text) || { text:patch.text, data:[], fileRef:null, type:"obs" };
-          return { ...e, text:re.text, data:re.data, fileRef:re.fileRef, type: e.type==="step" ? "step" : re.type, editedAt: Date.now() };
-        }
-        return { ...e, ...patch };
-      }),
-    })}));
-  };
-  const setProtocol = (expId, protocol) =>
-    setData(d => ({ ...d, experiments: d.experiments.map(x => x.id===expId ? { ...x, protocol } : x) }));
 
   // Notes
   const createNote = () => { const c=NC[Math.floor(Math.random()*NC.length)]; const n={id:uid(),title:"",body:"",ts:Date.now(),color:c}; setData(d=>({...d,notes:[n,...d.notes]})); setEditingNote(n.id); };
@@ -1597,7 +1489,7 @@ export default function MochiApp() {
   // ── Running-timer overlays (rendered by every view) ──
   // Jump to a running task from the bar: back to the list, parents unfolded, scrolled into view.
   const revealTodo = (id) => {
-    setView("main"); setTab("todo"); setOpenProject(null); setOpenExp(null);
+    setView("main"); setTab("todo"); setOpenProject(null);
     setExpandedIds(s => {
       const n = new Set(s);
       let cur = data.todos.find(t => t.id === id);
@@ -1611,9 +1503,7 @@ export default function MochiApp() {
   const awayTodos = bgAlert ? [...activeIds].map(id => data.todos.find(t => t.id === id)).filter(Boolean) : [];
   const timerUI = (
     <>
-      {!openExp && (
-        <RunningBar ids={[...activeIds]} todos={data.todos} onOpen={revealTodo} onPauseAll={pauseAll} />
-      )}
+      <RunningBar ids={[...activeIds]} todos={data.todos} onOpen={revealTodo} onPauseAll={pauseAll} />
       {bgAlert && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 9999,
@@ -1727,179 +1617,47 @@ export default function MochiApp() {
     </>
   );
 
-  // ── Experiment: the record stream ──
-  if (openExp) {
-    const ex = data.experiments.find(x => x.id === openExp);
-    if (!ex) { setOpenExp(null); return null; }
-    const pr = data.projects.find(x => x.id === ex.projectId);
-    const st = ES[ex.status] || ES.running;
-    const kd = EK[ex.kind] || EK.acq;
-    const doneSteps = (ex.protocol || []).filter(q => q.doneAt).length;
-
-    if (expForm === ex.id) {
-      return (
-        <div style={S.ctn}>
-          <div style={{ padding:"52px 24px 8px", display:"flex", alignItems:"center", gap:12 }}>
-            <button style={S.ib} onClick={()=>setExpForm(null)}><Ic.Back/></button>
-            <span style={{ fontSize:20, fontWeight:700 }}>编辑实验</span>
-          </div>
-          <div style={{ padding:"0 24px" }}>
-            <ExpForm initial={ex} project={pr} onSave={saveExp} onCancel={()=>setExpForm(null)}/>
-          </div>
-          {timerUI}
-      {remindUI}
-          <style>{CSS}</style>
-        </div>
-      );
-    }
-
-    // 按天分组，跨天实验一眼看得出断点
-    const rows = [];
-    let lastDay = null, prevAt = null;
-    (ex.entries || []).forEach(e => {
-      const k = dayKey(e.at);
-      const newDay = k !== lastDay;
-      if (newDay) { rows.push({ kind:"day", at:e.at, id:"d"+k }); lastDay = k; }
-      rows.push({ kind:"entry", e, gap: !newDay && prevAt ? fmtGap(e.at - prevAt) : null });
-      prevAt = e.at;
-    });
-
-    const commit = () => {
-      const v = draft.trim();
-      if (!v) return;
-      addEntry(ex.id, v);
-      setDraft("");
-      if (draftRef.current) draftRef.current.focus();
-    };
-
-    return (
-      <div style={{ ...S.ctn, paddingBottom: 96 }}>
-        <div style={{ padding:"52px 24px 0" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            <button style={S.ib} onClick={()=>{ setOpenExp(null); setDraft(""); }}><Ic.Back/></button>
-            <span style={{ fontFamily:MONO, fontSize:12, color:"#A79E8E" }}>{ex.code}</span>
-            <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4, background:st.bg, color:st.color }}>{st.label}</span>
-            <button style={{ ...S.ib, marginLeft:"auto" }} onClick={()=>setExpForm(ex.id)}><Ic.Edit s={17}/></button>
-            <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteExp(ex.id)}><Ic.Trash s={16}/></button>
-          </div>
-          <div style={{ fontSize:19, fontWeight:700, lineHeight:1.3, margin:"8px 0 6px" }}>{ex.title}</div>
-          <div style={{ display:"flex", gap:8, fontSize:11, color:"#B0A99B", marginBottom:14, flexWrap:"wrap" }}>
-            <span>{kd.icon} {kd.label}</span><span>·</span>
-            <span>已进行 {fmtSpan((ex.endedAt || Date.now()) - ex.startedAt)}</span><span>·</span>
-            <span>{(ex.entries||[]).length} 条记录</span>
-          </div>
-        </div>
-
-        <div style={{ padding:"0 24px" }}>
-          {ex.purpose && (
-            <Fold title="目的 / 假设" open={!!folds["p"+ex.id]} onToggle={()=>toggleFold("p"+ex.id)}>
-              <div style={{ fontSize:13.5, lineHeight:1.7, color:"#5A544A", whiteSpace:"pre-wrap" }}>{ex.purpose}</div>
-            </Fold>
-          )}
-
-          <Fold title="流程" count={`${doneSteps}/${(ex.protocol||[]).length}`}
-            open={!!folds["s"+ex.id]} onToggle={()=>toggleFold("s"+ex.id)}>
-            {(ex.protocol || []).map((q, i) => (
-              <div key={q.id} style={{ display:"flex", alignItems:"flex-start", gap:9, padding:"6px 0", fontSize:12.5, lineHeight:1.45 }}>
-                <button onClick={()=>{
-                  const now = Date.now();
-                  const next = ex.protocol.map(z => z.id===q.id ? { ...z, doneAt: z.doneAt ? null : now } : z);
-                  setProtocol(ex.id, next);
-                  if (!q.doneAt) addEntry(ex.id, "", { text:`${i+1}. ${q.text}`, data:[], fileRef:null, type:"step" });
-                }} style={{
-                  width:16, height:16, borderRadius:4, flexShrink:0, marginTop:1, cursor:"pointer",
-                  border: q.doneAt ? "1.5px solid #5A9E4B" : "1.5px solid #D8D2C6",
-                  background: q.doneAt ? "#5A9E4B" : "#FFF", color:"#FFF", fontSize:10, lineHeight:1,
-                  display:"flex", alignItems:"center", justifyContent:"center", padding:0,
-                }}>{q.doneAt ? "✓" : ""}</button>
-                <span style={{ color: q.doneAt ? "#3A3630" : "#B0A99B" }}>{i+1}. {q.text}</span>
-                {q.doneAt && <span style={{ marginLeft:"auto", fontFamily:MONO, fontSize:10, color:"#C0B8A8", flexShrink:0 }}>{fmtBJ(q.doneAt)}</span>}
-              </div>
-            ))}
-            <input placeholder="加一步，回车确认" onKeyDown={e=>{
-              if (e.key === "Enter" && e.target.value.trim()) {
-                setProtocol(ex.id, [...(ex.protocol||[]), { id:uid(), text:e.target.value.trim(), doneAt:null }]);
-                e.target.value = "";
-              }
-            }} style={{ ...S.inp, marginTop:8, fontSize:12.5, padding:"9px 11px" }}/>
-            <div style={{ fontSize:10.5, color:"#B0A99B", textAlign:"right", marginTop:6, fontStyle:"italic" }}>勾选即写入记录流 ↓</div>
-          </Fold>
-
-          {(ex.paramSnapshot || []).length > 0 && (
-            <Fold title="参数快照" count={`${ex.paramSnapshot.length} 项`}
-              open={!!folds["q"+ex.id]} onToggle={()=>toggleFold("q"+ex.id)}>
-              <div style={{ fontSize:10.5, color:"#B0A99B", marginBottom:6 }}>开工时冻结，不随项目基线变动</div>
-              {ex.paramSnapshot.map((q,i)=><DataChip key={i} d={q}/>)}
-            </Fold>
-          )}
-
-          <div style={{ display:"flex", alignItems:"baseline", gap:8, margin:"18px 0 4px", paddingBottom:6, borderBottom:"1px solid #EDE8DE" }}>
-            <b style={{ fontSize:11, fontWeight:700, letterSpacing:"0.8px", color:"#8C8478" }}>记录</b>
-            <span style={{ marginLeft:"auto", fontSize:10.5, color:"#B0A99B" }}>{(ex.entries||[]).length} 条 · 只增不删</span>
-          </div>
-
-          {rows.length === 0 && (
-            <div style={{ padding:"28px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>
-              还没有记录<br/><span style={{ fontSize:11.5 }}>下面写一行，或者按「打点」先盖个时间戳</span>
-            </div>
-          )}
-          {rows.map(r => r.kind === "day" ? (
-            <div key={r.id} style={{
-              display:"flex", alignItems:"center", gap:9, margin:"14px 0 6px",
-              fontSize:10.5, fontWeight:700, letterSpacing:"0.6px", color:"#B0A99B",
-            }}>
-              {fmtDayHead(r.at)}
-              <i style={{ flex:1, height:1, background:"#EDE8DE" }}/>
-            </div>
-          ) : (
-            <EntryRow key={r.e.id} e={r.e} gap={r.gap} onEdit={(eid, patch)=>editEntry(ex.id, eid, patch)}/>
-          ))}
-          <div ref={streamRef}/>
-        </div>
-
-        {/* 常驻记录条 —— 暗室里单手够得着 */}
-        <div style={{
-          position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)",
-          width:"100%", maxWidth:430, zIndex:120, background:"#FDFBF7",
-          borderTop:"1px solid #EDE8DE", padding:"10px 24px calc(env(safe-area-inset-bottom, 0px) + 12px)",
-          display:"flex", gap:7, alignItems:"center",
+  const photoUI = (
+    <>
+      {viewPhoto && (
+        <div onClick={()=>setViewPhoto(null)} style={{
+          position:"fixed", inset:0, zIndex:9996, background:"rgba(20,18,16,0.94)",
+          display:"flex", alignItems:"center", justifyContent:"center", padding:16,
+          animation:"flashFade .2s ease both",
         }}>
-          <input ref={draftRef} value={draft} onChange={e=>setDraft(e.target.value)}
-            onKeyDown={e=>{ if (e.key === "Enter") commit(); }}
-            placeholder="记点什么…  PSNR = 28.4 dB"
-            style={{ ...S.inp, flex:1, padding:"10px 12px", fontSize:13, borderRadius:12 }}/>
-          {draft.trim()
-            ? <button onClick={commit} style={{ ...S.miniD, padding:"10px 14px", fontSize:12.5, borderRadius:12 }}>记下</button>
-            : <button onClick={()=>addEntry(ex.id, "")} style={{ ...S.mini, padding:"10px 14px", fontSize:12.5, borderRadius:12 }}>打点</button>}
+          <FullPhoto id={viewPhoto}/>
         </div>
+      )}
+      {saveErr && (
+        <div style={{
+          position:"fixed", bottom:110, left:"50%", transform:"translateX(-50%)", zIndex:9995,
+          background:"#C02556", color:"#FFF", padding:"11px 18px", borderRadius:14,
+          fontSize:13, fontWeight:600, boxShadow:"0 8px 32px rgba(0,0,0,0.25)", whiteSpace:"nowrap",
+        }}>⚠ {saveErr}</div>
+      )}
+    </>
+  );
 
-        {timerUI}
-      {remindUI}
-        <style>{CSS}</style>
-      </div>
-    );
-  }
-
-  // ── Project ──
+  // ── 项目：一页记录本 ──
   if (openProject) {
     const pr = data.projects.find(x => x.id === openProject);
     if (!pr) { setOpenProject(null); return null; }
-    const exps = data.experiments.filter(e => e.projectId === pr.id);
-    const st = PS[pr.status] || PS.running;
-    const lastAt = exps.reduce((a,e)=>Math.max(a, e.entries?.length ? e.entries[e.entries.length-1].at : e.startedAt), 0);
+    const recs = data.records.filter(r => r.projectId === pr.id).sort((a,b)=>b.at-a.at);
+    const today = dayKeyOf(Date.now());
+    const lastWeather = recs.find(r => dayKeyOf(r.at) === today && r.weather)?.weather
+      || recs.find(r => r.weather)?.weather || "";
 
     if (projForm === pr.id) {
       return (
         <div style={S.ctn}>
           <div style={{ padding:"52px 24px 8px", display:"flex", alignItems:"center", gap:12 }}>
             <button style={S.ib} onClick={()=>setProjForm(null)}><Ic.Back/></button>
-            <span style={{ fontSize:20, fontWeight:700 }}>编辑项目</span>
+            <span style={{ fontSize:20, fontWeight:700 }}>改项目名</span>
           </div>
           <div style={{ padding:"0 24px" }}>
             <ProjectForm initial={pr} onSave={saveProject} onCancel={()=>setProjForm(null)}/>
           </div>
-          {timerUI}
-      {remindUI}
+          {timerUI}{remindUI}
           <style>{CSS}</style>
         </div>
       );
@@ -1908,95 +1666,26 @@ export default function MochiApp() {
     return (
       <div style={S.ctn}>
         <div style={{ padding:"52px 24px 0" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
             <button style={S.ib} onClick={()=>setOpenProject(null)}><Ic.Back/></button>
-            <span style={{ fontFamily:MONO, fontSize:12.5, color:"#A79E8E", letterSpacing:"1px" }}>{pr.code}</span>
-            <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4, background:st.bg, color:st.color }}>{st.label}</span>
-            <button style={{ ...S.ib, marginLeft:"auto" }} onClick={()=>setProjForm(pr.id)}><Ic.Edit s={17}/></button>
+            <span style={{ fontSize:20, fontWeight:700, flex:1, lineHeight:1.3 }}>{pr.name}</span>
+            <button style={S.ib} onClick={()=>setProjForm(pr.id)}><Ic.Edit s={17}/></button>
             <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteProject(pr.id)}><Ic.Trash s={16}/></button>
           </div>
-          <div style={{ fontSize:21, fontWeight:700, lineHeight:1.3, margin:"8px 0 6px" }}>{pr.name}</div>
-          <div style={{ display:"flex", gap:8, fontSize:11, color:"#B0A99B", marginBottom:14, flexWrap:"wrap" }}>
-            <span>{exps.length} 次实验</span><span>·</span>
-            <span>已 {fmtSpan(Date.now() - pr.startedAt)}</span>
-            {lastAt > 0 && <><span>·</span><span>最后 {fmtDay(lastAt)}</span></>}
-          </div>
+          <div style={{ fontSize:11, color:"#B0A99B", paddingLeft:34, marginBottom:16 }}>{recs.length} 条记录</div>
         </div>
 
         <div style={{ padding:"0 24px" }}>
-          {pr.setup && (
-            <Fold title="装置与光路" open={!!folds["su"+pr.id]} onToggle={()=>toggleFold("su"+pr.id)}>
-              <div style={{ fontSize:13.5, lineHeight:1.7, color:"#5A544A", whiteSpace:"pre-wrap" }}>{pr.setup}</div>
-            </Fold>
+          <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}/>
+          {recs.map(r => (
+            <RecordCard key={r.id} r={r} onSave={saveRecord} onDelete={deleteRecord} onOpenPhoto={setViewPhoto}/>
+          ))}
+          {recs.length === 0 && (
+            <div style={{ padding:"20px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>还没有记录</div>
           )}
-          {pr.stack && (
-            <Fold title="代码与环境" open={!!folds["sk"+pr.id]} onToggle={()=>toggleFold("sk"+pr.id)}>
-              <div style={{ fontSize:12.5, lineHeight:1.7, color:"#5A544A", whiteSpace:"pre-wrap", fontFamily:MONO }}>{pr.stack}</div>
-            </Fold>
-          )}
-          <Fold title="基线参数" count={`${(pr.params||[]).length} 项`}
-            open={!!folds["pa"+pr.id]} onToggle={()=>toggleFold("pa"+pr.id)}>
-            {(pr.params || []).map((q,i)=>(
-              <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"7px 0", borderBottom:"1px solid #F2EFE8" }}>
-                <DataChip d={q}/>
-                {q.at && <span style={{ fontSize:10, color:"#C0B8A8", fontFamily:MONO }}>{fmtDay(q.at)}</span>}
-                <button onClick={()=>setProjParams(pr.id, pr.params.filter((_,j)=>j!==i))}
-                  style={{ ...S.ib, marginLeft:"auto", color:"#DDD", padding:3 }}><Ic.Trash s={13}/></button>
-              </div>
-            ))}
-            <input placeholder="加参数，写成 λ = 780.24 nm，回车确认" onKeyDown={e=>{
-              const re = parseEntry(e.target.value);
-              if (e.key === "Enter" && re?.data?.length) {
-                const add = re.data.map(q => ({ key:q.key, value:q.value, unit:q.unit, at:Date.now() }));
-                const keep = (pr.params||[]).filter(q => !add.some(a => a.key === q.key));
-                setProjParams(pr.id, [...keep, ...add]);
-                e.target.value = "";
-              }
-            }} style={{ ...S.inp, marginTop:8, fontSize:12.5, padding:"9px 11px" }}/>
-          </Fold>
-
-          <div style={{ display:"flex", alignItems:"baseline", gap:8, margin:"18px 0 10px", paddingBottom:6, borderBottom:"1px solid #EDE8DE" }}>
-            <b style={{ fontSize:11, fontWeight:700, letterSpacing:"0.8px", color:"#8C8478" }}>实验</b>
-            <span style={{ marginLeft:"auto", fontSize:10.5, color:"#B0A99B" }}>{exps.length} 次</span>
-          </div>
-
-          {expForm === "new" && <ExpForm project={pr} onSave={saveExp} onCancel={()=>setExpForm(null)}/>}
-
-          {exps.length === 0 && expForm !== "new" && (
-            <div style={{ padding:"24px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>还没有实验 · 点右下角 + 开一次</div>
-          )}
-
-          {exps.map(e => {
-            const es = ES[e.status] || ES.running;
-            const ek = EK[e.kind] || EK.acq;
-            const dn = (e.protocol||[]).filter(q=>q.doneAt).length;
-            const tot = (e.protocol||[]).length;
-            return (
-              <div key={e.id} onClick={()=>{ setOpenExp(e.id); setDraft(""); }}
-                style={{ ...S.pcard, background: e.status==="done"||e.status==="aborted" ? "#F7F5F0" : "#FFF" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
-                  <span style={{ fontFamily:MONO, fontSize:10.5, color:"#A79E8E" }}>{e.code}</span>
-                  <span style={{ fontSize:10.5, color:"#B0A99B" }}>{ek.icon} {ek.label}</span>
-                  <span style={{ marginLeft:"auto", fontSize:9.5, fontWeight:700, padding:"2px 8px", borderRadius:4, background:es.bg, color:es.color }}>{es.label}</span>
-                </div>
-                <div style={{ fontSize:14, fontWeight:600, lineHeight:1.35 }}>{e.title}</div>
-                <div style={{ display:"flex", alignItems:"center", gap:7, marginTop:7, fontSize:10.5, color:"#B0A99B" }}>
-                  {tot > 0 && <>
-                    <span style={{ width:50, height:4, borderRadius:2, background:"#EDE8DE", overflow:"hidden", flexShrink:0 }}>
-                      <i style={{ display:"block", height:"100%", width:`${tot?dn/tot*100:0}%`, background:"#E8A838", borderRadius:2 }}/>
-                    </span>
-                    <span>流程 {dn}/{tot}</span><span>·</span>
-                  </>}
-                  <span>{(e.entries||[]).length} 条记录</span>
-                </div>
-              </div>
-            );
-          })}
         </div>
 
-        <button onClick={()=>setExpForm("new")} style={S.fab}><Ic.Plus s={26}/></button>
-        {timerUI}
-      {remindUI}
+        {timerUI}{remindUI}{photoUI}
         <style>{CSS}</style>
       </div>
     );
@@ -2161,32 +1850,17 @@ export default function MochiApp() {
               </div>
             )}
 
-            {PRJ_STATUS.map(st => {
-              const list = data.projects.filter(x => (x.status||"running") === st.key);
-              if (!list.length) return null;
+            {data.projects.map(pr => {
+              const n = data.records.filter(r => r.projectId === pr.id).length;
+              const last = data.records.filter(r => r.projectId === pr.id).reduce((m,r)=>Math.max(m,r.at),0);
               return (
-                <div key={st.key}>
-                  <div style={S.grp}>{st.label}</div>
-                  {list.map(pr => {
-                    const exps = data.experiments.filter(e => e.projectId === pr.id);
-                    const lastAt = exps.reduce((a,e)=>Math.max(a, e.entries?.length ? e.entries[e.entries.length-1].at : e.startedAt), 0);
-                    const dim = st.key !== "running";
-                    return (
-                      <div key={pr.id} onClick={()=>setOpenProject(pr.id)}
-                        style={{ ...S.pcard, background: dim ? "#F7F5F0" : "#FFF", animation:"popIn .3s ease both" }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
-                          <span style={{ fontFamily:MONO, fontSize:11, color:"#A79E8E", letterSpacing:"0.8px" }}>{pr.code}</span>
-                          <span style={{ marginLeft:"auto", fontSize:9.5, fontWeight:700, padding:"2px 8px", borderRadius:4, background:st.bg, color:st.color }}>{st.label}</span>
-                        </div>
-                        <div style={{ fontSize:15, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
-                        <div style={{ display:"flex", gap:7, marginTop:7, fontSize:10.5, color:"#B0A99B", flexWrap:"wrap" }}>
-                          <span>{exps.length} 次实验</span><span>·</span>
-                          <span>已 {fmtSpan(Date.now() - pr.startedAt)}</span>
-                          {lastAt > 0 && <><span>·</span><span>最后 {fmtDay(lastAt)}</span></>}
-                        </div>
-                      </div>
-                    );
-                  })}
+                <div key={pr.id} onClick={()=>setOpenProject(pr.id)}
+                  style={{ ...S.pcard, animation:"popIn .3s ease both" }}>
+                  <div style={{ fontSize:15.5, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
+                  <div style={{ display:"flex", gap:7, marginTop:6, fontSize:11, color:"#B0A99B" }}>
+                    <span>{n} 条记录</span>
+                    {last > 0 && <><span>·</span><span>最后 {fmtDay(last)}</span></>}
+                  </div>
                 </div>
               );
             })}
