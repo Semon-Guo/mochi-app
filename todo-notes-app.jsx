@@ -7,10 +7,15 @@ const BG_LIMIT_SEC = 5 * 60;
 function saveTimerSession(todoId, startTs, baseElapsed) { try { localStorage.removeItem(BG_TS_SK); localStorage.setItem(TIMER_SK, JSON.stringify({ todoId, startTs, baseElapsed })); } catch {} }
 function clearTimerSession() { try { localStorage.removeItem(TIMER_SK); localStorage.removeItem(BG_TS_SK); } catch {} }
 function loadAll() {
-  let data = { todos: [], notes: [] };
+  let data = { todos: [], notes: [], projects: [], experiments: [] };
   let activeTodoId = null;
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
-  data = { todos: (data.todos || []).map(migrateTodo), notes: data.notes || [] };
+  data = {
+    todos: (data.todos || []).map(migrateTodo),
+    notes: data.notes || [],
+    projects: data.projects || [],
+    experiments: (data.experiments || []).map(migrateExp),
+  };
   try {
     const s = localStorage.getItem(TIMER_SK);
     if (s) {
@@ -93,6 +98,114 @@ function migrateTodo(t) {
   if (t.importance && !t.urgency) return t;
   const { urgency, ...rest } = t;
   return { ...rest, importance: t.importance || LEGACY_IMP[urgency] || "side" };
+}
+
+/* ── Lab notebook ─────────────────────────────────────────────────────
+   项目（几个月～一年）→ 实验（一次上手）→ 记录（一行一个时间戳，只增不删） */
+
+const PRJ_STATUS = [
+  { key:"running", label:"进行中", color:"#C08A1E", bg:"#FFF6E5" },
+  { key:"hold",    label:"搁置",   color:"#9A9184", bg:"#F1EFEB" },
+  { key:"done",    label:"已结题", color:"#4A8C3D", bg:"#EEFAE9" },
+];
+const PS = Object.fromEntries(PRJ_STATUS.map(x=>[x.key,x]));
+
+const EXP_STATUS = [
+  { key:"planning", label:"计划中", color:"#5B7FC7", bg:"#EEF2FA" },
+  { key:"running",  label:"进行中", color:"#C08A1E", bg:"#FFF6E5" },
+  { key:"done",     label:"已完成", color:"#4A8C3D", bg:"#EEFAE9" },
+  { key:"aborted",  label:"中止",   color:"#9A9184", bg:"#F1EFEB" },
+];
+const ES = Object.fromEntries(EXP_STATUS.map(x=>[x.key,x]));
+
+// 计算成像：采集在光路上，重建在电脑上，两边关心的字段不一样
+const EXP_KIND = [
+  { key:"acq",    label:"采集", icon:"◉" },
+  { key:"recon",  label:"重建", icon:"⛯" },
+  { key:"calib",  label:"标定", icon:"⊹" },
+  { key:"analys", label:"分析", icon:"∿" },
+];
+const EK = Object.fromEntries(EXP_KIND.map(x=>[x.key,x]));
+
+const ENTRY_TYPE = { obs:"obs", data:"data", step:"step", file:"file", issue:"issue" };
+
+function migrateExp(e) { return e.entries ? e : { ...e, entries: [] }; }
+function expCode(project, num) {
+  return `${(project?.code || "EXP").toUpperCase()}-${String(num).padStart(3, "0")}`;
+}
+
+/* key = value [unit] — 宽进严出：认不出来就当普通观察，绝不拦着输入 */
+const KEY_CH = "A-Za-z0-9\\u0370-\\u03FF\\u4e00-\\u9fa5_\\-.";
+const NUM = "-?\\d+(?:\\.\\d+)?(?:[eE][-+]?\\d+)?";
+const UNIT = "(?:[A-Za-zμµ%°/·^][A-Za-z0-9μµ%°/·^\\-]{0,7})?";
+const KV_RE = new RegExp(`([${KEY_CH}]{1,16}?)\\s*[=:：]\\s*(${NUM})(?:\\s*(?:→|->|~>)\\s*(${NUM}))?\\s*(${UNIT})`, "g");
+const FILE_RE = /[\w\-.\/]+\.(?:csv|txt|dat|mat|npy|npz|h5|hdf5|json|png|tif|tiff|jpg|jpeg|raw|bin|py|m|ipynb)\b/i;
+
+function parseEntry(raw) {
+  const text = raw.trim();
+  if (!text) return null;
+  const issue = /^[!！⚠]/.test(text);
+  const body = issue ? text.replace(/^[!！⚠]\s*/, "") : text;
+
+  const data = [];
+  KV_RE.lastIndex = 0;
+  let m;
+  while ((m = KV_RE.exec(body)) !== null) {
+    const [, key, v1, v2, unit] = m;
+    const value = parseFloat(v2 != null ? v2 : v1);
+    if (!Number.isFinite(value)) continue;
+    data.push({ key, value, unit: unit || "", from: v2 != null ? parseFloat(v1) : null });
+  }
+
+  const fileHit = body.match(FILE_RE);
+  const type = issue ? "issue" : data.length ? "data" : fileHit ? "file" : "obs";
+  return { text: body, data, fileRef: fileHit ? fileHit[0] : null, type };
+}
+
+/* 波长 chip 按真实光色着色 — 光学独有的免费信息通道 */
+function wlColor(nm) {
+  if (nm >= 380 && nm < 440) return "#6A2FA0";
+  if (nm < 490) return "#1F5FBF";
+  if (nm < 510) return "#0F8C86";
+  if (nm < 580) return "#3E9A2E";
+  if (nm < 645) return "#C46A12";
+  if (nm <= 780) return "#8E1520";
+  return "#5A5A5A";   // 不可见
+}
+function dataTone(d) {
+  const k = (d.key || "").toLowerCase();
+  if ((/^(λ|lambda|wl|wave)/.test(k) || /nm/i.test(d.unit)) && d.value >= 200 && d.value <= 2000) {
+    return { color: wlColor(d.value), swatch: wlColor(d.value) };
+  }
+  return { color: "#2C2C2C", swatch: null };
+}
+
+/* 跨天 */
+function fmtSpan(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  // 项目按年月算，实验按天时算 — 一年的项目说「240天0h」没人看得下去
+  if (d >= 365) { const yr = Math.floor(d / 365), mo = Math.round((d % 365) / 30); return mo ? `${yr}年${mo}个月` : `${yr}年`; }
+  if (d >= 60) return `${Math.round(d / 30)}个月`;
+  if (d >= 2) return `${d}天`;
+  if (d > 0) return h ? `${d}天${h}h` : `${d}天`;
+  if (h > 0) return `${h}h${m}m`;
+  return `${m}m`;
+}
+function fmtGap(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 1) return null;
+  if (m < 60) return `+${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `+${h}h${m % 60}m` : `+${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `+${d}天${h % 24}h` : `+${d}天`;
+}
+function dayKey(ts) { return toBJ(ts).toDateString(); }
+function fmtDayHead(ts) {
+  const d = toBJ(ts);
+  const w = ["周日","周一","周二","周三","周四","周五","周六"][d.getDay()];
+  return `${fmtDay(ts)} ${w}`;
 }
 
 const NC = [
@@ -883,6 +996,212 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
   );
 }
 
+/* ── Collapsible section ── */
+function Fold({ title, count, open, onToggle, children }) {
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <button onClick={onToggle} style={{
+        width:"100%", display:"flex", alignItems:"center", gap:8, padding:"10px 12px",
+        border:"1px solid #EDE8DE", borderRadius:11, background:"#FFF", cursor:"pointer",
+        fontFamily:"inherit", fontSize:12.5, color:"#8C8478", textAlign:"left",
+      }}>
+        <span style={{ color:"#C0B8A8", fontSize:10 }}>{open ? "▾" : "▸"}</span>
+        <b style={{ color:"#2C2C2C", fontWeight:600 }}>{title}</b>
+        {count != null && <span style={{ marginLeft:"auto", fontSize:10.5, color:"#B0A99B", fontFamily:MONO }}>{count}</span>}
+      </button>
+      {open && <div style={{ padding:"10px 12px 4px", animation:"slideUp .2s ease both" }}>{children}</div>}
+    </div>
+  );
+}
+
+const MONO = "'JetBrains Mono','SF Mono','Courier New',monospace";
+
+/* ── key = value chip ── */
+function DataChip({ d }) {
+  const tone = dataTone(d);
+  return (
+    <span style={{
+      display:"inline-flex", alignItems:"baseline", gap:4, fontFamily:MONO, fontSize:11,
+      background:"#F2EFE8", border:"1px solid #E7E2D6", padding:"3px 8px",
+      borderRadius:5, margin:"2px 4px 2px 0",
+    }}>
+      {tone.swatch && <i style={{ width:7, height:7, borderRadius:2, background:tone.swatch, alignSelf:"center" }}/>}
+      <b style={{ fontWeight:500, color:"#8C8478" }}>{d.key}</b>
+      <u style={{ textDecoration:"none", color:tone.color, fontWeight:600 }}>
+        {d.from != null && <span style={{ color:"#C0B8A8" }}>{d.from} → </span>}{d.value}
+      </u>
+      {d.unit && <s style={{ textDecoration:"none", color:"#B0A99B", fontSize:10 }}>{d.unit}</s>}
+    </span>
+  );
+}
+
+/* ── one record in the stream ── */
+function EntryRow({ e, gap, onEdit }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(e.text);
+  const t = toBJ(e.at);
+  const hhmm = `${t.getHours().toString().padStart(2,"0")}:${t.getMinutes().toString().padStart(2,"0")}`;
+  const issue = e.type === "issue";
+
+  const body = editing ? (
+    <div>
+      <textarea value={draft} onChange={ev=>setDraft(ev.target.value)} rows={2} style={{
+        width:"100%", padding:"8px 10px", borderRadius:9, border:"2px solid #E8E4DA",
+        fontSize:12.5, fontFamily:"inherit", outline:"none", resize:"vertical", boxSizing:"border-box",
+      }}/>
+      <div style={{ display:"flex", gap:6, marginTop:6 }}>
+        <button onClick={()=>{ onEdit(e.id, { text: draft }); setEditing(false); }} style={S.miniD}>保存补充</button>
+        <button onClick={()=>{ setDraft(e.text); setEditing(false); }} style={S.mini}>取消</button>
+        {!e.voided && <button onClick={()=>{ onEdit(e.id, { voided:true }); setEditing(false); }}
+          style={{ ...S.mini, marginLeft:"auto", color:"#C02556" }}>作废</button>}
+        {e.voided && <button onClick={()=>{ onEdit(e.id, { voided:false }); setEditing(false); }}
+          style={{ ...S.mini, marginLeft:"auto" }}>撤销作废</button>}
+      </div>
+    </div>
+  ) : (
+    <div onClick={()=>setEditing(true)} style={{ cursor:"pointer" }}>
+      {e.type === "step" && <span style={{ color:"#4A8C3D", marginRight:5 }}>✓</span>}
+      {e.text
+        ? <span style={{ textDecoration: e.voided ? "line-through" : "none", opacity: e.voided ? .45 : 1 }}>{e.text}</span>
+        : (!e.data?.length && !e.fileRef) && <span style={{ color:"#C0B8A8", fontStyle:"italic" }}>（待补）</span>}
+      {e.fileRef && !e.voided && (
+        <div style={{
+          display:"inline-flex", alignItems:"center", gap:5, fontFamily:MONO, fontSize:10.5,
+          background:"#EEF2FA", color:"#4A6DAF", padding:"4px 8px", borderRadius:5,
+          border:"1px solid #DFE7F5", marginTop:4,
+        }}>📄 {e.fileRef}</div>
+      )}
+      {e.data?.length > 0 && !e.voided && (
+        <div style={{ marginTop:3 }}>{e.data.map((d,i)=><DataChip key={i} d={d}/>)}</div>
+      )}
+      {e.editedAt && <div style={{ fontSize:9.5, color:"#C0B8A8", marginTop:3, fontFamily:MONO }}>
+        {fmtBJ(e.at)} 记录 · {fmtBJ(e.editedAt)} 补充
+      </div>}
+    </div>
+  );
+
+  return (
+    <>
+      {gap && <div style={{ fontFamily:MONO, fontSize:9.5, color:"#CFC7B8", paddingLeft:45, margin:"-1px 0" }}>{gap}</div>}
+      <div style={{ display:"flex", gap:9, padding:"6px 0" }}>
+        <span style={{ fontFamily:MONO, fontSize:10.5, color:"#B0A99B", flexShrink:0, width:36, paddingTop:2 }}>{hhmm}</span>
+        <div style={{
+          flex:1, minWidth:0, fontSize:12.5, lineHeight:1.5,
+          color: issue ? "#8E1B3E" : "#3A3630",
+          background: issue && !e.voided ? "#FDEBF0" : "transparent",
+          borderLeft: issue && !e.voided ? "2px solid #C02556" : "none",
+          padding: issue && !e.voided ? "6px 9px" : 0,
+          borderRadius: issue ? "0 5px 5px 0" : 0,
+        }}>
+          {body}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ── Project form ── */
+function ProjectForm({ initial, onSave, onCancel }) {
+  const [code, setCode] = useState(initial?.code || "");
+  const [name, setName] = useState(initial?.name || "");
+  const [status, setStatus] = useState(initial?.status || "running");
+  const [setup, setSetup] = useState(initial?.setup || "");
+  const [stack, setStack] = useState(initial?.stack || "");
+  const ref = useRef(null);
+  useEffect(()=>{ if(ref.current) ref.current.focus(); }, []);
+  const ok = name.trim() && code.trim();
+  return (
+    <div style={{ animation:"slideUp .3s ease both", padding:"12px 0 16px" }}>
+      <input ref={ref} value={name} onChange={e=>setName(e.target.value)} placeholder="项目名称…" style={S.inp}/>
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:10 }}>
+        <span style={{ fontSize:12, color:"#999", fontWeight:600 }}>代号</span>
+        <input value={code} onChange={e=>setCode(e.target.value.toUpperCase().slice(0,8))}
+          placeholder="FPM" style={{ ...S.inp, width:110, fontFamily:MONO, letterSpacing:"1px" }}/>
+        <span style={{ fontSize:11, color:"#BBB" }}>实验编号 {code.trim() ? `${code}-001` : "FPM-001"}</span>
+      </div>
+      <div style={{ marginTop:12 }}>
+        <div style={S.lbl}>状态</div>
+        <div style={{ display:"flex", gap:6 }}>
+          {PRJ_STATUS.map(x=>(
+            <button key={x.key} onClick={()=>setStatus(x.key)} style={{
+              flex:1, padding:"9px 0", borderRadius:12, fontSize:12, fontWeight:600, cursor:"pointer",
+              fontFamily:"inherit", background:x.bg, color:x.color,
+              border: status===x.key ? `2.5px solid ${x.color}` : "2.5px solid transparent",
+            }}>{x.label}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop:12 }}>
+        <div style={S.lbl}>装置与光路</div>
+        <textarea value={setup} onChange={e=>setSetup(e.target.value)} rows={3}
+          placeholder="相机型号、镜头、照明、编码方式…" style={{ ...S.inp, resize:"vertical" }}/>
+      </div>
+      <div style={{ marginTop:12 }}>
+        <div style={S.lbl}>代码与环境</div>
+        <textarea value={stack} onChange={e=>setStack(e.target.value)} rows={2}
+          placeholder="repo / commit / 依赖版本…" style={{ ...S.inp, resize:"vertical", fontFamily:MONO, fontSize:12.5 }}/>
+      </div>
+      <div style={{ display:"flex", gap:10, marginTop:16 }}>
+        <button onClick={onCancel} style={S.btnGhost}>取消</button>
+        <button onClick={()=>ok && onSave({ code:code.trim().toUpperCase(), name:name.trim(), status, setup, stack })}
+          style={{ ...S.btnDark, opacity: ok ? 1 : .4 }}>保存</button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Experiment form ── */
+function ExpForm({ initial, project, onSave, onCancel }) {
+  const [title, setTitle] = useState(initial?.title || "");
+  const [kind, setKind] = useState(initial?.kind || "acq");
+  const [status, setStatus] = useState(initial?.status || "running");
+  const [purpose, setPurpose] = useState(initial?.purpose || "");
+  const ref = useRef(null);
+  useEffect(()=>{ if(ref.current) ref.current.focus(); }, []);
+  return (
+    <div style={{ animation:"slideUp .3s ease both", padding:"12px 0 16px" }}>
+      <div style={{ fontFamily:MONO, fontSize:11, color:"#B0A99B", marginBottom:8 }}>
+        {initial?.code || expCode(project, project?.seq || 1)}
+      </div>
+      <input ref={ref} value={title} onChange={e=>setTitle(e.target.value)} placeholder="这次要做什么…" style={S.inp}/>
+      <div style={{ marginTop:12 }}>
+        <div style={S.lbl}>类型</div>
+        <div style={{ display:"flex", gap:6 }}>
+          {EXP_KIND.map(x=>(
+            <button key={x.key} onClick={()=>setKind(x.key)} style={{
+              flex:1, padding:"9px 0", borderRadius:12, fontSize:12, fontWeight:600, cursor:"pointer",
+              fontFamily:"inherit", background:"#F2EFE8", color: kind===x.key ? "#2C2C2C" : "#9A9184",
+              border: kind===x.key ? "2.5px solid #2C2C2C" : "2.5px solid transparent",
+            }}>{x.icon} {x.label}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop:12 }}>
+        <div style={S.lbl}>状态</div>
+        <div style={{ display:"flex", gap:6 }}>
+          {EXP_STATUS.map(x=>(
+            <button key={x.key} onClick={()=>setStatus(x.key)} style={{
+              flex:1, padding:"8px 0", borderRadius:11, fontSize:11.5, fontWeight:600, cursor:"pointer",
+              fontFamily:"inherit", background:x.bg, color:x.color,
+              border: status===x.key ? `2.5px solid ${x.color}` : "2.5px solid transparent",
+            }}>{x.label}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop:12 }}>
+        <div style={S.lbl}>目的 / 假设</div>
+        <textarea value={purpose} onChange={e=>setPurpose(e.target.value)} rows={3}
+          placeholder="想验证什么…" style={{ ...S.inp, resize:"vertical" }}/>
+      </div>
+      <div style={{ display:"flex", gap:10, marginTop:16 }}>
+        <button onClick={onCancel} style={S.btnGhost}>取消</button>
+        <button onClick={()=>title.trim() && onSave({ title:title.trim(), kind, status, purpose })}
+          style={{ ...S.btnDark, opacity: title.trim() ? 1 : .4 }}>保存</button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main App ── */
 export default function MochiApp() {
   const [initState] = useState(loadAll);
@@ -905,6 +1224,14 @@ export default function MochiApp() {
   const [dragHalfH, setDragHalfH] = useState(30);
   const [remindFor, setRemindFor] = useState(null);     // todo id whose reminder sheet is open
   const [remindAlert, setRemindAlert] = useState(null); // todo id of the in-app "到点了" banner
+  const [openProject, setOpenProject] = useState(null);
+  const [openExp, setOpenExp] = useState(null);
+  const [projForm, setProjForm] = useState(null);   // "new" | project id
+  const [expForm, setExpForm] = useState(null);     // "new" | experiment id
+  const [folds, setFolds] = useState({});
+  const [draft, setDraft] = useState("");
+  const draftRef = useRef(null);
+  const streamRef = useRef(null);
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
   const dragYRef = useRef(0);
@@ -914,6 +1241,11 @@ export default function MochiApp() {
 
   useEffect(() => { save(data); }, [data]);
   useEffect(() => { todosRef.current = data.todos; }, [data.todos]);
+  useEffect(() => {
+    if (!openExp) return;
+    const t = setTimeout(() => window.scrollTo({ top: document.body.scrollHeight }), 60);
+    return () => clearTimeout(t);
+  }, [openExp]);
 
   // Reminder scheduler — polls while the app is alive, and re-checks whenever it
   // comes back to the foreground (a backgrounded PWA gets its timers frozen).
@@ -1125,6 +1457,95 @@ export default function MochiApp() {
     setTimeout(() => setCanceledTimer(false), 3000);
   };
 
+  // Lab notebook
+  const toggleFold = (k) => setFolds(f => ({ ...f, [k]: !f[k] }));
+
+  const saveProject = (info) => {
+    setData(d => {
+      if (projForm === "new") {
+        const pr = { id:uid(), ...info, startedAt:Date.now(), seq:1, params:[], color:NC[d.projects.length % NC.length] };
+        return { ...d, projects: [pr, ...d.projects] };
+      }
+      return { ...d, projects: d.projects.map(x => x.id === projForm ? { ...x, ...info } : x) };
+    });
+    setProjForm(null);
+  };
+  const deleteProject = (id) => {
+    setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id), experiments: d.experiments.filter(e=>e.projectId!==id) }));
+    setOpenProject(null); setOpenExp(null);
+  };
+  const setProjParams = (id, params) =>
+    setData(d => ({ ...d, projects: d.projects.map(x => x.id===id ? { ...x, params } : x) }));
+
+  const saveExp = (info) => {
+    setData(d => {
+      if (expForm === "new") {
+        const pr = d.projects.find(x => x.id === openProject);
+        if (!pr) return d;
+        const ex = {
+          id:uid(), projectId:pr.id, num:pr.seq, code:expCode(pr, pr.seq), ...info,
+          paramSnapshot: (pr.params || []).map(q => ({ ...q })),   // 冻结开工时的参数
+          protocol: [], entries: [], result:"", conclusion:"", next:"",
+          startedAt: Date.now(), endedAt: null,
+        };
+        return {
+          ...d,
+          projects: d.projects.map(x => x.id===pr.id ? { ...x, seq: pr.seq + 1 } : x),
+          experiments: [ex, ...d.experiments],
+        };
+      }
+      return { ...d, experiments: d.experiments.map(e => e.id === expForm ? { ...e, ...info,
+        endedAt: info.status === "done" || info.status === "aborted" ? (e.endedAt || Date.now()) : null } : e) };
+    });
+    setExpForm(null);
+  };
+  const deleteExp = (id) => {
+    setData(d => ({ ...d, experiments: d.experiments.filter(e=>e.id!==id) }));
+    setOpenExp(null);
+  };
+
+  // 记录流只追加。作废保留原文，编辑留下补充时间。
+  const addEntry = (expId, raw, forced) => {
+    const parsed = forced || parseEntry(raw);
+    const e = parsed
+      ? { id:uid(), at:Date.now(), type:parsed.type, text:parsed.text, data:parsed.data || [], fileRef:parsed.fileRef || null, voided:false, editedAt:null }
+      : { id:uid(), at:Date.now(), type:"obs", text:"", data:[], fileRef:null, voided:false, editedAt:null };
+    setData(d => {
+      const ex = d.experiments.find(x => x.id === expId);
+      if (!ex) return d;
+      // 变更写法 P: 12.3 → 8.7 同时推进项目基线参数
+      let projects = d.projects;
+      const changes = (e.data || []).filter(q => q.from != null);
+      if (changes.length) {
+        projects = d.projects.map(pr => {
+          if (pr.id !== ex.projectId) return pr;
+          const params = [...(pr.params || [])];
+          changes.forEach(c => {
+            const i = params.findIndex(q => q.key === c.key);
+            const rec = { key:c.key, value:c.value, unit:c.unit, at:Date.now() };
+            if (i >= 0) params[i] = rec; else params.push(rec);
+          });
+          return { ...pr, params };
+        });
+      }
+      return { ...d, projects, experiments: d.experiments.map(x => x.id === expId ? { ...x, entries: [...x.entries, e] } : x) };
+    });
+  };
+  const editEntry = (expId, entryId, patch) => {
+    setData(d => ({ ...d, experiments: d.experiments.map(x => x.id !== expId ? x : {
+      ...x, entries: x.entries.map(e => {
+        if (e.id !== entryId) return e;
+        if (patch.text != null && patch.text !== e.text) {
+          const re = parseEntry(patch.text) || { text:patch.text, data:[], fileRef:null, type:"obs" };
+          return { ...e, text:re.text, data:re.data, fileRef:re.fileRef, type: e.type==="step" ? "step" : re.type, editedAt: Date.now() };
+        }
+        return { ...e, ...patch };
+      }),
+    })}));
+  };
+  const setProtocol = (expId, protocol) =>
+    setData(d => ({ ...d, experiments: d.experiments.map(x => x.id===expId ? { ...x, protocol } : x) }));
+
   // Notes
   const createNote = () => { const c=NC[Math.floor(Math.random()*NC.length)]; const n={id:uid(),title:"",body:"",ts:Date.now(),color:c}; setData(d=>({...d,notes:[n,...d.notes]})); setEditingNote(n.id); };
   const updateNote = (id,f,v) => { setData(d=>({...d,notes:d.notes.map(n=>n.id===id?{...n,[f]:v,ts:Date.now()}:n)})); };
@@ -1230,6 +1651,277 @@ export default function MochiApp() {
       )}
     </>
   );
+
+  // ── Experiment: the record stream ──
+  if (openExp) {
+    const ex = data.experiments.find(x => x.id === openExp);
+    if (!ex) { setOpenExp(null); return null; }
+    const pr = data.projects.find(x => x.id === ex.projectId);
+    const st = ES[ex.status] || ES.running;
+    const kd = EK[ex.kind] || EK.acq;
+    const doneSteps = (ex.protocol || []).filter(q => q.doneAt).length;
+
+    if (expForm === ex.id) {
+      return (
+        <div style={S.ctn}>
+          <div style={{ padding:"52px 24px 8px", display:"flex", alignItems:"center", gap:12 }}>
+            <button style={S.ib} onClick={()=>setExpForm(null)}><Ic.Back/></button>
+            <span style={{ fontSize:20, fontWeight:700 }}>编辑实验</span>
+          </div>
+          <div style={{ padding:"0 24px" }}>
+            <ExpForm initial={ex} project={pr} onSave={saveExp} onCancel={()=>setExpForm(null)}/>
+          </div>
+          {remindUI}
+          <style>{CSS}</style>
+        </div>
+      );
+    }
+
+    // 按天分组，跨天实验一眼看得出断点
+    const rows = [];
+    let lastDay = null, prevAt = null;
+    (ex.entries || []).forEach(e => {
+      const k = dayKey(e.at);
+      const newDay = k !== lastDay;
+      if (newDay) { rows.push({ kind:"day", at:e.at, id:"d"+k }); lastDay = k; }
+      rows.push({ kind:"entry", e, gap: !newDay && prevAt ? fmtGap(e.at - prevAt) : null });
+      prevAt = e.at;
+    });
+
+    const commit = () => {
+      const v = draft.trim();
+      if (!v) return;
+      addEntry(ex.id, v);
+      setDraft("");
+      if (draftRef.current) draftRef.current.focus();
+    };
+
+    return (
+      <div style={{ ...S.ctn, paddingBottom: 96 }}>
+        <div style={{ padding:"52px 24px 0" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <button style={S.ib} onClick={()=>{ setOpenExp(null); setDraft(""); }}><Ic.Back/></button>
+            <span style={{ fontFamily:MONO, fontSize:12, color:"#A79E8E" }}>{ex.code}</span>
+            <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4, background:st.bg, color:st.color }}>{st.label}</span>
+            <button style={{ ...S.ib, marginLeft:"auto" }} onClick={()=>setExpForm(ex.id)}><Ic.Edit s={17}/></button>
+            <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteExp(ex.id)}><Ic.Trash s={16}/></button>
+          </div>
+          <div style={{ fontSize:19, fontWeight:700, lineHeight:1.3, margin:"8px 0 6px" }}>{ex.title}</div>
+          <div style={{ display:"flex", gap:8, fontSize:11, color:"#B0A99B", marginBottom:14, flexWrap:"wrap" }}>
+            <span>{kd.icon} {kd.label}</span><span>·</span>
+            <span>已进行 {fmtSpan((ex.endedAt || Date.now()) - ex.startedAt)}</span><span>·</span>
+            <span>{(ex.entries||[]).length} 条记录</span>
+          </div>
+        </div>
+
+        <div style={{ padding:"0 24px" }}>
+          {ex.purpose && (
+            <Fold title="目的 / 假设" open={!!folds["p"+ex.id]} onToggle={()=>toggleFold("p"+ex.id)}>
+              <div style={{ fontSize:13.5, lineHeight:1.7, color:"#5A544A", whiteSpace:"pre-wrap" }}>{ex.purpose}</div>
+            </Fold>
+          )}
+
+          <Fold title="流程" count={`${doneSteps}/${(ex.protocol||[]).length}`}
+            open={!!folds["s"+ex.id]} onToggle={()=>toggleFold("s"+ex.id)}>
+            {(ex.protocol || []).map((q, i) => (
+              <div key={q.id} style={{ display:"flex", alignItems:"flex-start", gap:9, padding:"6px 0", fontSize:12.5, lineHeight:1.45 }}>
+                <button onClick={()=>{
+                  const now = Date.now();
+                  const next = ex.protocol.map(z => z.id===q.id ? { ...z, doneAt: z.doneAt ? null : now } : z);
+                  setProtocol(ex.id, next);
+                  if (!q.doneAt) addEntry(ex.id, "", { text:`${i+1}. ${q.text}`, data:[], fileRef:null, type:"step" });
+                }} style={{
+                  width:16, height:16, borderRadius:4, flexShrink:0, marginTop:1, cursor:"pointer",
+                  border: q.doneAt ? "1.5px solid #5A9E4B" : "1.5px solid #D8D2C6",
+                  background: q.doneAt ? "#5A9E4B" : "#FFF", color:"#FFF", fontSize:10, lineHeight:1,
+                  display:"flex", alignItems:"center", justifyContent:"center", padding:0,
+                }}>{q.doneAt ? "✓" : ""}</button>
+                <span style={{ color: q.doneAt ? "#3A3630" : "#B0A99B" }}>{i+1}. {q.text}</span>
+                {q.doneAt && <span style={{ marginLeft:"auto", fontFamily:MONO, fontSize:10, color:"#C0B8A8", flexShrink:0 }}>{fmtBJ(q.doneAt)}</span>}
+              </div>
+            ))}
+            <input placeholder="加一步，回车确认" onKeyDown={e=>{
+              if (e.key === "Enter" && e.target.value.trim()) {
+                setProtocol(ex.id, [...(ex.protocol||[]), { id:uid(), text:e.target.value.trim(), doneAt:null }]);
+                e.target.value = "";
+              }
+            }} style={{ ...S.inp, marginTop:8, fontSize:12.5, padding:"9px 11px" }}/>
+            <div style={{ fontSize:10.5, color:"#B0A99B", textAlign:"right", marginTop:6, fontStyle:"italic" }}>勾选即写入记录流 ↓</div>
+          </Fold>
+
+          {(ex.paramSnapshot || []).length > 0 && (
+            <Fold title="参数快照" count={`${ex.paramSnapshot.length} 项`}
+              open={!!folds["q"+ex.id]} onToggle={()=>toggleFold("q"+ex.id)}>
+              <div style={{ fontSize:10.5, color:"#B0A99B", marginBottom:6 }}>开工时冻结，不随项目基线变动</div>
+              {ex.paramSnapshot.map((q,i)=><DataChip key={i} d={q}/>)}
+            </Fold>
+          )}
+
+          <div style={{ display:"flex", alignItems:"baseline", gap:8, margin:"18px 0 4px", paddingBottom:6, borderBottom:"1px solid #EDE8DE" }}>
+            <b style={{ fontSize:11, fontWeight:700, letterSpacing:"0.8px", color:"#8C8478" }}>记录</b>
+            <span style={{ marginLeft:"auto", fontSize:10.5, color:"#B0A99B" }}>{(ex.entries||[]).length} 条 · 只增不删</span>
+          </div>
+
+          {rows.length === 0 && (
+            <div style={{ padding:"28px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>
+              还没有记录<br/><span style={{ fontSize:11.5 }}>下面写一行，或者按「打点」先盖个时间戳</span>
+            </div>
+          )}
+          {rows.map(r => r.kind === "day" ? (
+            <div key={r.id} style={{
+              display:"flex", alignItems:"center", gap:9, margin:"14px 0 6px",
+              fontSize:10.5, fontWeight:700, letterSpacing:"0.6px", color:"#B0A99B",
+            }}>
+              {fmtDayHead(r.at)}
+              <i style={{ flex:1, height:1, background:"#EDE8DE" }}/>
+            </div>
+          ) : (
+            <EntryRow key={r.e.id} e={r.e} gap={r.gap} onEdit={(eid, patch)=>editEntry(ex.id, eid, patch)}/>
+          ))}
+          <div ref={streamRef}/>
+        </div>
+
+        {/* 常驻记录条 —— 暗室里单手够得着 */}
+        <div style={{
+          position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)",
+          width:"100%", maxWidth:430, zIndex:120, background:"#FDFBF7",
+          borderTop:"1px solid #EDE8DE", padding:"10px 24px calc(env(safe-area-inset-bottom, 0px) + 12px)",
+          display:"flex", gap:7, alignItems:"center",
+        }}>
+          <input ref={draftRef} value={draft} onChange={e=>setDraft(e.target.value)}
+            onKeyDown={e=>{ if (e.key === "Enter") commit(); }}
+            placeholder="记点什么…  PSNR = 28.4 dB"
+            style={{ ...S.inp, flex:1, padding:"10px 12px", fontSize:13, borderRadius:12 }}/>
+          {draft.trim()
+            ? <button onClick={commit} style={{ ...S.miniD, padding:"10px 14px", fontSize:12.5, borderRadius:12 }}>记下</button>
+            : <button onClick={()=>addEntry(ex.id, "")} style={{ ...S.mini, padding:"10px 14px", fontSize:12.5, borderRadius:12 }}>打点</button>}
+        </div>
+
+        {remindUI}
+        <style>{CSS}</style>
+      </div>
+    );
+  }
+
+  // ── Project ──
+  if (openProject) {
+    const pr = data.projects.find(x => x.id === openProject);
+    if (!pr) { setOpenProject(null); return null; }
+    const exps = data.experiments.filter(e => e.projectId === pr.id);
+    const st = PS[pr.status] || PS.running;
+    const lastAt = exps.reduce((a,e)=>Math.max(a, e.entries?.length ? e.entries[e.entries.length-1].at : e.startedAt), 0);
+
+    if (projForm === pr.id) {
+      return (
+        <div style={S.ctn}>
+          <div style={{ padding:"52px 24px 8px", display:"flex", alignItems:"center", gap:12 }}>
+            <button style={S.ib} onClick={()=>setProjForm(null)}><Ic.Back/></button>
+            <span style={{ fontSize:20, fontWeight:700 }}>编辑项目</span>
+          </div>
+          <div style={{ padding:"0 24px" }}>
+            <ProjectForm initial={pr} onSave={saveProject} onCancel={()=>setProjForm(null)}/>
+          </div>
+          {remindUI}
+          <style>{CSS}</style>
+        </div>
+      );
+    }
+
+    return (
+      <div style={S.ctn}>
+        <div style={{ padding:"52px 24px 0" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <button style={S.ib} onClick={()=>setOpenProject(null)}><Ic.Back/></button>
+            <span style={{ fontFamily:MONO, fontSize:12.5, color:"#A79E8E", letterSpacing:"1px" }}>{pr.code}</span>
+            <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4, background:st.bg, color:st.color }}>{st.label}</span>
+            <button style={{ ...S.ib, marginLeft:"auto" }} onClick={()=>setProjForm(pr.id)}><Ic.Edit s={17}/></button>
+            <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteProject(pr.id)}><Ic.Trash s={16}/></button>
+          </div>
+          <div style={{ fontSize:21, fontWeight:700, lineHeight:1.3, margin:"8px 0 6px" }}>{pr.name}</div>
+          <div style={{ display:"flex", gap:8, fontSize:11, color:"#B0A99B", marginBottom:14, flexWrap:"wrap" }}>
+            <span>{exps.length} 次实验</span><span>·</span>
+            <span>已 {fmtSpan(Date.now() - pr.startedAt)}</span>
+            {lastAt > 0 && <><span>·</span><span>最后 {fmtDay(lastAt)}</span></>}
+          </div>
+        </div>
+
+        <div style={{ padding:"0 24px" }}>
+          {pr.setup && (
+            <Fold title="装置与光路" open={!!folds["su"+pr.id]} onToggle={()=>toggleFold("su"+pr.id)}>
+              <div style={{ fontSize:13.5, lineHeight:1.7, color:"#5A544A", whiteSpace:"pre-wrap" }}>{pr.setup}</div>
+            </Fold>
+          )}
+          {pr.stack && (
+            <Fold title="代码与环境" open={!!folds["sk"+pr.id]} onToggle={()=>toggleFold("sk"+pr.id)}>
+              <div style={{ fontSize:12.5, lineHeight:1.7, color:"#5A544A", whiteSpace:"pre-wrap", fontFamily:MONO }}>{pr.stack}</div>
+            </Fold>
+          )}
+          <Fold title="基线参数" count={`${(pr.params||[]).length} 项`}
+            open={!!folds["pa"+pr.id]} onToggle={()=>toggleFold("pa"+pr.id)}>
+            {(pr.params || []).map((q,i)=>(
+              <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"7px 0", borderBottom:"1px solid #F2EFE8" }}>
+                <DataChip d={q}/>
+                {q.at && <span style={{ fontSize:10, color:"#C0B8A8", fontFamily:MONO }}>{fmtDay(q.at)}</span>}
+                <button onClick={()=>setProjParams(pr.id, pr.params.filter((_,j)=>j!==i))}
+                  style={{ ...S.ib, marginLeft:"auto", color:"#DDD", padding:3 }}><Ic.Trash s={13}/></button>
+              </div>
+            ))}
+            <input placeholder="加参数，写成 λ = 780.24 nm，回车确认" onKeyDown={e=>{
+              const re = parseEntry(e.target.value);
+              if (e.key === "Enter" && re?.data?.length) {
+                const add = re.data.map(q => ({ key:q.key, value:q.value, unit:q.unit, at:Date.now() }));
+                const keep = (pr.params||[]).filter(q => !add.some(a => a.key === q.key));
+                setProjParams(pr.id, [...keep, ...add]);
+                e.target.value = "";
+              }
+            }} style={{ ...S.inp, marginTop:8, fontSize:12.5, padding:"9px 11px" }}/>
+          </Fold>
+
+          <div style={{ display:"flex", alignItems:"baseline", gap:8, margin:"18px 0 10px", paddingBottom:6, borderBottom:"1px solid #EDE8DE" }}>
+            <b style={{ fontSize:11, fontWeight:700, letterSpacing:"0.8px", color:"#8C8478" }}>实验</b>
+            <span style={{ marginLeft:"auto", fontSize:10.5, color:"#B0A99B" }}>{exps.length} 次</span>
+          </div>
+
+          {expForm === "new" && <ExpForm project={pr} onSave={saveExp} onCancel={()=>setExpForm(null)}/>}
+
+          {exps.length === 0 && expForm !== "new" && (
+            <div style={{ padding:"24px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>还没有实验 · 点右下角 + 开一次</div>
+          )}
+
+          {exps.map(e => {
+            const es = ES[e.status] || ES.running;
+            const ek = EK[e.kind] || EK.acq;
+            const dn = (e.protocol||[]).filter(q=>q.doneAt).length;
+            const tot = (e.protocol||[]).length;
+            return (
+              <div key={e.id} onClick={()=>{ setOpenExp(e.id); setDraft(""); }}
+                style={{ ...S.pcard, background: e.status==="done"||e.status==="aborted" ? "#F7F5F0" : "#FFF" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
+                  <span style={{ fontFamily:MONO, fontSize:10.5, color:"#A79E8E" }}>{e.code}</span>
+                  <span style={{ fontSize:10.5, color:"#B0A99B" }}>{ek.icon} {ek.label}</span>
+                  <span style={{ marginLeft:"auto", fontSize:9.5, fontWeight:700, padding:"2px 8px", borderRadius:4, background:es.bg, color:es.color }}>{es.label}</span>
+                </div>
+                <div style={{ fontSize:14, fontWeight:600, lineHeight:1.35 }}>{e.title}</div>
+                <div style={{ display:"flex", alignItems:"center", gap:7, marginTop:7, fontSize:10.5, color:"#B0A99B" }}>
+                  {tot > 0 && <>
+                    <span style={{ width:50, height:4, borderRadius:2, background:"#EDE8DE", overflow:"hidden", flexShrink:0 }}>
+                      <i style={{ display:"block", height:"100%", width:`${tot?dn/tot*100:0}%`, background:"#E8A838", borderRadius:2 }}/>
+                    </span>
+                    <span>流程 {dn}/{tot}</span><span>·</span>
+                  </>}
+                  <span>{(e.entries||[]).length} 条记录</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <button onClick={()=>setExpForm("new")} style={S.fab}><Ic.Plus s={26}/></button>
+        {remindUI}
+        <style>{CSS}</style>
+      </div>
+    );
+  }
 
   // ── Note Editor ──
   if (editingNote) {
@@ -1349,8 +2041,8 @@ export default function MochiApp() {
 
       {/* Tabs */}
       <div style={{ display:"flex",gap:6,padding:"16px 24px 8px",alignItems:"center" }}>
-        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length],["notes","笔记",<Ic.Note s={18} key="n"/>,data.notes.length]].map(([k,l,ic,c])=>(
-          <button key={k} onClick={()=>{setTab(k);setShowAdd(false);setEditingTodo(null);setAddSubParent(null);}}
+        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length],["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length]].map(([k,l,ic,c])=>(
+          <button key={k} onClick={()=>{setTab(k);setShowAdd(false);setEditingTodo(null);setAddSubParent(null);setProjForm(null);}}
             style={{...S.tab,...(tab===k?S.tabA:{})}}>{ic}<span>{l}</span>{c>0&&<span style={S.bdg}>{c}</span>}</button>
         ))}
         {done.length>0&&(
@@ -1378,27 +2070,77 @@ export default function MochiApp() {
           </>
         ):(
           <>
-            {data.notes.length===0&&(
-              <div style={S.empty}><div style={{fontSize:48}}>📝</div><div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有笔记</div></div>
+            {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
+
+            {data.projects.length===0 && data.notes.length===0 && projForm!=="new" && (
+              <div style={S.empty}>
+                <div style={{fontSize:48}}>🔬</div>
+                <div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有项目</div>
+                <div style={{fontSize:13,color:"#CCC",marginTop:4}}>点右下角 + 开一个</div>
+              </div>
             )}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-              {data.notes.map((n,i)=>(
-                <div key={n.id} onClick={()=>setEditingNote(n.id)} style={{
-                  padding:"16px 14px",borderRadius:16,cursor:"pointer",background:n.color.bg,
-                  borderLeft:`3px solid ${n.color.accent}`,animation:"popIn .35s ease both",
-                  animationDelay:`${i*50}ms`,minHeight:120,display:"flex",flexDirection:"column",gap:8,
-                }}>
-                  <div style={{fontSize:15,fontWeight:600,color:n.color.accent,lineHeight:1.3}}>{n.title||"无标题"}</div>
-                  <div style={{fontSize:13,color:"#777",lineHeight:1.5,flex:1}}>{n.body?n.body.slice(0,80)+(n.body.length>80?"...":""):"空笔记"}</div>
-                  <div style={{fontSize:11,color:"#BBB"}}>{fmtBJ(n.ts)}</div>
+
+            {PRJ_STATUS.map(st => {
+              const list = data.projects.filter(x => (x.status||"running") === st.key);
+              if (!list.length) return null;
+              return (
+                <div key={st.key}>
+                  <div style={S.grp}>{st.label}</div>
+                  {list.map(pr => {
+                    const exps = data.experiments.filter(e => e.projectId === pr.id);
+                    const lastAt = exps.reduce((a,e)=>Math.max(a, e.entries?.length ? e.entries[e.entries.length-1].at : e.startedAt), 0);
+                    const dim = st.key !== "running";
+                    return (
+                      <div key={pr.id} onClick={()=>setOpenProject(pr.id)}
+                        style={{ ...S.pcard, background: dim ? "#F7F5F0" : "#FFF", animation:"popIn .3s ease both" }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
+                          <span style={{ fontFamily:MONO, fontSize:11, color:"#A79E8E", letterSpacing:"0.8px" }}>{pr.code}</span>
+                          <span style={{ marginLeft:"auto", fontSize:9.5, fontWeight:700, padding:"2px 8px", borderRadius:4, background:st.bg, color:st.color }}>{st.label}</span>
+                        </div>
+                        <div style={{ fontSize:15, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
+                        <div style={{ display:"flex", gap:7, marginTop:7, fontSize:10.5, color:"#B0A99B", flexWrap:"wrap" }}>
+                          <span>{exps.length} 次实验</span><span>·</span>
+                          <span>已 {fmtSpan(Date.now() - pr.startedAt)}</span>
+                          {lastAt > 0 && <><span>·</span><span>最后 {fmtDay(lastAt)}</span></>}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
+              );
+            })}
+
+            {(data.notes.length > 0 || data.projects.length > 0) && (
+              <div>
+                <div style={{ ...S.grp, display:"flex", alignItems:"center", gap:8 }}>
+                  散记
+                  <button onClick={createNote} style={{
+                    marginLeft:"auto", border:"none", background:"none", cursor:"pointer",
+                    color:"#B0A99B", fontSize:11, fontWeight:700, fontFamily:"inherit", padding:2,
+                  }}>+ 随手记</button>
+                </div>
+                {data.notes.map(n=>(
+                  <div key={n.id} onClick={()=>setEditingNote(n.id)} style={{
+                    ...S.pcard, background:n.color.bg, borderColor:"transparent",
+                    borderLeft:`3px solid ${n.color.accent}`,
+                  }}>
+                    <div style={{fontSize:14,fontWeight:600,color:n.color.accent,lineHeight:1.35}}>{n.title||"无标题"}</div>
+                    <div style={{fontSize:12.5,color:"#777",lineHeight:1.5,marginTop:4}}>
+                      {n.body?n.body.slice(0,60)+(n.body.length>60?"…":""):"空笔记"}
+                    </div>
+                    <div style={{fontSize:10.5,color:"#B0A99B",marginTop:6}}>{fmtDay(n.ts)} {fmtBJ(n.ts)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>
 
-      <button onClick={()=>{if(tab==="todo"){setShowAdd(true);setEditingTodo(null);setAddSubParent(null);} else createNote();}} style={S.fab}>
+      <button onClick={()=>{
+        if (tab==="todo") { setShowAdd(true); setEditingTodo(null); setAddSubParent(null); }
+        else setProjForm("new");
+      }} style={S.fab}>
         <Ic.Plus s={26}/>
       </button>
 
@@ -1592,5 +2334,13 @@ const S = {
   empty:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:80,gap:4},
   edH:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"52px 20px 12px"},
   neT:{fontSize:26,fontWeight:700,border:"none",background:"transparent",outline:"none",fontFamily:"'Outfit',sans-serif",letterSpacing:"-0.5px",width:"100%"},
+  inp:{width:"100%",padding:"12px 14px",borderRadius:12,border:"2px solid #E8E4DA",fontSize:14.5,fontFamily:"inherit",background:"#FFF",outline:"none",color:"#2C2C2C",boxSizing:"border-box"},
+  lbl:{fontSize:12,color:"#999",marginBottom:8,fontWeight:600,letterSpacing:"0.5px"},
+  btnGhost:{flex:1,padding:"13px 0",borderRadius:14,border:"2px solid #E0DCD3",background:"#FFF",color:"#888",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit"},
+  btnDark:{flex:1,padding:"13px 0",borderRadius:14,border:"none",background:"#2C2C2C",color:"#FFF",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit"},
+  mini:{padding:"6px 11px",borderRadius:9,border:"1px solid #E4E0D7",background:"#FFF",color:"#8C8478",fontSize:11.5,fontWeight:600,cursor:"pointer",fontFamily:"inherit"},
+  miniD:{padding:"6px 11px",borderRadius:9,border:"none",background:"#2C2C2C",color:"#FFF",fontSize:11.5,fontWeight:600,cursor:"pointer",fontFamily:"inherit"},
+  pcard:{background:"#FFF",border:"1px solid #EDE8DE",borderRadius:14,padding:"13px 14px",marginBottom:9,cursor:"pointer"},
+  grp:{fontSize:10.5,fontWeight:700,letterSpacing:"0.9px",color:"#B0A99B",margin:"18px 0 9px"},
   neB:{fontSize:16,lineHeight:1.8,border:"none",background:"transparent",outline:"none",fontFamily:"'Noto Serif SC',serif",color:"#444",resize:"none",minHeight:"60vh",width:"100%",marginTop:12},
 };
