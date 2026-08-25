@@ -10,6 +10,7 @@ function loadAll() {
   let data = { todos: [], notes: [] };
   let activeTodoId = null;
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
+  data = { todos: (data.todos || []).map(migrateTodo), notes: data.notes || [] };
   try {
     const s = localStorage.getItem(TIMER_SK);
     if (s) {
@@ -33,12 +34,66 @@ function fmtDay(ts) { const d = toBJ(ts); const t = bjNow(); const y = new Date(
 function fmtSec(s) { if (s == null) return "00:00"; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60; if(h>0) return `${h}:${m.toString().padStart(2,"0")}:${sec.toString().padStart(2,"0")}`; return `${m.toString().padStart(2,"0")}:${sec.toString().padStart(2,"0")}`; }
 function fmtMin(m) { if(!m) return "30m"; if(m>=60) return `${Math.floor(m/60)}h${m%60>0?(m%60+"m"):""}`; return `${m}m`; }
 
-const URG = [
-  { key:"low", label:"轻松", color:"#5A9E4B", bg:"#EEFAE9", ring:"#B6E2A8" },
-  { key:"medium", label:"一般", color:"#E8A838", bg:"#FFF6E5", ring:"#F5D48B" },
-  { key:"critical", label:"火烧", color:"#C02556", bg:"#FDEBF0", ring:"#E88DA8" },
+// Timestamp whose Beijing wall clock reads h:mm, dayOffset days from today
+function bjTimeToTs(h, m, dayOffset = 0) {
+  const b = bjNow();
+  b.setDate(b.getDate() + dayOffset);
+  b.setHours(h, m, 0, 0);
+  return b.getTime() - (8 * 3600000) - (new Date().getTimezoneOffset() * 60000);
+}
+function fmtRemind(ts) {
+  const d = toBJ(ts), n = bjNow();
+  const hm = `${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`;
+  if (d.toDateString() === n.toDateString()) return hm;
+  const tm = new Date(n); tm.setDate(tm.getDate() + 1);
+  if (d.toDateString() === tm.toDateString()) return `明天 ${hm}`;
+  return `${d.getMonth()+1}/${d.getDate()} ${hm}`;
+}
+function hexA(hex, a) {
+  const h = hex.replace("#","");
+  const n = parseInt(h.length === 3 ? h.split("").map(c=>c+c).join("") : h, 16);
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+}
+
+/* ── Notifications ── */
+function notifySupported() { return typeof window !== "undefined" && "Notification" in window; }
+async function ensureNotifyPerm() {
+  try {
+    if (!notifySupported()) return false;
+    if (Notification.permission === "granted") return true;
+    if (Notification.permission === "denied") return false;
+    return (await Notification.requestPermission()) === "granted";
+  } catch { return false; }
+}
+async function fireNotify(tag, title, body) {
+  try {
+    if (!notifySupported() || Notification.permission !== "granted") return false;
+    const opts = { body, tag, icon: "icon-192.png", badge: "icon-192.png", requireInteraction: true };
+    if ("serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg?.showNotification) { await reg.showNotification(title, opts); return true; }
+    }
+    new Notification(title, opts);   // no SW (dev server / plain tab)
+    return true;
+  } catch { return false; }
+}
+
+/* Importance tiers, low → high (RPG framing) */
+const IMP = [
+  { key:"casual", label:"休闲", color:"#5A9E4B", bg:"#EEFAE9", ring:"#B6E2A8" },
+  { key:"side",   label:"支线", color:"#E8A838", bg:"#FFF6E5", ring:"#F5D48B" },
+  { key:"main",   label:"主线", color:"#C02556", bg:"#FDEBF0", ring:"#E88DA8" },
 ];
-const UM = Object.fromEntries(URG.map(u=>[u.key,u]));
+const IM = Object.fromEntries(IMP.map(u=>[u.key,u]));
+const IMP_ORDER = { main:0, side:1, casual:2 };
+// v3 stored urgency: low|medium|critical — migrated on load, mapped here as a safety net
+const LEGACY_IMP = { low:"casual", medium:"side", critical:"main" };
+function impOf(t) { return IM[t?.importance] || IM[LEGACY_IMP[t?.urgency]] || IM.side; }
+function migrateTodo(t) {
+  if (t.importance && !t.urgency) return t;
+  const { urgency, ...rest } = t;
+  return { ...rest, importance: t.importance || LEGACY_IMP[urgency] || "side" };
+}
 
 const NC = [
   {bg:"#FFF8E7",accent:"#E8A838"},{bg:"#F0F7EE",accent:"#5A9E4B"},
@@ -70,6 +125,9 @@ const Ic = {
   Down:({s=14})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>,
   Up:({s=14})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="18 15 12 9 6 15"/></svg>,
   Drag:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="7" y1="6" x2="17" y2="6"/><line x1="7" y1="10" x2="17" y2="10"/><line x1="7" y1="14" x2="17" y2="14"/><line x1="7" y1="18" x2="17" y2="18"/></svg>,
+  Bell:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>,
+  BellOff:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13.73 21a2 2 0 01-3.46 0"/><path d="M18.63 13A17.9 17.9 0 0118 8"/><path d="M6.26 6.26A5.86 5.86 0 006 8c0 7-3 9-3 9h14"/><path d="M18 8a6 6 0 00-9.33-5"/><line x1="2" y1="2" x2="22" y2="22"/></svg>,
+  X:({s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
 };
 
 /* ── Focus Timer ── */
@@ -201,7 +259,7 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
     onComplete(running ? cur : elapsed);
   };
 
-  const urg = UM[todo.urgency] || URG[0];
+  const imp = impOf(todo);
   const expected = (todo.duration || 30) * 60;
   const isOver = elapsed > expected;
 
@@ -211,9 +269,9 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginBottom: 14 }}>
         <div style={{ fontSize: 11, color: "#AAA", letterSpacing: "0.5px" }}>开始于</div>
         <div style={{
-          fontSize: 18, fontWeight: 700, color: urg.color,
+          fontSize: 18, fontWeight: 700, color: imp.color,
           fontFamily: "'JetBrains Mono','SF Mono','Courier New',monospace",
-          letterSpacing: "1.5px", background: urg.bg, padding: "4px 14px", borderRadius: 10,
+          letterSpacing: "1.5px", background: imp.bg, padding: "4px 14px", borderRadius: 10,
         }}>{fmtBJ(startTs)}</div>
       </div>
 
@@ -221,14 +279,14 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
       <div style={{
         display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8,
         padding: "18px 0", borderRadius: 20,
-        background: isOver ? "linear-gradient(135deg, #E8F9ED, #F0FFF4)" : `linear-gradient(135deg, ${urg.bg}, #FDFBF7)`,
+        background: isOver ? "linear-gradient(135deg, #E8F9ED, #F0FFF4)" : `linear-gradient(135deg, ${imp.bg}, #FDFBF7)`,
         marginBottom: 14,
       }}>
         <span style={{ fontSize: 15, color: "#999", fontWeight: 500 }}>已专注：</span>
         <span style={{
           fontSize: 36, fontWeight: 800, letterSpacing: "3px",
           fontFamily: "'JetBrains Mono','SF Mono','Courier New',monospace",
-          color: isOver ? "#3BA55C" : urg.color,
+          color: isOver ? "#3BA55C" : imp.color,
         }}>{fmtSec(elapsed)}</span>
       </div>
 
@@ -243,18 +301,18 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
       <div style={{ display: "flex", gap: 10 }}>
         {running ? (
           <button onClick={doPause} style={{
-            flex: 1, padding: "14px 0", borderRadius: 16, border: `2px solid ${urg.ring}`,
-            background: "#FFF", color: urg.color, fontSize: 15, fontWeight: 600,
+            flex: 1, padding: "14px 0", borderRadius: 16, border: `2px solid ${imp.ring}`,
+            background: "#FFF", color: imp.color, fontSize: 15, fontWeight: 600,
             fontFamily: "inherit", cursor: "pointer", display: "flex", alignItems: "center",
             justifyContent: "center", gap: 8,
           }}><Ic.Pause s={16}/> 暂停</button>
         ) : (
           <button onClick={doResume} style={{
             flex: 1, padding: "14px 0", borderRadius: 16, border: "none",
-            background: `linear-gradient(135deg, ${urg.color}, ${urg.color}dd)`, color: "#FFF",
+            background: `linear-gradient(135deg, ${imp.color}, ${imp.color}dd)`, color: "#FFF",
             fontSize: 15, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            boxShadow: `0 4px 16px ${urg.color}44`,
+            boxShadow: `0 4px 16px ${imp.color}44`,
           }}><Ic.Play s={16}/> 恢复</button>
         )}
         <button onClick={doFinish} style={{
@@ -303,11 +361,110 @@ function FocusTimer({ todo, onComplete, onPause, onUpdate, onCancel }) {
   );
 }
 
+/* ── Reminder Picker (shared by task form & swipe sheet) ── */
+const REMIND_PRESETS = [
+  { label:"15分钟后", at:()=>Date.now()+15*60000 },
+  { label:"30分钟后", at:()=>Date.now()+30*60000 },
+  { label:"1小时后",  at:()=>Date.now()+60*60000 },
+  { label:"今晚20:00", at:()=>{ const t=bjTimeToTs(20,0); return t>Date.now()?t:bjTimeToTs(20,0,1); } },
+  { label:"明早9:00",  at:()=>bjTimeToTs(9,0,1) },
+];
+function RemindPicker({ at, onChange, accent = "#E8A838" }) {
+  const d = toBJ(at);
+  const timeStr = `${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`;
+  const denied = notifySupported() && Notification.permission === "denied";
+  return (
+    <div style={{ animation:"slideUp .22s ease both" }}>
+      <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+        {REMIND_PRESETS.map(pr=>(
+          <button key={pr.label} onClick={()=>onChange(pr.at())} style={{
+            padding:"8px 12px",borderRadius:10,border:"2px solid transparent",
+            background:"#F0EDE6",color:"#777",fontSize:12,fontWeight:600,
+            cursor:"pointer",fontFamily:"inherit",
+          }}>{pr.label}</button>
+        ))}
+      </div>
+      <div style={{ display:"flex",alignItems:"center",gap:10,marginTop:10 }}>
+        <span style={{ fontSize:12,color:"#999" }}>具体时间</span>
+        <input type="time" value={timeStr} onChange={e=>{
+          const [h,m] = e.target.value.split(":").map(Number);
+          if (Number.isNaN(h) || Number.isNaN(m)) return;
+          let ts = bjTimeToTs(h,m);
+          if (ts <= Date.now()) ts = bjTimeToTs(h,m,1);   // already past → tomorrow
+          onChange(ts);
+        }} style={{
+          padding:"7px 10px",borderRadius:10,border:"2px solid #E8E4DA",fontSize:14,
+          fontFamily:"inherit",outline:"none",background:"#FFF",color:"#2C2C2C",
+        }}/>
+        <span style={{ fontSize:13,fontWeight:700,color:accent }}>{fmtRemind(at)}</span>
+      </div>
+      {!notifySupported() && (
+        <div style={{ fontSize:11,color:"#BBB",marginTop:8,lineHeight:1.5 }}>
+          此浏览器不支持系统通知 · 打开 App 时仍会流光提醒
+        </div>
+      )}
+      {denied && (
+        <div style={{ fontSize:11,color:"#C08838",marginTop:8,lineHeight:1.5 }}>
+          系统通知已被拒绝 · 只会有应用内提醒和流光
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Reminder Sheet (quick set/clear from a task row) ── */
+function ReminderSheet({ todo, onSave, onClear, onClose }) {
+  const imp = impOf(todo);
+  const [at, setAt] = useState(todo.remind?.at || Date.now() + 30*60000);
+  return (
+    <div onClick={onClose} style={{
+      position:"fixed",inset:0,zIndex:9998,background:"rgba(0,0,0,0.42)",
+      display:"flex",alignItems:"flex-end",justifyContent:"center",
+      animation:"flashFade .2s ease both",
+    }}>
+      <div onClick={e=>e.stopPropagation()} style={{
+        width:"100%",maxWidth:430,background:"#FDFBF7",
+        borderRadius:"26px 26px 0 0",padding:"22px 24px 34px",
+        boxShadow:"0 -12px 48px rgba(0,0,0,0.18)",animation:"sheetUp .28s cubic-bezier(.25,1,.5,1) both",
+      }}>
+        <div style={{ width:38,height:4,borderRadius:2,background:"#E4E0D7",margin:"0 auto 16px" }}/>
+        <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:4 }}>
+          <span style={{ color:imp.color,display:"flex" }}><Ic.Bell s={17}/></span>
+          <span style={{ fontSize:17,fontWeight:700 }}>设置提醒</span>
+        </div>
+        <div style={{ fontSize:13,color:"#999",marginBottom:16,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{todo.text}</div>
+        <RemindPicker at={at} accent={imp.color} onChange={setAt} />
+        <div style={{ display:"flex",gap:10,marginTop:20 }}>
+          {todo.remind ? (
+            <button onClick={onClear} style={{
+              flex:1,padding:"13px 0",borderRadius:14,border:"2px solid #E0DCD3",background:"#FFF",
+              color:"#999",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+              display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+            }}><Ic.BellOff s={15}/>关闭提醒</button>
+          ) : (
+            <button onClick={onClose} style={{
+              flex:1,padding:"13px 0",borderRadius:14,border:"2px solid #E0DCD3",background:"#FFF",
+              color:"#888",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+            }}>取消</button>
+          )}
+          <button onClick={()=>{ ensureNotifyPerm(); onSave(at); }} style={{
+            flex:1.4,padding:"13px 0",borderRadius:14,border:"none",
+            background:`linear-gradient(135deg, ${imp.color}, ${imp.color}cc)`,color:"#FFF",
+            fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",
+            boxShadow:`0 6px 20px ${hexA(imp.color,0.32)}`,
+          }}>{fmtRemind(at)} 提醒我</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Task Form ── */
 function TaskForm({ initial, onSave, onCancel, isSubtask }) {
   const [text, setText] = useState(initial?.text || "");
   const [duration, setDuration] = useState(initial?.duration || 30);
-  const [urgency, setUrgency] = useState(initial?.urgency || "medium");
+  const [importance, setImportance] = useState(initial?.importance || "side");
+  const [remind, setRemind] = useState(initial?.remind || null);
   const ref = useRef(null);
   const formRef = useRef(null);
   useEffect(() => {
@@ -319,24 +476,25 @@ function TaskForm({ initial, onSave, onCancel, isSubtask }) {
     return () => clearTimeout(t);
   }, []);
   const presets = [10, 15, 20, 30, 45, 60, 90, 120];
+  const imp = IM[importance] || IM.side;
   return (
     <div ref={formRef} style={{ animation: "slideUp .3s ease both", padding: "12px 0 16px", marginLeft: isSubtask ? 24 : 0 }}>
       {isSubtask && <div style={{ fontSize: 12, color: "#999", marginBottom: 6, fontWeight: 600 }}>↳ 添加子任务</div>}
       <input ref={ref} value={text} onChange={e=>setText(e.target.value)}
         placeholder={isSubtask ? "子任务名称..." : "任务名称..."}
-        onKeyDown={e=>{if(e.key==="Enter"&&text.trim()) onSave({text:text.trim(),duration,urgency});}}
+        onKeyDown={e=>{if(e.key==="Enter"&&text.trim()) onSave({text:text.trim(),duration,importance,remind});}}
         style={{ width:"100%",padding:"14px 16px",borderRadius:14,border:"2px solid #E8E4DA",fontSize:15,fontFamily:"inherit",background:"#FFF",outline:"none",color:"#2C2C2C",boxSizing:"border-box" }}
       />
       <div style={{ marginTop: 12 }}>
-        <div style={{ fontSize: 12, color: "#999", marginBottom: 8, fontWeight: 600, letterSpacing: "0.5px" }}>紧迫度</div>
+        <div style={{ fontSize: 12, color: "#999", marginBottom: 8, fontWeight: 600, letterSpacing: "0.5px" }}>重要程度</div>
         <div style={{ display: "flex", gap: 6 }}>
-          {URG.map(u=>(
-            <button key={u.key} onClick={()=>setUrgency(u.key)} style={{
+          {IMP.map(u=>(
+            <button key={u.key} onClick={()=>setImportance(u.key)} style={{
               flex:1,padding:"9px 0",borderRadius:12,
-              border:urgency===u.key?`2.5px solid ${u.color}`:"2.5px solid transparent",
+              border:importance===u.key?`2.5px solid ${u.color}`:"2.5px solid transparent",
               background:u.bg,color:u.color,fontSize:12,fontWeight:600,
               cursor:"pointer",fontFamily:"inherit",transition:"all .2s",
-              transform:urgency===u.key?"scale(1.05)":"scale(1)",
+              transform:importance===u.key?"scale(1.05)":"scale(1)",
             }}>{u.label}</button>
           ))}
         </div>
@@ -361,9 +519,25 @@ function TaskForm({ initial, onSave, onCancel, isSubtask }) {
           <span style={{fontSize:12,color:"#999"}}>分钟</span>
         </div>
       </div>
+      <div style={{ marginTop: 14 }}>
+        <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8 }}>
+          <div style={{ fontSize:12,color:"#999",fontWeight:600,letterSpacing:"0.5px" }}>提醒</div>
+          <button onClick={()=>{
+            if (remind) { setRemind(null); return; }
+            setRemind({ at: Date.now() + 30*60000, fired:false, ack:false });
+            ensureNotifyPerm();   // must run inside the tap for Safari
+          }} style={{
+            display:"flex",alignItems:"center",gap:6,padding:"7px 12px",borderRadius:11,
+            border:remind?`2px solid ${imp.color}`:"2px solid #E8E4DA",
+            background:remind?imp.bg:"#FFF",color:remind?imp.color:"#AAA",
+            fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all .2s",
+          }}>{remind ? <><Ic.Bell s={13}/>已开启</> : <><Ic.BellOff s={13}/>关闭</>}</button>
+        </div>
+        {remind && <RemindPicker at={remind.at} accent={imp.color} onChange={at=>setRemind({at,fired:false,ack:false})} />}
+      </div>
       <div style={{ display:"flex",gap:10,marginTop:16 }}>
         <button onClick={onCancel} style={{flex:1,padding:"13px 0",borderRadius:14,border:"2px solid #E0DCD3",background:"#FFF",color:"#888",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>取消</button>
-        <button onClick={()=>{if(text.trim()) onSave({text:text.trim(),duration,urgency});}} style={{flex:1,padding:"13px 0",borderRadius:14,border:"none",background:"#2C2C2C",color:"#FFF",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",opacity:text.trim()?1:0.4}}>保存</button>
+        <button onClick={()=>{if(text.trim()) onSave({text:text.trim(),duration,importance,remind});}} style={{flex:1,padding:"13px 0",borderRadius:14,border:"none",background:"#2C2C2C",color:"#FFF",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",opacity:text.trim()?1:0.4}}>保存</button>
       </div>
     </div>
   );
@@ -414,10 +588,10 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
       const startH = d.getHours() + d.getMinutes() / 60;
       const durSec = t.actualDuration || (t.duration || 30) * 60;
       const durH = Math.max(durSec / 3600, 0.25);
-      const urg = UM[t.urgency] || URG[0];
-      return [{ dayIdx, startH, durH, text: t.text, color: urg.color, bg: urg.bg }];
+      const imp = impOf(t);
+      return [{ dayIdx, startH, durH, text: t.text, color: imp.color, bg: imp.bg }];
     }
-    const urg = UM[t.urgency] || URG[0];
+    const imp = impOf(t);
     return segments
       .filter(seg => { const d = toBJ(seg.startAt); return d >= monday && d <= sunday; })
       .map(seg => {
@@ -426,7 +600,7 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
         const startH = d.getHours() + d.getMinutes() / 60;
         const durSec = (seg.endAt - seg.startAt) / 1000;
         const durH = Math.max(durSec / 3600, 0.25);
-        return { dayIdx, startH, durH, text: t.text, color: urg.color, bg: urg.bg };
+        return { dayIdx, startH, durH, text: t.text, color: imp.color, bg: imp.bg };
       });
   });
 
@@ -502,8 +676,11 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
 /* ── Todo Item Row (reusable for parent & child) ── */
 function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowAdd,
   deleteTodo, startTodo, onAddSub, expandedIds, toggleExpand, children: subs, allTodos,
-  completeTodo, pauseTodo, resumeTodo, cancelTodo, updateElapsed, dragFrom, dragOver, onDragStart }) {
-  const urg = UM[t.urgency] || URG[0];
+  completeTodo, pauseTodo, resumeTodo, cancelTodo, updateElapsed, dragFrom, dragOver, onDragStart, onRemind }) {
+  const imp = impOf(t);
+  const rem = t.remind || null;
+  const lit = !!rem;                            // reminder on → row carries the flowing light
+  const hot = lit && rem.fired && !rem.ack;     // fired and not acknowledged → faster, brighter
   const isActive = activeTodo === t.id;
   const kidTodos = allTodos.filter(c => c.parentId === t.id);
   const hasKids = kidTodos.length > 0;
@@ -513,7 +690,8 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
   const isDragging = dragFrom === t.id;
   const isDragOver = dragOver === t.id && dragFrom !== t.id;
 
-  const REVEAL = 72;
+  const REVEAL = 72;        // right swipe → drag handle
+  const ACT_W = 148;        // left swipe → 提醒 + 删除
   const [tx, setTx] = useState(0);
   const swipe = useRef({ startX: 0, startY: 0, active: false, moving: false, baseTx: 0 });
 
@@ -535,7 +713,7 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
       swipe.current.moving = true;
     }
     e.preventDefault();
-    setTx(Math.max(-REVEAL, Math.min(REVEAL, swipe.current.baseTx + dx)));
+    setTx(Math.max(-ACT_W, Math.min(REVEAL, swipe.current.baseTx + dx)));
   };
   const onSwipeEnd = () => {
     if (!swipe.current.moving) {
@@ -544,7 +722,7 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
       return;
     }
     swipe.current = { ...swipe.current, active: false, moving: false };
-    setTx(prev => prev < -REVEAL * 0.5 ? -REVEAL : prev > REVEAL * 0.5 ? REVEAL : 0);
+    setTx(prev => prev < -ACT_W * 0.35 ? -ACT_W : prev > REVEAL * 0.5 ? REVEAL : 0);
   };
   const closeSwipe = () => setTx(0);
 
@@ -562,14 +740,22 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
           animation: "slideUp .3s ease both",
         }}
       >
-        {/* Delete action – right side (swipe left to reveal) */}
+        {/* Actions – right side (swipe left to reveal) */}
         <div style={{
-          position: "absolute", right: 0, top: 0, bottom: 0, width: REVEAL,
-          background: "#FF3B30", display: "flex", alignItems: "center", justifyContent: "center",
+          position: "absolute", right: 0, top: 0, bottom: 0, width: ACT_W,
+          display: "flex", alignItems: "stretch",
         }}>
+          <button onClick={() => { closeSwipe(); onRemind(t.id); }} style={{
+            flex: 1, border: "none", cursor: "pointer", color: "#FFF",
+            background: lit ? "linear-gradient(160deg,#B98A2E,#8E6714)" : "linear-gradient(160deg,#E8A838,#D08C1E)",
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+          }}>
+            {lit ? <Ic.BellOff s={19}/> : <Ic.Bell s={19}/>}
+            <span style={{ fontSize: 10, fontWeight: 700 }}>{lit ? "改提醒" : "提醒"}</span>
+          </button>
           <button onClick={() => { closeSwipe(); deleteTodo(t.id); }} style={{
-            background: "none", border: "none", color: "#FFF", cursor: "pointer",
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: 8,
+            flex: 1, border: "none", cursor: "pointer", color: "#FFF", background: "#FF3B30",
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
           }}>
             <Ic.Trash s={19}/>
             <span style={{ fontSize: 10, fontWeight: 700 }}>删除</span>
@@ -598,6 +784,7 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
         {/* Main content – translates on swipe */}
         <div
           style={{
+            position: "relative",
             transform: `translateX(${tx}px)`,
             transition: swipe.current.moving ? "none" : "transform 0.25s cubic-bezier(0.25,1,0.5,1)",
             background: "#FDFBF7",
@@ -607,9 +794,30 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
           onTouchMove={onSwipeMove}
           onTouchEnd={onSwipeEnd}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0" }}>
-            {/* Urgency dot */}
-            <div style={{ width: depth ? 8 : 10, height: depth ? 8 : 10, borderRadius: "50%", background: urg.color, flexShrink: 0, boxShadow: `0 0 0 ${depth?2:3}px ${urg.ring}` }} />
+          {/* Reminder light — a sheen sweeps left→right, then the row rests */}
+          {lit && (
+            <div className="rmd" aria-hidden="true" style={{ "--sweep": hot ? "2.1s" : "3.8s" }}>
+              <div className="rmd-wash" style={{ background:
+                `linear-gradient(102deg, ${hexA(imp.color, hot?0.13:0.085)} 0%, ${hexA(imp.color, hot?0.05:0.03)} 42%, rgba(255,255,255,0) 78%)` }}/>
+              <div className="rmd-grain"/>
+              <div className="rmd-ring" style={{ boxShadow: `inset 0 0 0 1px ${hexA(imp.color, hot?0.24:0.14)}` }}/>
+              <div className="rmd-sheen" style={{ background:
+                `linear-gradient(90deg, ${hexA(imp.color,0)} 0%, ${hexA(imp.color,0.08)} 24%, ${hexA(imp.color, hot?0.34:0.24)} 42%, rgba(255,255,255,0.95) 50%, ${hexA(imp.color, hot?0.34:0.24)} 58%, ${hexA(imp.color,0.08)} 76%, ${hexA(imp.color,0)} 100%)` }}/>
+              <div className="rmd-edge">
+                <div className="rmd-comet" style={{ background:
+                  `linear-gradient(90deg, ${hexA(imp.color,0)} 0%, ${hexA(imp.color,0.5)} 34%, #FFFFFF 50%, ${hexA(imp.color,0.5)} 66%, ${hexA(imp.color,0)} 100%)` }}/>
+              </div>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0", position: "relative", zIndex: 1 }}>
+            {/* Importance dot */}
+            <div className={lit ? "rmd-dot" : undefined} style={{
+              "--sweep": hot ? "2.1s" : "3.8s",
+              width: depth ? 8 : 10, height: depth ? 8 : 10, borderRadius: "50%", background: imp.color, flexShrink: 0,
+              boxShadow: lit
+                ? `0 0 0 ${depth?2:3}px ${imp.ring}, 0 0 12px ${hexA(imp.color,0.75)}`
+                : `0 0 0 ${depth?2:3}px ${imp.ring}`,
+            }} />
             {/* Content */}
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: depth ? 14 : 15, lineHeight: 1.4, color: "#2C2C2C", display: "flex", alignItems: "center", gap: 6 }}>
@@ -617,10 +825,17 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
                 {t.text}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 10, color: urg.color, fontWeight: 600, background: urg.bg, padding: "2px 8px", borderRadius: 5 }}>{urg.label}</span>
+                <span style={{ fontSize: 10, color: imp.color, fontWeight: 600, background: imp.bg, padding: "2px 8px", borderRadius: 5 }}>{imp.label}</span>
                 <span style={{ fontSize: 10, color: "#BBB", display: "flex", alignItems: "center", gap: 2 }}><Ic.Clock s={10}/>{fmtMin(t.duration)}</span>
                 {t.elapsed > 0 && !isActive && <span style={{ fontSize: 10, color: "#AAA" }}>已用{fmtSec(t.elapsed)}</span>}
                 {isPaused && !isActive && <span style={{ fontSize: 10, color: "#E8A838", fontWeight: 600 }}>⏸暂停中</span>}
+                {lit && (
+                  <button onClick={() => { closeSwipe(); onRemind(t.id); }}
+                    className={hot ? "rmd-chip rmd-chip-hot" : "rmd-chip"}
+                    style={{ color: imp.color, background: hexA(imp.color,0.10), border: `1px solid ${hexA(imp.color,0.22)}` }}>
+                    <Ic.Bell s={9}/>{hot ? "到点了" : fmtRemind(rem.at)}
+                  </button>
+                )}
                 {hasKids && <span style={{ fontSize: 10, color: "#BBB" }}>{kidTodos.filter(c=>c.done).length}/{kidTodos.length}子任务</span>}
               </div>
             </div>
@@ -636,22 +851,22 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
             {!isActive && !isPaused && (
               <button onClick={() => startTodo(t.id)} style={{
                 width: 38, height: 38, borderRadius: 12, border: "none",
-                background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
-                color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
+                background: `linear-gradient(135deg,${imp.bg},${imp.ring}55)`,
+                color: imp.color, display: "flex", alignItems: "center", justifyContent: "center",
                 cursor: "pointer", flexShrink: 0,
               }}><Ic.Play s={15}/></button>
             )}
             {isPaused && !isActive && (
               <button onClick={() => resumeTodo(t.id)} style={{
                 width: 38, height: 38, borderRadius: 12, border: "none",
-                background: `linear-gradient(135deg,${urg.bg},${urg.ring}55)`,
-                color: urg.color, display: "flex", alignItems: "center", justifyContent: "center",
+                background: `linear-gradient(135deg,${imp.bg},${imp.ring}55)`,
+                color: imp.color, display: "flex", alignItems: "center", justifyContent: "center",
                 cursor: "pointer", flexShrink: 0,
               }}><Ic.Play s={15}/></button>
             )}
           </div>
           {/* Active timer */}
-          {isActive && (
+          {isActive && (<div style={{ position: "relative", zIndex: 1 }}>
             <FocusTimer
               todo={t}
               onComplete={el => completeTodo(t.id, el)}
@@ -659,7 +874,7 @@ function TodoRow({ t, depth, activeTodo, setActiveTodo, setEditingTodo, setShowA
               onUpdate={type => { if (type === "resume") resumeTodo(t.id); }}
               onCancel={() => cancelTodo(t.id)}
             />
-          )}
+          </div>)}
         </div>
       </div>
       {/* Children */}
@@ -688,12 +903,48 @@ export default function MochiApp() {
   const [dragOver, setDragOver] = useState(null);
   const [dragY, setDragY] = useState(0);
   const [dragHalfH, setDragHalfH] = useState(30);
+  const [remindFor, setRemindFor] = useState(null);     // todo id whose reminder sheet is open
+  const [remindAlert, setRemindAlert] = useState(null); // todo id of the in-app "到点了" banner
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
   const dragYRef = useRef(0);
   const ntRef = useRef(null);
+  const todosRef = useRef(initState.data.todos);
+  const firedRef = useRef(new Set());
 
   useEffect(() => { save(data); }, [data]);
+  useEffect(() => { todosRef.current = data.todos; }, [data.todos]);
+
+  // Reminder scheduler — polls while the app is alive, and re-checks whenever it
+  // comes back to the foreground (a backgrounded PWA gets its timers frozen).
+  useEffect(() => {
+    const check = () => {
+      const now = Date.now();
+      const due = todosRef.current.filter(t =>
+        !t.done && t.remind && !t.remind.fired && t.remind.at <= now &&
+        !firedRef.current.has(`${t.id}@${t.remind.at}`));
+      if (!due.length) return;
+      due.forEach(t => {
+        firedRef.current.add(`${t.id}@${t.remind.at}`);
+        fireNotify(`mochi-${t.id}`, `⏰ ${t.text}`, `${impOf(t).label} · 预期 ${fmtMin(t.duration)}`);
+      });
+      const ids = new Set(due.map(t => t.id));
+      setData(d => ({ ...d, todos: d.todos.map(t =>
+        ids.has(t.id) ? { ...t, remind: { ...t.remind, fired: true, ack: false } } : t) }));
+      try { navigator.vibrate?.([90, 60, 90]); } catch {}
+      setRemindAlert(due[due.length - 1].id);
+    };
+    check();
+    const iv = setInterval(check, 15000);
+    const wake = () => { if (document.visibilityState === "visible") check(); };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("focus", wake);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("focus", wake);
+    };
+  }, []);
   useEffect(() => { if (editingNote && ntRef.current) ntRef.current.focus(); }, [editingNote]);
 
   useEffect(() => {
@@ -720,7 +971,7 @@ export default function MochiApp() {
           const ti = arr.findIndex(t => t.id === over);
           if (fi < 0 || ti < 0) return d;
           const a = arr[fi], b = arr[ti];
-          if (a.urgency !== b.urgency || a.parentId !== b.parentId) return d;
+          if (a.importance !== b.importance || a.parentId !== b.parentId) return d;
           arr.splice(fi, 1);
           arr.splice(arr.findIndex(t => t.id === over), 0, a);
           return { ...d, todos: arr };
@@ -777,6 +1028,25 @@ export default function MochiApp() {
     setShowAdd(false);
     setAddSubParent(null);
     if (parentId) setExpandedIds(s => { const n = new Set(s); n.add(parentId); return n; });
+  };
+
+  // Reminders
+  const setRemindAt = (id, at) => {
+    setData(d => ({ ...d, todos: d.todos.map(t => t.id === id ? { ...t, remind: { at, fired: false, ack: false } } : t) }));
+    setRemindFor(null);
+  };
+  const clearRemind = (id) => {
+    setData(d => ({ ...d, todos: d.todos.map(t => t.id === id ? { ...t, remind: null } : t) }));
+    setRemindFor(null);
+    setRemindAlert(a => a === id ? null : a);
+  };
+  const ackRemind = (id) => {
+    setData(d => ({ ...d, todos: d.todos.map(t => t.id === id && t.remind ? { ...t, remind: { ...t.remind, ack: true } } : t) }));
+    setRemindAlert(a => a === id ? null : a);
+  };
+  const snoozeRemind = (id, min = 10) => {
+    setData(d => ({ ...d, todos: d.todos.map(t => t.id === id ? { ...t, remind: { at: Date.now() + min * 60000, fired: false, ack: false } } : t) }));
+    setRemindAlert(a => a === id ? null : a);
   };
 
   const updateTodoInfo = (id, info) => { setData(d => ({ ...d, todos: d.todos.map(t => t.id===id?{...t,...info}:t) })); setEditingTodo(null); };
@@ -867,11 +1137,11 @@ export default function MochiApp() {
   done.forEach(t => { const k = toBJ(t.doneTs||t.ts).toDateString(); if(!doneByDate[k]) doneByDate[k]=[]; doneByDate[k].push(t); });
   const sortedDK = Object.keys(doneByDate).sort((a,b)=>new Date(b)-new Date(a));
 
-  const urgSort = (a, b) => { const o = {critical:0,medium:1,low:2}; return (o[a.urgency]??3)-(o[b.urgency]??3); };
+  const impSort = (a, b) => (IMP_ORDER[a.importance]??3) - (IMP_ORDER[b.importance]??3);
 
   // Helper to render todo tree
   const renderTodo = (t, depth = 0) => {
-    const kids = data.todos.filter(c => c.parentId === t.id && !c.done).sort(urgSort);
+    const kids = data.todos.filter(c => c.parentId === t.id && !c.done).sort(impSort);
     if (editingTodo === t.id) {
       return (
         <div key={t.id} style={{ paddingLeft: Math.min(depth, 4) * 20 }}>
@@ -887,7 +1157,7 @@ export default function MochiApp() {
         expandedIds={expandedIds} toggleExpand={toggleExpand} allTodos={data.todos}
         completeTodo={completeTodo} pauseTodo={pauseTodo} resumeTodo={resumeTodo} cancelTodo={cancelTodo}
         updateElapsed={(id,e) => setData(d=>({...d,todos:d.todos.map(x=>x.id===id?{...x,elapsed:e}:x)}))}
-        dragFrom={dragFrom} dragOver={dragOver} onDragStart={startDrag}>
+        dragFrom={dragFrom} dragOver={dragOver} onDragStart={startDrag} onRemind={setRemindFor}>
         {kids.map(c => renderTodo(c, depth + 1))}
         {addSubParent === t.id && (
           <div style={{ paddingLeft: Math.min(depth + 1, 4) * 20 }}>
@@ -897,6 +1167,69 @@ export default function MochiApp() {
       </TodoRow>
     );
   };
+
+  // ── Reminder overlays (rendered by every view) ──
+  const alertTodo = remindAlert ? data.todos.find(t => t.id === remindAlert) : null;
+  const sheetTodo = remindFor ? data.todos.find(t => t.id === remindFor) : null;
+  const alertImp = alertTodo ? impOf(alertTodo) : null;
+  const remindUI = (
+    <>
+      {alertTodo && (
+        <div style={{
+          position:"fixed", top:0, left:"50%", transform:"translateX(-50%)",
+          width:"100%", maxWidth:430, zIndex:9997, pointerEvents:"none",
+          padding:"calc(env(safe-area-inset-top, 0px) + 12px) 14px 0",
+        }}>
+          <div style={{
+            pointerEvents:"auto", position:"relative", overflow:"hidden",
+            background:"linear-gradient(140deg,#302B26,#1B1917)", borderRadius:20, padding:"14px 16px",
+            boxShadow:`0 18px 48px rgba(0,0,0,0.34), inset 0 0 0 1px ${hexA(alertImp.color,0.38)}`,
+            animation:"slideDown .32s cubic-bezier(.25,1,.5,1) both",
+          }}>
+            <div className="rmd-sheen rmd-sheen-dark" style={{ "--sweep":"2.4s", background:
+              `linear-gradient(90deg, ${hexA(alertImp.color,0)} 0%, ${hexA(alertImp.color,0.35)} 40%, rgba(255,255,255,0.55) 50%, ${hexA(alertImp.color,0.35)} 60%, ${hexA(alertImp.color,0)} 100%)` }}/>
+            <div style={{ position:"relative", zIndex:1 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+                <span className="rmd-chip-hot" style={{ color:alertImp.color, display:"flex" }}><Ic.Bell s={15}/></span>
+                <span style={{ fontSize:12, fontWeight:700, color:alertImp.color, letterSpacing:"0.5px" }}>到点了</span>
+                <button onClick={()=>ackRemind(alertTodo.id)} style={{
+                  marginLeft:"auto", background:"none", border:"none", color:"#8A8480",
+                  cursor:"pointer", display:"flex", padding:2,
+                }}><Ic.X s={15}/></button>
+              </div>
+              <div style={{ fontSize:16, fontWeight:600, color:"#FFF", marginTop:6, lineHeight:1.35 }}>{alertTodo.text}</div>
+              <div style={{ fontSize:11, color:"#8A8480", marginTop:4 }}>{alertImp.label} · 预期 {fmtMin(alertTodo.duration)}</div>
+              <div style={{ display:"flex", gap:8, marginTop:12 }}>
+                <button onClick={()=>{
+                  ackRemind(alertTodo.id); setView("main"); setTab("todo");
+                  if (activeTodo !== alertTodo.id) startTodo(alertTodo.id);
+                }} style={{
+                  flex:1.3, padding:"11px 0", borderRadius:13, border:"none",
+                  background:`linear-gradient(135deg, ${alertImp.color}, ${alertImp.color}cc)`, color:"#FFF",
+                  fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+                  display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                  boxShadow:`0 6px 18px ${hexA(alertImp.color,0.38)}`,
+                }}><Ic.Play s={13}/>开始专注</button>
+                <button onClick={()=>snoozeRemind(alertTodo.id, 10)} style={{
+                  flex:1, padding:"11px 0", borderRadius:13, border:"1px solid rgba(255,255,255,0.16)",
+                  background:"rgba(255,255,255,0.06)", color:"#CFC9C3",
+                  fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+                }}>稍后10分</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {sheetTodo && (
+        <ReminderSheet
+          todo={sheetTodo}
+          onSave={at => setRemindAt(sheetTodo.id, at)}
+          onClear={() => clearRemind(sheetTodo.id)}
+          onClose={() => setRemindFor(null)}
+        />
+      )}
+    </>
+  );
 
   // ── Note Editor ──
   if (editingNote) {
@@ -912,6 +1245,7 @@ export default function MochiApp() {
           <input ref={ntRef} style={{...S.neT,color:n.color.accent}} placeholder="标题" value={n.title} onChange={e=>updateNote(n.id,"title",e.target.value)} />
           <textarea style={S.neB} placeholder="写点什么..." value={n.body} onChange={e=>updateNote(n.id,"body",e.target.value)} />
         </div>
+        {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -950,12 +1284,12 @@ export default function MochiApp() {
                       <span style={{ fontSize:11,color:"#999" }}>{items.length}项 · 共{fmtSec(tAct)}</span>
                     </div>
                     {items.map(t => {
-                      const urg = UM[t.urgency]||URG[0];
+                      const imp = impOf(t);
                       const over = t.actualDuration > (t.duration||30)*60;
                       return (
                         <div key={t.id} style={{ padding: "12px 4px", borderBottom: "1px solid #F0EDE6" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <div style={{ width:8,height:8,borderRadius:4,background:urg.color,flexShrink:0 }}/>
+                            <div style={{ width:8,height:8,borderRadius:4,background:imp.color,flexShrink:0 }}/>
                             <div style={{ flex:1 }}>
                               <div style={{ fontSize:14,color:"#666",textDecoration:"line-through" }}>
                                 {t.parentId && <span style={{ color:"#CCC",marginRight:4 }}>↳</span>}{t.text}
@@ -994,6 +1328,7 @@ export default function MochiApp() {
             </>
           )}
         </div>
+        {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -1038,11 +1373,8 @@ export default function MochiApp() {
               </div>
             )}
 
-            {/* Sorted by urgency, top-level only */}
-            {[...pending].sort((a,b)=>{
-              const o={critical:0,medium:1,low:2};
-              return (o[a.urgency]??3)-(o[b.urgency]??3);
-            }).map(t => renderTodo(t, 0))}
+            {/* Sorted by importance, top-level only */}
+            {[...pending].sort(impSort).map(t => renderTodo(t, 0))}
           </>
         ):(
           <>
@@ -1140,22 +1472,22 @@ export default function MochiApp() {
       {dragFrom && (() => {
         const todo = data.todos.find(t => t.id === dragFrom);
         if (!todo) return null;
-        const urg = UM[todo.urgency] || URG[0];
+        const imp = impOf(todo);
         return (
           <div style={{
             position: "fixed", left: 16, right: 16,
             top: dragY - dragHalfH,
             zIndex: 1000, background: "#FDFBF7", borderRadius: 16,
             padding: "12px 16px",
-            boxShadow: `0 16px 48px rgba(0,0,0,0.22), 0 0 0 2px ${urg.ring}`,
+            boxShadow: `0 16px 48px rgba(0,0,0,0.22), 0 0 0 2px ${imp.ring}`,
             transform: "scale(1.03)", pointerEvents: "none",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 10, height: 10, borderRadius: "50%", background: urg.color, flexShrink: 0, boxShadow: `0 0 0 3px ${urg.ring}` }}/>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: imp.color, flexShrink: 0, boxShadow: `0 0 0 3px ${imp.ring}` }}/>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 15, fontWeight: 600, color: "#2C2C2C" }}>{todo.text}</div>
                 <div style={{ display: "flex", gap: 6, marginTop: 3 }}>
-                  <span style={{ fontSize: 10, color: urg.color, fontWeight: 600, background: urg.bg, padding: "2px 8px", borderRadius: 5 }}>{urg.label}</span>
+                  <span style={{ fontSize: 10, color: imp.color, fontWeight: 600, background: imp.bg, padding: "2px 8px", borderRadius: 5 }}>{imp.label}</span>
                   <span style={{ fontSize: 10, color: "#BBB" }}>{fmtMin(todo.duration)}</span>
                 </div>
               </div>
@@ -1163,6 +1495,8 @@ export default function MochiApp() {
           </div>
         );
       })()}
+
+      {remindUI}
 
       <style>{CSS}</style>
     </div>
@@ -1193,6 +1527,58 @@ const CSS = `
     100% { opacity:1; transform:scale(1) translateY(0); }
   }
   input:focus,textarea:focus { border-color:#C8BFA8!important; }
+  @keyframes slideDown { from{opacity:0;transform:translateY(-14px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes sheetUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+  @keyframes flashFade { from{opacity:0} to{opacity:1} }
+
+  /* ── Reminder light ──────────────────────────────────────────────
+     Layers, back to front: a warm wash anchored at the left edge, a fine
+     grain for material, a hairline ring, the sweeping sheen, and a comet
+     tracing the top edge in sync. One sweep per cycle, then the row rests. */
+  .rmd { position:absolute; inset:2px 0; z-index:0; pointer-events:none; overflow:hidden; border-radius:14px; }
+  .rmd-wash, .rmd-grain, .rmd-ring { position:absolute; inset:0; }
+  .rmd-ring { border-radius:14px; }
+  .rmd-grain {
+    opacity:.055; mix-blend-mode:multiply; background-size:110px 110px;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='110' height='110' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .rmd-sheen {
+    position:absolute; top:-40%; bottom:-40%; left:0; width:44%;
+    transform:translate3d(-100%,0,0) skewX(-16deg);
+    animation:rmdSweep var(--sweep,3.8s) cubic-bezier(.4,0,.22,1) infinite;
+    will-change:transform;
+  }
+  .rmd-sheen-dark { mix-blend-mode:screen; }
+  .rmd-edge { position:absolute; left:0; right:0; top:0; height:1.5px; overflow:hidden; }
+  .rmd-comet {
+    position:absolute; top:0; bottom:0; left:0; width:32%;
+    transform:translate3d(-100%,0,0);
+    animation:rmdComet var(--sweep,3.8s) cubic-bezier(.4,0,.22,1) infinite;
+    will-change:transform;
+  }
+  @keyframes rmdSweep {
+    0%   { transform:translate3d(-100%,0,0) skewX(-16deg); }
+    34%  { transform:translate3d(230%,0,0) skewX(-16deg); }
+    100% { transform:translate3d(230%,0,0) skewX(-16deg); }
+  }
+  @keyframes rmdComet {
+    0%   { transform:translate3d(-100%,0,0); }
+    34%  { transform:translate3d(315%,0,0); }
+    100% { transform:translate3d(315%,0,0); }
+  }
+  .rmd-dot { animation:rmdDot var(--sweep,3.8s) ease-in-out infinite; }
+  @keyframes rmdDot { 0%,100%{transform:scale(1)} 50%{transform:scale(1.16)} }
+  .rmd-chip {
+    display:inline-flex; align-items:center; gap:3px; font-size:10px; font-weight:600;
+    padding:2px 7px; border-radius:5px; cursor:pointer; font-family:inherit; line-height:1.7;
+  }
+  .rmd-chip-hot { animation:rmdChipPulse 1.3s ease-in-out infinite; }
+  @keyframes rmdChipPulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+  @media (prefers-reduced-motion: reduce) {
+    .rmd-sheen, .rmd-comet, .rmd-dot, .rmd-chip-hot { animation:none; }
+    .rmd-sheen { transform:translate3d(6%,0,0) skewX(-16deg); opacity:.5; }
+    .rmd-comet { transform:translate3d(0,0,0); }
+  }
 `;
 
 const S = {
