@@ -233,8 +233,9 @@ export function AdvisorView({ data, onClose }) {
   for (const r of data.records || []) byOwner[r.ownerId || "me"] = (byOwner[r.ownerId || "me"] || 0) + 1;
 
   return (
-    <div style={{ fontFamily: "'Outfit','Noto Serif SC',sans-serif", background: C.bg, minHeight: "100vh",
-      maxWidth: 430, margin: "0 auto", paddingBottom: 60, color: C.ink }}>
+    <div className="app-shell" style={{ fontFamily: "'Outfit','Noto Serif SC',sans-serif",
+      background: C.bg, minHeight: "100vh", maxWidth: "var(--app-w)", margin: "0 auto",
+      paddingBottom: 60, color: C.ink }}>
       <div style={{ padding: "52px 24px 12px", display: "flex", alignItems: "center", gap: 10 }}>
         <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer",
           fontSize: 20, color: C.dim, padding: 0 }}>‹</button>

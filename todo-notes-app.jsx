@@ -169,6 +169,24 @@ function migrateLab(d) {
   return { ...d, projects, records: records.sort((a, b) => a.at - b.at), experiments: [] };
 }
 
+/* 用 hover/pointer 判断是不是鼠标设备——比用宽度可靠：iPad 接键盘算桌面，
+   小窗口的 Mac 也仍然是桌面。 */
+function useMedia(query) {
+  const [hit, setHit] = useState(() => {
+    try { return window.matchMedia(query).matches; } catch { return false; }
+  });
+  useEffect(() => {
+    let m;
+    try { m = window.matchMedia(query); } catch { return; }
+    const on = (e) => setHit(e.matches);
+    setHit(m.matches);
+    m.addEventListener("change", on);
+    return () => m.removeEventListener("change", on);
+  }, [query]);
+  return hit;
+}
+const DESKTOP_Q = "(hover: hover) and (pointer: fine)";
+
 /* ── Notifications ── */
 function notifySupported() { return typeof window !== "undefined" && "Notification" in window; }
 async function ensureNotifyPerm() {
@@ -322,7 +340,7 @@ function RunningBar({ ids, todos, onOpen, onPauseAll }) {
   return (
     <div style={{
       position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
-      width: "100%", maxWidth: 430, zIndex: 99, pointerEvents: "none",
+      width: "100%", maxWidth: "var(--app-w)", zIndex: 99, pointerEvents: "none",
       padding: "0 24px calc(env(safe-area-inset-bottom, 0px) + 26px)",
     }}>
       <div style={{
@@ -432,7 +450,7 @@ function ReminderSheet({ todo, onSave, onClear, onClose }) {
       animation:"flashFade .2s ease both",
     }}>
       <div onClick={e=>e.stopPropagation()} style={{
-        width:"100%",maxWidth:430,background:"#FDFBF7",
+        width:"100%",maxWidth:"var(--app-w)",background:"#FDFBF7",
         borderRadius:"26px 26px 0 0",padding:"22px 24px 34px",
         boxShadow:"0 -12px 48px rgba(0,0,0,0.18)",animation:"sheetUp .28s cubic-bezier(.25,1,.5,1) both",
       }}>
@@ -470,6 +488,7 @@ function ReminderSheet({ todo, onSave, onClear, onClose }) {
 
 /* ── Task Form ── */
 function TaskForm({ initial, onSave, onCancel, isSubtask }) {
+  const desktop = useMedia(DESKTOP_Q);
   const [text, setText] = useState(initial?.text || "");
   const [duration, setDuration] = useState(initial?.duration || 30);
   const [importance, setImportance] = useState(initial?.importance || "side");
@@ -486,10 +505,15 @@ function TaskForm({ initial, onSave, onCancel, isSubtask }) {
   }, []);
   const presets = [10, 15, 20, 30, 45, 60, 90, 120];
   const imp = IM[importance] || IM.side;
+  const submit = () => { if (text.trim()) onSave({ text: text.trim(), duration, importance, remind }); };
+  // 桌面上打完字直接 ⌘↩ 存下，不用去够鼠标
+  const onKey = (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); submit(); }
+  };
   return (
     <div ref={formRef} style={{ animation: "slideUp .3s ease both", padding: "12px 0 16px", marginLeft: isSubtask ? 24 : 0 }}>
       {isSubtask && <div style={{ fontSize: 12, color: "#999", marginBottom: 6, fontWeight: 600 }}>↳ 添加子任务</div>}
-      <input ref={ref} value={text} onChange={e=>setText(e.target.value)}
+      <input ref={ref} value={text} onChange={e=>setText(e.target.value)} onKeyDown={onKey}
         placeholder={isSubtask ? "子任务名称..." : "任务名称..."}
         onKeyDown={e=>{if(e.key==="Enter"&&text.trim()) onSave({text:text.trim(),duration,importance,remind});}}
         style={{ width:"100%",padding:"14px 16px",borderRadius:14,border:"2px solid #E8E4DA",fontSize:15,fontFamily:"inherit",background:"#FFF",outline:"none",color:"#2C2C2C",boxSizing:"border-box" }}
@@ -546,7 +570,8 @@ function TaskForm({ initial, onSave, onCancel, isSubtask }) {
       </div>
       <div style={{ display:"flex",gap:10,marginTop:16 }}>
         <button onClick={onCancel} style={{flex:1,padding:"13px 0",borderRadius:14,border:"2px solid #E0DCD3",background:"#FFF",color:"#888",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>取消</button>
-        <button onClick={()=>{if(text.trim()) onSave({text:text.trim(),duration,importance,remind});}} style={{flex:1,padding:"13px 0",borderRadius:14,border:"none",background:"#2C2C2C",color:"#FFF",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",opacity:text.trim()?1:0.4}}>保存</button>
+        <button onClick={submit} style={{flex:1,padding:"13px 0",borderRadius:14,border:"none",background:"#2C2C2C",color:"#FFF",fontSize:15,fontWeight:600,cursor:"pointer",fontFamily:"inherit",opacity:text.trim()?1:0.4,display:"flex",alignItems:"center",justifyContent:"center",gap:7}}>
+          保存{desktop && <span style={{fontSize:11,opacity:.55,fontFamily:MONO}}>⌘↩</span>}</button>
       </div>
     </div>
   );
@@ -714,6 +739,7 @@ function WeeklyTable({ todos, weekOffset, setWeekOffset }) {
 function TodoRow({ t, depth, activeIds, timersFrozen, setEditingTodo, setShowAdd,
   deleteTodo, startTodo, onAddSub, expandedIds, toggleExpand, children: subs, allTodos,
   completeTodo, pauseTodo, resumeTodo, dragFrom, dragOver, onDragStart, onRemind }) {
+  const desktop = useMedia(DESKTOP_Q);
   const imp = impOf(t);
   const rem = t.remind || null;
   const lit = !!rem;                            // reminder on → row carries the flowing light
@@ -767,6 +793,7 @@ function TodoRow({ t, depth, activeIds, timersFrozen, setEditingTodo, setShowAdd
     <>
       <div
         data-todo-id={t.id}
+        className="todo-row"
         style={{
           position: "relative", overflow: "hidden",
           borderBottom: "1px solid #F0EDE6",
@@ -882,9 +909,24 @@ function TodoRow({ t, depth, activeIds, timersFrozen, setEditingTodo, setShowAdd
                 {expanded ? <Ic.Up s={14}/> : <Ic.Down s={14}/>}
               </button>
             )}
-            {/* Actions */}
-            <button style={S.actBtn} onClick={() => { closeSwipe(); onAddSub(t.id); }} title="拆解子任务"><Ic.Split s={18}/></button>
-            <button style={S.actBtn} onClick={() => { closeSwipe(); setEditingTodo(t.id); setShowAdd(false); }} title="编辑"><Ic.Edit s={18}/></button>
+            {/* Actions —— 桌面上没有滑动手势，提醒和删除必须放进行内，
+                否则鼠标用户根本没法删除任务或设提醒 */}
+            <div className={desktop ? "row-acts" : undefined} style={{ display:"flex", alignItems:"center", gap:2 }}>
+              {desktop && (
+                <button style={S.actBtn} className="hit" title={lit ? "改提醒" : "设提醒"}
+                  onClick={() => { closeSwipe(); onRemind(t.id); }}>
+                  {lit ? <Ic.BellOff s={17}/> : <Ic.Bell s={17}/>}
+                </button>
+              )}
+              <button style={S.actBtn} className="hit" onClick={() => { closeSwipe(); onAddSub(t.id); }} title="拆解子任务"><Ic.Split s={18}/></button>
+              <button style={S.actBtn} className="hit" onClick={() => { closeSwipe(); setEditingTodo(t.id); setShowAdd(false); }} title="编辑"><Ic.Edit s={18}/></button>
+              {desktop && (
+                <button style={{...S.actBtn, color:"#D08585"}} className="hit" title="删除"
+                  onClick={() => { closeSwipe(); deleteTodo(t.id); }}>
+                  <Ic.Trash s={17}/>
+                </button>
+              )}
+            </div>
             {!isActive && !isPaused && (
               <button onClick={() => startTodo(t.id)} style={{
                 width: 38, height: 38, borderRadius: 12, border: "none",
@@ -1163,6 +1205,46 @@ export default function MochiApp() {
   useEffect(() => { todosRef.current = data.todos; }, [data.todos]);
   useEffect(() => { activeRef.current = activeIds; }, [activeIds]);
   useEffect(() => { setSaveErr(saveFailed); }, [data]);
+
+  // ── 键盘快捷键（只在鼠标/键盘设备上启用）──
+  // 桌面上手一直在键盘上，来回摸鼠标点「+」是最大的效率损失。
+  const desktop = useMedia(DESKTOP_Q);
+  useEffect(() => {
+    if (!desktop) return;
+    const onKey = (e) => {
+      const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || "")
+        || e.target?.isContentEditable;
+
+      if (e.key === "Escape") {
+        // 从最上层往下逐层关闭，一次 Esc 只关一层
+        if (bgAlert) return;                                  // 这个必须明确选择，不能靠 Esc 糊弄过去
+        if (viewPhoto) { setViewPhoto(null); return; }
+        if (remindFor) { setRemindFor(null); return; }
+        if (advisorOpen) { setAdvisorOpen(false); return; }
+        if (showAdd) { setShowAdd(false); return; }
+        if (addSubParent) { setAddSubParent(null); return; }
+        if (editingTodo) { setEditingTodo(null); return; }
+        if (projForm) { setProjForm(null); return; }
+        if (view !== "main") { setView("main"); return; }
+        if (openProject) { setOpenProject(null); return; }
+        if (inField) e.target.blur();
+        return;
+      }
+
+      if (inField || e.metaKey || e.ctrlKey || e.altKey) return;
+
+      if (e.key === "n" || e.key === "N") {
+        e.preventDefault();
+        if (view !== "main") setView("main");
+        if (tab === "todo") { setShowAdd(true); setEditingTodo(null); setAddSubParent(null); }
+        else setProjForm("new");
+      } else if (e.key === "1") { setView("main"); setTab("todo"); }
+      else if (e.key === "2") { setView("main"); setTab("lab"); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [desktop, bgAlert, viewPhoto, remindFor, advisorOpen, showAdd, addSubParent,
+      editingTodo, projForm, view, openProject, tab]);
 
   // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
   // backgrounded PWA, so on return we ask whether the gap was real focus or a detour.
@@ -1559,7 +1641,7 @@ export default function MochiApp() {
       {alertTodo && (
         <div style={{
           position:"fixed", top:0, left:"50%", transform:"translateX(-50%)",
-          width:"100%", maxWidth:430, zIndex:9997, pointerEvents:"none",
+          width:"100%", maxWidth:"var(--app-w)", zIndex:9997, pointerEvents:"none",
           padding:"calc(env(safe-area-inset-top, 0px) + 12px) 14px 0",
         }}>
           <div style={{
@@ -1645,7 +1727,7 @@ export default function MochiApp() {
 
     if (projForm === pr.id) {
       return (
-        <div style={S.ctn}>
+        <div className="app-shell" style={S.ctn}>
           <div style={{ padding:"52px 24px 8px", display:"flex", alignItems:"center", gap:12 }}>
             <button style={S.ib} onClick={()=>setProjForm(null)}><Ic.Back/></button>
             <span style={{ fontSize:20, fontWeight:700 }}>改项目名</span>
@@ -1660,7 +1742,7 @@ export default function MochiApp() {
     }
 
     return (
-      <div style={S.ctn}>
+      <div className="app-shell" style={S.ctn}>
         <div style={{ padding:"52px 24px 0" }}>
           <div style={{ display:"flex", alignItems:"center", gap:8 }}>
             <button style={S.ib} onClick={()=>setOpenProject(null)}><Ic.Back/></button>
@@ -1711,7 +1793,7 @@ export default function MochiApp() {
   // ── Done History ──
   if (view === "done") {
     return (
-      <div style={S.ctn}>
+      <div className="app-shell" style={S.ctn}>
         <div style={{ padding:"52px 24px 8px",display:"flex",alignItems:"center",gap:12 }}>
           <button style={S.ib} onClick={()=>setView("main")}><Ic.Back/></button>
           <span style={{ fontSize:20,fontWeight:700,flex:1 }}>完成记录</span>
@@ -1802,8 +1884,8 @@ export default function MochiApp() {
 
   // ── Main View ──
   return (
-    <div style={S.ctn}>
-      <div style={{ padding:"52px 24px 12px" }}>
+    <div className="app-shell" style={S.ctn}>
+      <div style={{ padding:"52px var(--app-pad) 12px" }}>
         <div style={{ display:"flex",alignItems:"center",gap:10 }}>
           <span style={{ fontSize:28,color:"#E8A838" }}>✦</span>
           <span style={{ fontSize:28,fontWeight:700,letterSpacing:"-0.5px" }}>Mochi</span>
@@ -1814,10 +1896,11 @@ export default function MochiApp() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display:"flex",gap:6,padding:"16px 24px 8px",alignItems:"center" }}>
-        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length],["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length]].map(([k,l,ic,c])=>(
+      <div style={{ display:"flex",gap:6,padding:"16px var(--app-pad) 8px",alignItems:"center" }}>
+        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length,"1"],["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length,"2"]].map(([k,l,ic,c,key])=>(
           <button key={k} onClick={()=>{setTab(k);setShowAdd(false);setEditingTodo(null);setAddSubParent(null);setProjForm(null);}}
-            style={{...S.tab,...(tab===k?S.tabA:{})}}>{ic}<span>{l}</span>{c>0&&<span style={S.bdg}>{c}</span>}</button>
+            style={{...S.tab,...(tab===k?S.tabA:{})}}>{ic}<span>{l}</span>{c>0&&<span style={S.bdg}>{c}</span>}
+            <span className="kbd-hint">{key}</span></button>
         ))}
         {done.length>0&&(
           <button onClick={()=>setView("done")} style={{...S.tab,marginLeft:"auto",gap:5,padding:"10px 14px"}}>
@@ -1826,7 +1909,7 @@ export default function MochiApp() {
         )}
       </div>
 
-      <div style={{ padding:"12px 24px" }}>
+      <div style={{ padding:"12px var(--app-pad)" }}>
         {tab==="todo"?(
           <>
             {showAdd && !addSubParent && <TaskForm onSave={info=>addTodo(info)} onCancel={()=>setShowAdd(false)} />}
@@ -1855,11 +1938,12 @@ export default function MochiApp() {
               </div>
             )}
 
+            <div className="proj-grid">
             {data.projects.map(pr => {
               const n = data.records.filter(r => r.projectId === pr.id).length;
               const last = data.records.filter(r => r.projectId === pr.id).reduce((m,r)=>Math.max(m,r.at),0);
               return (
-                <div key={pr.id} onClick={()=>setOpenProject(pr.id)}
+                <div key={pr.id} onClick={()=>setOpenProject(pr.id)} className="pcard"
                   style={{ ...S.pcard, animation:"popIn .3s ease both" }}>
                   <div style={{ fontSize:15.5, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
                   <div style={{ display:"flex", gap:7, marginTop:6, fontSize:11, color:"#B0A99B" }}>
@@ -1869,6 +1953,7 @@ export default function MochiApp() {
                 </div>
               );
             })}
+            </div>
 
             {(data.notes.length > 0 || data.projects.length > 0) && (
               <div>
@@ -1900,7 +1985,7 @@ export default function MochiApp() {
       <button onClick={()=>{
         if (tab==="todo") { setShowAdd(true); setEditingTodo(null); setAddSubParent(null); }
         else setProjForm("new");
-      }} style={S.fab}>
+      }} style={S.fab} title="新建（N）">
         <Ic.Plus s={26}/>
       </button>
 
@@ -2008,7 +2093,58 @@ export default function MochiApp() {
 
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Outfit:wght@400;500;600;700&display=swap');
+
+  /* 一处控制全局宽度：容器、悬浮条、提醒横幅、FAB 都跟着它走 */
+  :root { --app-w: 430px; --app-pad: 24px; }
+  @media (min-width: 760px)  { :root { --app-w: 620px; --app-pad: 32px; } }
+  @media (min-width: 1100px) { :root { --app-w: 760px; --app-pad: 40px; } }
+
+  /* 桌面：鼠标悬停才露出行内操作，替代手机上的左滑 */
+  @media (hover: hover) and (pointer: fine) {
+    .row-acts { opacity: 0; transition: opacity .15s ease; }
+    .todo-row:hover .row-acts { opacity: 1; }
+    .todo-row:hover { background: #FAF7F1; }
+    .hit:hover { background: #F0EDE6; }
+    .kbd-hint { display: inline-flex; }
+  }
+  .kbd-hint { display: none; align-items: center; gap: 3px; font-size: 10px;
+    color: #C0B8A8; border: 1px solid #E8E4DA; border-radius: 4px; padding: 1px 5px;
+    font-family: ${"'JetBrains Mono','SF Mono',monospace"}; }
+  .todo-row { transition: background .15s ease; border-radius: 10px; }
+
+  /* 项目卡片：窄屏一列，宽屏铺成网格，别让卡片拉成一条 */
+  .proj-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  @media (min-width: 760px) {
+    .proj-grid { grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
+    .proj-grid > * { margin-bottom: 0 !important; }
+  }
+  .pcard { transition: transform .15s ease, box-shadow .15s ease; }
+  @media (hover: hover) and (pointer: fine) {
+    .pcard:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,.07); }
+  }
   * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+
+  /* 手机上容器占满宽度，看不出 body 的底色；Mac 上容器居中后两侧会露出来，
+     不设的话就是浏览器默认的白，和暖米色的容器形成一道明显色差。 */
+  html, body { background: #F4EFE6; }
+  @media (min-width: 760px) {
+    /* 宽屏下让内容区像一张浮起来的纸，边界清楚但不喧宾夺主 */
+    .app-shell {
+      box-shadow: 0 0 0 1px rgba(0,0,0,.035), 0 6px 40px rgba(120,100,70,.08);
+      border-radius: 18px;
+      margin-top: 18px !important;
+      margin-bottom: 18px !important;
+      min-height: calc(100vh - 36px) !important;
+    }
+  }
+  /* 桌面上滚动条收细一点，别把纸的边缘顶开 */
+  @media (hover: hover) and (pointer: fine) {
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #DCD5C8; border-radius: 6px;
+      border: 3px solid transparent; background-clip: content-box; }
+    ::-webkit-scrollbar-thumb:hover { background: #C9C0AF; background-clip: content-box; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  }
   @keyframes slideUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
   @keyframes popIn { from{opacity:0;transform:scale(.92)} to{opacity:1;transform:scale(1)} }
   @keyframes fabPulse { 0%,100%{box-shadow:0 4px 20px rgba(51,51,51,.25)} 50%{box-shadow:0 4px 30px rgba(51,51,51,.4)} }
@@ -2088,13 +2224,13 @@ const CSS = `
 `;
 
 const S = {
-  ctn:{fontFamily:"'Outfit','Noto Serif SC',sans-serif",background:"#FDFBF7",minHeight:"100vh",maxWidth:430,margin:"0 auto",position:"relative",paddingBottom:100,color:"#2C2C2C",overflowX:"hidden"},
+  ctn:{fontFamily:"'Outfit','Noto Serif SC',sans-serif",background:"#FDFBF7",minHeight:"100vh",maxWidth:"var(--app-w)",margin:"0 auto",position:"relative",paddingBottom:100,color:"#2C2C2C",overflowX:"hidden"},
   tab:{display:"flex",alignItems:"center",gap:6,padding:"10px 18px",borderRadius:24,border:"none",background:"#F0EDE6",color:"#888",fontSize:15,fontWeight:500,cursor:"pointer",transition:"all .25s",fontFamily:"inherit"},
   tabA:{background:"#2C2C2C",color:"#FFF"},
   bdg:{background:"#E8A838",color:"#FFF",fontSize:11,fontWeight:600,borderRadius:10,padding:"1px 7px",marginLeft:2},
   ib:{background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",padding:6,borderRadius:10,color:"#555"},
   actBtn:{width:38,height:38,borderRadius:12,border:"none",background:"#F2EFE8",color:"#999",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0},
-  fab:{position:"fixed",bottom:32,right:"calc(50% - 195px + 24px)",width:56,height:56,borderRadius:"50%",border:"none",background:"#2C2C2C",color:"#FFF",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",animation:"fabPulse 3s ease infinite",zIndex:100},
+  fab:{position:"fixed",bottom:32,right:"max(24px, calc(50% - var(--app-w) / 2 + 24px))",width:56,height:56,borderRadius:"50%",border:"none",background:"#2C2C2C",color:"#FFF",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",animation:"fabPulse 3s ease infinite",zIndex:100},
   empty:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:80,gap:4},
   edH:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"52px 20px 12px"},
   neT:{fontSize:26,fontWeight:700,border:"none",background:"transparent",outline:"none",fontFamily:"'Outfit',sans-serif",letterSpacing:"-0.5px",width:"100%"},
