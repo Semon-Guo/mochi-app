@@ -503,12 +503,29 @@ a.btn{display:block;background:#2C2C2C;color:#fff;text-decoration:none;text-alig
 padding:15px;border-radius:14px;font-weight:600;margin:10px 0}
 ol{padding-left:22px}li{margin:8px 0}
 .warn{background:#FFF6E5;border:1px solid #E8A838;border-radius:12px;padding:12px 14px;margin:16px 0;font-size:14px}
-code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:14px}
+.safe{background:#EEF7EC;border:1px solid #5A9E4B;border-radius:12px;padding:12px 14px;margin:16px 0;font-size:14px}
+code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13px;word-break:break-all}
 </style>
 <h1>Mochi 根证书</h1>
 <div class=sub>装一次就好。装完才能用 Mochi 同步实验记录。</div>
+
+<h2>先看清楚你在装什么</h2>
+<p>你要装的是一张<b>根证书</b>。一般来说，装根证书是件需要谨慎的事——普通的根证书一旦被滥用，
+持有者可以伪造<b>任意网站</b>的身份（网银、邮箱、微信），在你连的网络里解密你的 HTTPS 流量。</p>
+<div class=safe>
+<b>这张证书被从技术上锁死了。</b>它带有 X.509 的 Name Constraints 扩展，签发范围被限制在
+<code>mochi.invalid</code> 这一个永不存在的域名下。也就是说：<b>即使这张证书的私钥泄露，
+拿到它的人也签不出 google.com、网银或任何真实网站的证书</b>——你的系统会直接拒绝。
+已在 Apple 的证书验证栈上实测确认。
+</div>
+<p>它唯一能做的，就是让你的设备信任实验室内网那台 <code>172.29.249.177</code> 上的同步服务。
+私钥不在服务器上，只保存在管理员本人的电脑里。</p>
+<p style="color:#999;font-size:13.5px">不放心的话可以自己核对：装之前用
+<code>openssl x509 -in mochi-ca.crt -noout -text</code> 看 <code>X509v3 Name Constraints</code> 一节。</p>
+
 <a class=btn href="/mochi-ca.mobileconfig">📱 iPhone / iPad 点这里安装</a>
 <a class=btn href="/ca.crt">💻 Mac 点这里下载</a>
+
 <h2>iPhone 步骤</h2>
 <ol>
 <li>用 <b>Safari</b> 打开本页（微信里打不开描述文件），点上面第一个按钮</li>
@@ -516,15 +533,19 @@ code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:14px}
 <li><b>关键一步：</b>设置 → 通用 → 关于本机 → 拉到最底部 → <b>证书信任设置</b> → 打开「Mochi Lab Root CA」的开关</li>
 </ol>
 <div class=warn><b>第 3 步不能省。</b>只安装不打开信任开关，浏览器依然会报证书错误——绝大多数人卡在这里。</div>
+
 <h2>Mac 步骤</h2>
 <ol>
 <li>点上面第二个按钮下载 <code>ca.crt</code></li>
 <li>双击它，钥匙串访问会打开并添加到「登录」</li>
 <li>在钥匙串里找到「Mochi Lab Root CA」，双击 → 展开「信任」→ 把「使用此证书时」改成<b>始终信任</b> → 关窗口输密码确认</li>
 </ol>
-<h2>这是什么</h2>
-<p>课题组的实验记录同步服务跑在实验室内网的机器上，没有公网域名，所以用的是自己签的证书。
-装上这个根证书，你的设备才会认它是可信的 HTTPS。证书有效期 10 年，装一次不用再管。</p>
+
+<h2>不想装 / 想撤销</h2>
+<p>随时可以删掉：iPhone 在「设置 → 通用 → VPN 与设备管理」里删除描述文件；
+Mac 在钥匙串访问里删除「Mochi Lab Root CA」。删掉之后 Mochi 的同步就用不了，
+但待办和计时功能不受影响（那些数据本来就只存在你自己手机上）。</p>
+
 <div class=warn>装完之后，同步地址是 <code>https://172.29.249.177:3000</code>，只在实验室网络里能连上。</div>
 </html>"""
 

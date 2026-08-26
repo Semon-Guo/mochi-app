@@ -7,6 +7,8 @@
 # iOS 限制服务器证书有效期 ≤398 天，所以每年要跑一次这个脚本。
 # 设备上装的是 CA（10 年有效），换服务器证书不需要重装任何设备。
 #
+# 换 IP 时注意：CA 的 Name Constraints 不限制 IP 类型，所以换 IP 不用重建 CA。
+#
 #     ./renew-cert.sh [服务器IP]
 set -euo pipefail
 
@@ -19,15 +21,18 @@ REMOTE="wang@${IP}"
 cd "$CA_DIR"
 echo "为 $IP 签发新证书..."
 
+# SAN 里不要放 DNS 名：CA 的 Name Constraints 只允许 mochi.invalid 子树，
+# 放 DNS:localhost 会让自己签的证书被约束拦下（踩过一次）。
 cat > server.ext <<EOF
 basicConstraints=CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:${IP},IP:127.0.0.1,DNS:localhost
+subjectAltName=IP:${IP},IP:127.0.0.1
 EOF
 
+# CN 必须是描述文字，不能写成 IP —— 像主机名的 CN 会被当作 DNS 名去比对约束
 openssl req -newkey rsa:2048 -keyout server.key -out server.csr -nodes \
-  -subj "/CN=${IP}/O=Mochi Lab" 2>/dev/null
+  -subj "/O=Mochi Lab/CN=Mochi Sync Server" 2>/dev/null
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out server.crt -days 397 -sha256 -extfile server.ext 2>/dev/null
 chmod 600 server.key
