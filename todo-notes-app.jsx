@@ -1,4 +1,7 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import * as Sync from "./src/sync.js";
+import { SyncBar, AdvisorView } from "./src/SyncUI.jsx";
+import { putPhoto, getPhoto, delPhoto } from "./src/photos.js";
 
 const SK = "mochi_v3";
 const TIMER_SK = "mochi_timer";     // legacy single-session key, migrated on first read
@@ -42,6 +45,7 @@ function clearTimerSession(...todoIds) {
 function loadAll() {
   let data = { todos: [], notes: [], projects: [], records: [] };
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
+  const keptSync = data._sync || null;
   data = migrateLab({
     todos: (data.todos || []).map(migrateTodo),
     notes: data.notes || [],
@@ -49,6 +53,7 @@ function loadAll() {
     experiments: data.experiments || [],
     records: data.records || [],
   });
+  if (keptSync) data._sync = keptSync;
   // Every live session keeps counting while the app is closed — fold the time back in,
   // and drop sessions whose task is gone or already finished.
   const sessions = loadTimerSessions();
@@ -114,31 +119,7 @@ const MONO = "'JetBrains Mono','SF Mono','Courier New',monospace";
    一个项目 = 一叠记录。一条记录 = 日期 + 天气 + 正文 + 照片，跟纸本子一页一样。 */
 const WEATHER = ["☀️ 晴", "⛅ 多云", "☁️ 阴", "🌧 雨", "⛈ 雷雨", "❄️ 雪"];
 
-/* 照片存 IndexedDB（按磁盘算容量），localStorage 只留 id —— 一张手机照片
-   转 base64 有 2–4MB，塞进 localStorage 两张就把整个 app 的数据写爆了。 */
-const PDB = "mochi_photos";
-function photoDB() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open(PDB, 1);
-    r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains("p")) r.result.createObjectStore("p"); };
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-}
-// fn 必须返回 IDBRequest，这样 rq.result 的含义才统一：
-// 取不到的 key 得到 undefined，而不是把请求对象本身漏出去
-function photoTx(mode, fn) {
-  return photoDB().then(db => new Promise((res, rej) => {
-    const tx = db.transaction("p", mode);
-    const rq = fn(tx.objectStore("p"));
-    tx.oncomplete = () => res(rq.result);
-    tx.onerror = () => rej(tx.error);
-    tx.onabort = () => rej(tx.error);
-  }));
-}
-const putPhoto = (id, blob) => photoTx("readwrite", st => st.put(blob, id)).then(() => id);
-const getPhoto = (id) => photoTx("readonly", st => st.get(id));
-const delPhoto = (id) => photoTx("readwrite", st => st.delete(id)).then(() => true);
+/* 照片存 IndexedDB，见 src/photos.js —— 同步引擎也要用，所以抽出去共用 */
 
 // 长边压到 1600、JPEG q0.75，一张大约 200–400KB，看光路和示数完全够
 function shrinkImage(file, max = 1600, q = 0.75) {
@@ -428,6 +409,12 @@ function RemindPicker({ at, onChange, accent = "#E8A838" }) {
       {denied && (
         <div style={{ fontSize:11,color:"#C08838",marginTop:8,lineHeight:1.5 }}>
           系统通知已被拒绝 · 只会有应用内提醒和流光
+        </div>
+      )}
+      {/* 没有推送服务，退到后台后没有代码在跑 —— 说清楚，别让人以为一定会准时响 */}
+      {notifySupported() && !denied && (
+        <div style={{ fontSize:11,color:"#BBB",marginTop:8,lineHeight:1.5 }}>
+          退到后台后系统不会推送 · 回到 App 时补弹
         </div>
       )}
     </div>
@@ -1131,7 +1118,16 @@ function ProjectForm({ initial, onSave, onCancel }) {
 /* ── Main App ── */
 export default function MochiApp() {
   const [initState] = useState(loadAll);
-  const [data, setData] = useState(initState.data);
+  const [data, _setData] = useState(initState.data);
+  // 所有 setData 都过这一层：自动比对前后，给变化的实验记录盖 updatedAt、
+  // 给删掉的留墓碑。这样那 23 处调用点一个都不用改。
+  const setData = useCallback((updater) => {
+    _setData(prev => Sync.stampChanges(prev, typeof updater === "function" ? updater(prev) : updater));
+  }, []);
+  // 同步合并的结果已经带好了服务器的时间戳，不能再过 stampChanges——
+  // 否则刚拉下来的记录会被当成本地新改动，下一轮又推回服务器。
+  const applySync = useCallback((fn) => _setData(fn), []);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
   const [tab, setTab] = useState("todo");
   const [editingNote, setEditingNote] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -1796,6 +1792,14 @@ export default function MochiApp() {
     );
   }
 
+  // 导师视图是独立一屏，走在主视图之前
+  if (advisorOpen) {
+    return (<>
+      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} />
+      <style>{CSS}</style>
+    </>);
+  }
+
   // ── Main View ──
   return (
     <div style={S.ctn}>
@@ -1840,6 +1844,7 @@ export default function MochiApp() {
           </>
         ):(
           <>
+            <SyncBar data={data} applySync={applySync} onOpenAdvisor={()=>setAdvisorOpen(true)} />
             {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
 
             {data.projects.length===0 && data.notes.length===0 && projForm!=="new" && (

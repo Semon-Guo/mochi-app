@@ -1,3 +1,6 @@
 node_modules
 dist
 .DS_Store
+
+# 凭据文件，绝不能进版本库
+.git-credentials
