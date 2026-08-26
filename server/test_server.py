@@ -122,6 +122,16 @@ def main():
         s, r = call("GET", "/api/sync")
         chk("未登录访问同步接口 → 401", s == 401, f"HTTP {s}")
 
+        print("\n── 暴力破解防护 ──")
+        for i in range(8):
+            call("POST", "/api/login", {"username": "stu2", "password": f"guess{i}"})
+        s, r = call("POST", "/api/login", {"username": "stu2", "password": f"guess-more"})
+        chk("连续失败后被限速锁定", s == 429, f"HTTP {s} {r.get('error','')}")
+        s, r = call("POST", "/api/login", {"username": "stu2", "password": "stu2-passwd-1"})
+        chk("锁定期内正确密码也拒绝（防绕过）", s == 429, f"HTTP {s}")
+        s, r = call("POST", "/api/register", {"username": "sneaky", "password": "sneaky-pass-1", "inviteCode": "wrong"})
+        chk("错误邀请码也被限速计数", s in (403, 429), f"HTTP {s}")
+
         print("\n── 同步 ──")
         now = int(time.time() * 1000)
         s, r = call("POST", "/api/sync", {

@@ -167,6 +167,52 @@ def verify_password(password: str, stored: str) -> bool:
 
 DUMMY_HASH = hash_password("dummy-password-for-timing")
 
+# ── 登录限速 ──
+# 没有它的话，进了校园网的人可以对任何账号无限猜密码（实测每次仅 0.13 秒）。
+# 按「用户名」和「来源 IP」分别计数：前者挡针对某个账号的爆破，
+# 后者挡拿一个字典横扫全组账号。计数放内存，重启即清——对 20 人的内网
+# 工具足够，也不用担心把自己人永久锁死。
+_fails = {}
+_fail_lock = threading.Lock()
+MAX_FAILS = 8            # 窗口内允许的失败次数
+FAIL_WINDOW = 15 * 60    # 计数窗口
+LOCK_SECONDS = 10 * 60   # 触发后的锁定时长
+
+
+def rate_blocked(keys):
+    """返回剩余锁定秒数；0 表示放行。"""
+    now = time.time()
+    with _fail_lock:
+        worst = 0
+        for k in keys:
+            rec = _fails.get(k)
+            if not rec:
+                continue
+            if rec["until"] > now:
+                worst = max(worst, int(rec["until"] - now))
+            elif now - rec["first"] > FAIL_WINDOW:
+                _fails.pop(k, None)
+        return worst
+
+
+def note_fail(keys):
+    now = time.time()
+    with _fail_lock:
+        for k in keys:
+            rec = _fails.get(k)
+            if not rec or now - rec["first"] > FAIL_WINDOW:
+                _fails[k] = {"n": 1, "first": now, "until": 0}
+            else:
+                rec["n"] += 1
+                if rec["n"] >= MAX_FAILS:
+                    rec["until"] = now + LOCK_SECONDS
+
+
+def note_success(keys):
+    with _fail_lock:
+        for k in keys:
+            _fails.pop(k, None)
+
 
 def public_user(row):
     return {"id": row["id"], "username": row["username"],
@@ -183,7 +229,7 @@ def start_session(c, user_id):
     return token
 
 
-def register(body):
+def register(body, client_ip="?"):
     username = str(body.get("username") or "").strip().lower()
     password = str(body.get("password") or "")
     display = str(body.get("displayName") or "").strip() or username
@@ -195,7 +241,11 @@ def register(body):
     c = conn()
     # 注册一律是学生。导师角色只能在服务器上用 set_role.py 授予——否则谁先抢注
     # 谁就拿到了看全组记录的权限。
+    wait = rate_blocked([f"reg:{client_ip}"])
+    if wait:
+        raise HttpError(429, f"尝试次数过多，请 {wait // 60 + 1} 分钟后再试")
     if INVITE_CODE and body.get("inviteCode") != INVITE_CODE:
+        note_fail([f"reg:{client_ip}"])          # 邀请码也不能随便试
         raise HttpError(403, "邀请码不正确")
     if c.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         raise HttpError(409, "用户名已被占用")
@@ -209,14 +259,21 @@ def register(body):
     return {"token": start_session(c, uid), "user": public_user(row)}
 
 
-def login(body):
+def login(body, client_ip="?"):
     c = conn()
     username = str(body.get("username") or "").strip().lower()
+    keys = [f"u:{username}", f"ip:{client_ip}"]
+    wait = rate_blocked(keys)
+    if wait:
+        raise HttpError(429, f"尝试次数过多，请 {wait // 60 + 1} 分钟后再试")
+
     row = c.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     # 用户不存在也跑一次校验，避免用响应时间区分「用户不存在」和「密码错」
     ok = verify_password(str(body.get("password") or ""), row["password_hash"] if row else DUMMY_HASH)
     if not row or not ok:
+        note_fail(keys)
         raise HttpError(401, "用户名或密码错误")
+    note_success(keys)
     return {"token": start_session(c, row["id"]), "user": public_user(row)}
 
 
@@ -426,9 +483,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 return self._json({"ok": True, "now": int(time.time() * 1000)})
             if method == "POST" and path == "/api/register":
-                return self._json(register(self._json_body()))
+                return self._json(register(self._json_body(), self.client_address[0]))
             if method == "POST" and path == "/api/login":
-                return self._json(login(self._json_body()))
+                return self._json(login(self._json_body(), self.client_address[0]))
             if method == "POST" and path == "/api/logout":
                 m = re.match(r"Bearer\s+(.+)", self.headers.get("Authorization") or "", re.I)
                 if m:
