@@ -2,7 +2,11 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// 注入构建标识：排查「到底加载的是哪一版」时，不用再靠猜
+const BUILD = new Date().toISOString().slice(5, 16).replace("T", " ");
+
 export default defineConfig({
+  define: { __BUILD__: JSON.stringify(BUILD) },
   base: '/mochi-app/',
   plugins: [
     react(),

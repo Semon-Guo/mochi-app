@@ -3,6 +3,9 @@ import * as Sync from "./src/sync.js";
 import { SyncBar, AdvisorView } from "./src/SyncUI.jsx";
 import { putPhoto, getPhoto, delPhoto } from "./src/photos.js";
 
+// 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
+const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
+
 const SK = "mochi_v3";
 const TIMER_SK = "mochi_timer";     // legacy single-session key, migrated on first read
 const TIMERS_SK = "mochi_timers";   // { [todoId]: { startTs, baseElapsed } } — several at once
@@ -1890,8 +1893,10 @@ export default function MochiApp() {
           <span style={{ fontSize:28,color:"#E8A838" }}>✦</span>
           <span style={{ fontSize:28,fontWeight:700,letterSpacing:"-0.5px" }}>Mochi</span>
         </div>
-        <div style={{ fontSize:14,color:"#999",marginTop:4,paddingLeft:38,fontFamily:"'Noto Serif SC',serif" }}>
+        <div style={{ fontSize:14,color:"#999",marginTop:4,paddingLeft:38,fontFamily:"'Noto Serif SC',serif",
+          display:"flex",alignItems:"baseline",gap:8 }}>
           {new Date().toLocaleDateString("zh-CN",{month:"long",day:"numeric",weekday:"long"})}
+          <span style={{ fontSize:10,color:"#D6CFC2",fontFamily:MONO }} title="构建版本">{BUILD}</span>
         </div>
       </div>
 
@@ -2094,10 +2099,14 @@ export default function MochiApp() {
 const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Outfit:wght@400;500;600;700&display=swap');
 
-  /* 一处控制全局宽度：容器、悬浮条、提醒横幅、FAB 都跟着它走 */
+  /* 一处控制全局宽度：容器、悬浮条、提醒横幅、FAB 都跟着它走。
+     断点压到 560px：桌面上窗口常常不是全屏，760 的门槛太高，
+     很多人根本触发不到宽版就以为没生效。宽度用 min() 连续变化，
+     不再是一跳一跳的。 */
   :root { --app-w: 430px; --app-pad: 24px; }
-  @media (min-width: 760px)  { :root { --app-w: 620px; --app-pad: 32px; } }
-  @media (min-width: 1100px) { :root { --app-w: 760px; --app-pad: 40px; } }
+  @media (min-width: 560px)  { :root { --app-w: min(100% - 48px, 560px); --app-pad: 28px; } }
+  @media (min-width: 800px)  { :root { --app-w: min(100% - 64px, 680px); --app-pad: 32px; } }
+  @media (min-width: 1100px) { :root { --app-w: 780px; --app-pad: 40px; } }
 
   /* 桌面：鼠标悬停才露出行内操作，替代手机上的左滑 */
   @media (hover: hover) and (pointer: fine) {
@@ -2114,8 +2123,8 @@ const CSS = `
 
   /* 项目卡片：窄屏一列，宽屏铺成网格，别让卡片拉成一条 */
   .proj-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
-  @media (min-width: 760px) {
-    .proj-grid { grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
+  @media (min-width: 560px) {
+    .proj-grid { grid-template-columns: repeat(auto-fill, minmax(224px, 1fr)); }
     .proj-grid > * { margin-bottom: 0 !important; }
   }
   .pcard { transition: transform .15s ease, box-shadow .15s ease; }
@@ -2127,7 +2136,7 @@ const CSS = `
   /* 手机上容器占满宽度，看不出 body 的底色；Mac 上容器居中后两侧会露出来，
      不设的话就是浏览器默认的白，和暖米色的容器形成一道明显色差。 */
   html, body { background: #F4EFE6; }
-  @media (min-width: 760px) {
+  @media (min-width: 560px) {
     /* 宽屏下让内容区像一张浮起来的纸，边界清楚但不喧宾夺主 */
     .app-shell {
       box-shadow: 0 0 0 1px rgba(0,0,0,.035), 0 6px 40px rgba(120,100,70,.08);
