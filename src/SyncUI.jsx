@@ -109,6 +109,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [tick, setTick] = useState(0);
+  const [syncTodos, setSyncTodos] = useState(() => Sync.getSyncTodos());
   const running = useRef(false);
 
   const pending = Sync.pendingCount(data);
@@ -143,7 +144,8 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
     } finally { running.current = false; setBusy(false); }
   };
 
-  // 打开 app 时同步一次，之后每 2 分钟一次；回到前台也补一次
+  // 打开 app 时同步一次，之后每 2 分钟一次；回到前台也补一次。
+  // syncTodos 变化时也重跑：刚打开开关就该把待办推上去，不用干等两分钟。
   useEffect(() => {
     if (!auth) return;
     doSync(true);
@@ -151,7 +153,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
     const wake = () => { if (document.visibilityState === "visible") doSync(true); };
     document.addEventListener("visibilitychange", wake);
     return () => { clearInterval(iv); document.removeEventListener("visibilitychange", wake); };
-  }, [auth?.token]);
+  }, [auth?.token, syncTodos]);
 
   const status = !auth ? "登录后可与课题组同步"
     : busy ? "同步中…"
@@ -188,10 +190,23 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
               <div style={{ fontSize: 12.5, color: C.dim, padding: "8px 0", lineHeight: 1.7 }}>
                 <div>账号：<b style={{ color: C.ink }}>{auth.user.displayName}</b>（{auth.user.username}）</div>
                 <div>身份：{auth.user.role === "advisor" ? "导师 · 可查看全组记录" : "学生 · 只同步自己的记录"}</div>
-                <div style={{ color: C.faint, fontSize: 11.5, marginTop: 4 }}>
-                  只有实验记录会同步，待办和专注计时留在本机
-                </div>
               </div>
+
+              <label style={{
+                display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer",
+                padding: "10px 11px", borderRadius: 12, border: `1px solid ${C.line}`,
+                background: "#FCFAF6", marginTop: 4,
+              }}>
+                <input type="checkbox" checked={syncTodos} style={{ marginTop: 3, cursor: "pointer" }}
+                  onChange={(e) => { Sync.setSyncTodos(e.target.checked); setSyncTodos(e.target.checked); }} />
+                <span style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+                  <b style={{ color: C.ink }}>同步待办到我的其他设备</b>
+                  <span style={{ display: "block", color: C.faint, fontSize: 11.5, marginTop: 2 }}>
+                    待办、专注计时、timeline <b>只有你自己看得到</b>——导师和其他同学都看不到，
+                    服务端强制。关掉则只同步实验记录。
+                  </span>
+                </span>
+              </label>
               {auth.user.role === "advisor" && (
                 <button onClick={() => { setOpen(false); onOpenAdvisor(); }}
                   style={{ ...btn("#FFF", C.ink, { width: "100%", border: `2px solid ${C.edge}`, marginTop: 6 }) }}>

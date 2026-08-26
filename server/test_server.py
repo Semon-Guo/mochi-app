@@ -216,6 +216,30 @@ def main():
         s, r = call("POST", "/api/photo/ph1", raw=b"hijack", token=stu2, ctype="image/jpeg")
         chk("其他学生不能覆盖上传", s == 403, f"HTTP {s}")
 
+        print("\n── 待办：同步但导师不可见 ──")
+        s, r = call("POST", "/api/sync", {
+            "todos": [{"id": "td1", "updatedAt": now, "data": {
+                "text": "跑柱子", "elapsed": 3600,
+                "timeline": [{"type": "start", "at": now}, {"type": "pause", "at": now + 60}]}}],
+        }, token=stu1)
+        chk("学生能同步自己的待办", s == 200 and r["applied"] == 1, f"applied={r.get('applied')}")
+
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        chk("本人拉得回自己的待办", len(r.get("todos", [])) == 1, f"n={len(r.get('todos', []))}")
+        chk("待办内容完整（含计时）", r["todos"][0]["data"].get("elapsed") == 3600)
+
+        s, r = call("GET", "/api/sync?since=0", token=advisor)
+        chk("导师看不到学生的待办", len(r.get("todos", [])) == 0, f"n={len(r.get('todos', []))}")
+        chk("但导师仍看得到实验记录", len(r.get("records", [])) >= 1, f"n={len(r.get('records', []))}")
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("其他学生也看不到", len(r.get("todos", [])) == 0, f"n={len(r.get('todos', []))}")
+
+        s, r = call("POST", "/api/sync",
+                    {"todos": [{"id": "td1", "updatedAt": now + 999, "data": {"text": "改别人的待办"}}]},
+                    token=advisor)
+        chk("导师不能改学生的待办", r["applied"] == 0 and len(r["rejected"]) == 1)
+
         print("\n── 导师视角 ──")
         s, r = call("GET", "/api/users", token=advisor)
         chk("导师能列出成员", s == 200 and len(r["users"]) == 3, f"n={len(r.get('users', []))}")

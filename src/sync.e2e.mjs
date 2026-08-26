@@ -140,16 +140,56 @@ try {
   dP = res.data;
   chk("导师那边的记录也被删掉", dP.records.length === 0, `剩 ${dP.records.length} 条`);
 
-  console.log("\n── 待办不上传 ──");
-  let dC = base();
-  dC = Sync.stampChanges(dC, {
-    ...dC,
-    todos: [{ id: "t1", text: "私人待办", elapsed: 3600, timeline: [{ type: "start", at: 1 }] }],
-    notes: [{ id: "n1", title: "私人笔记" }],
+  console.log("\n── 待办：本人多设备互通，组内互不可见 ──");
+  let dT = base();
+  dT = Sync.stampChanges(dT, {
+    ...dT,
+    todos: [{ id: "td1", text: "跑柱子", elapsed: 3600, duration: 60,
+              timeline: [{ type: "start", at: 1 }, { type: "pause", at: 2 }] }],
+    notes: [{ id: "n1", title: "私人笔记", body: "不该上传" }],
   }, 20000);
-  chk("待办和笔记不进待同步队列", Sync.pendingCount(dC) === 0, String(Sync.pendingCount(dC)));
-  res = await syncDevice("B", dC, b.token);
-  chk("同步一轮后服务器上依然没有待办", res.pushed === 0, `pushed=${res.pushed}`);
+  chk("待办进入待同步队列", Sync.pendingCount(dT) === 1, String(Sync.pendingCount(dT)));
+  chk("笔记始终不进队列", !dT._sync.stamps.n1);
+
+  res = await syncDevice("A", dT, a.token);
+  dT = res.data;
+  chk("待办推送成功", res.pushed === 1, `pushed=${res.pushed}`);
+
+  let dA3 = base();
+  res = await syncDevice("A3", dA3, a.token);
+  dA3 = res.data;
+  const gotTodo = (dA3.todos || []).find((t) => t.id === "td1");
+  chk("本人的另一台设备拉得到待办", !!gotTodo, `todos=${(dA3.todos || []).length}`);
+  chk("计时数据完整同步", gotTodo?.elapsed === 3600, String(gotTodo?.elapsed));
+  chk("timeline 也同步了", (gotTodo?.timeline || []).length === 2);
+
+  let dP2 = base();
+  res = await syncDevice("P", dP2, prof.token);
+  dP2 = res.data;
+  chk("导师拉不到学生的待办", (dP2.todos || []).length === 0, `todos=${(dP2.todos || []).length}`);
+
+  let dB2 = base();
+  res = await syncDevice("B", dB2, b.token);
+  dB2 = res.data;
+  chk("其他学生也拉不到", (dB2.todos || []).length === 0, `todos=${(dB2.todos || []).length}`);
+
+  console.log("\n── 关掉开关后待办不再上传 ──");
+  asDevice("A4");
+  Sync.setServer(BASE);
+  Sync.setSyncTodos(false);
+  let dOff = base();
+  dOff = Sync.stampChanges(dOff, {
+    ...dOff, todos: [{ id: "td2", text: "关了开关之后建的" }],
+  }, 30000);
+  chk("关闭后待办不打戳", Sync.pendingCount(dOff) === 0, String(Sync.pendingCount(dOff)));
+  const before = await syncDevice("A4", dOff, a.token);
+  chk("关闭后不推送待办", before.pushed === 0, `pushed=${before.pushed}`);
+  // 本地新建的 td2 当然还在本地，只是不参与同步；要验证的是不会把服务器上的
+  // td1 拉下来，也不会把 td2 推上去
+  chk("关闭后拉不到服务器上的待办", !(before.data.todos || []).some((t) => t.id === "td1"),
+      (before.data.todos || []).map((t) => t.id).join(",") || "空");
+  chk("本地新建的待办不受影响，仍在本地", (before.data.todos || []).some((t) => t.id === "td2"));
+  Sync.setSyncTodos(true);
 
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {

@@ -39,7 +39,11 @@ ORIGINS = [o.strip() for o in (os.environ.get("MOCHI_ORIGINS") or
 
 MAX_PHOTO = 8 * 1024 * 1024
 SESSION_TTL = 90 * 24 * 3600
-SYNC_TABLES = ("projects", "records", "photos")
+SYNC_TABLES = ("projects", "records", "photos", "todos")
+# 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
+# （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
+# 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
+ADVISOR_VISIBLE = ("projects", "records", "photos")
 PAGE = 500
 
 PHOTO_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,6 +74,12 @@ CREATE TABLE IF NOT EXISTS records (
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_records_seq ON records(seq);
 CREATE INDEX IF NOT EXISTS idx_records_owner ON records(owner_id, seq);
+
+CREATE TABLE IF NOT EXISTS todos (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_todos_seq ON todos(seq);
+CREATE INDEX IF NOT EXISTS idx_todos_owner ON todos(owner_id, seq);
 
 CREATE TABLE IF NOT EXISTS photos (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -310,11 +320,11 @@ def shape(table, r):
 
 
 def pull(user, since):
-    """增量拉取。学生只看自己的，导师看全组的。"""
+    """增量拉取。实验记录导师可见全组；待办任何角色都只能看自己的。"""
     c = conn()
-    advisor = user["role"] == "advisor"
     out = {"since": since, "seq": since, "more": False}
     for t in SYNC_TABLES:
+        advisor = user["role"] == "advisor" and t in ADVISOR_VISIBLE
         if advisor:
             rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?", (since, PAGE)).fetchall()
         else:

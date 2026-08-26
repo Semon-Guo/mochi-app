@@ -14,7 +14,24 @@ const AUTH_SK = "mochi_auth";
 const SERVER_SK = "mochi_server";
 const DEFAULT_SERVER = "https://172.29.249.177:3000";
 
-export const SYNC_KINDS = ["projects", "records"];
+const TODOS_SK = "mochi_sync_todos";
+
+// 实验记录始终同步（课题组共用）；待办是可选项，而且**只在自己的设备之间**
+// 同步——服务端不会把它给导师或任何其他人看。
+export const LAB_KINDS = ["projects", "records"];
+export const ALL_KINDS = ["projects", "records", "todos"];
+
+export function getSyncTodos() {
+  try { return localStorage.getItem(TODOS_SK) !== "0"; } catch { return true; }
+}
+export function setSyncTodos(on) {
+  try { localStorage.setItem(TODOS_SK, on ? "1" : "0"); } catch {}
+}
+/** 当前这台设备启用的同步类型 */
+export const syncKinds = () => (getSyncTodos() ? ALL_KINDS : LAB_KINDS);
+
+// 兼容旧调用点
+export const SYNC_KINDS = ALL_KINDS;
 
 /* ── 服务器地址与登录态 ── */
 
@@ -67,7 +84,8 @@ const idMap = (arr) => {
 // _sync 本身不参与比较，否则每次打戳都会引起下一轮变化
 const fingerprint = (o) => JSON.stringify(o);
 
-export function stampChanges(prev, next, now = Date.now()) {
+export function stampChanges(prev, next, now = Date.now(), kinds = null) {
+  const KINDS = kinds || syncKinds();
   const prevSync = prev?._sync || {};
   const sync = {
     stamps: { ...(prevSync.stamps || {}) },
@@ -78,7 +96,7 @@ export function stampChanges(prev, next, now = Date.now()) {
   };
   let touched = false;
 
-  for (const kind of SYNC_KINDS) {
+  for (const kind of KINDS) {
     const before = idMap(prev?.[kind]);
     const after = idMap(next?.[kind]);
 
@@ -131,10 +149,12 @@ export async function syncOnce(data, token) {
     lastSyncAt: data?._sync?.lastSyncAt || 0,
   };
 
+  const KINDS = syncKinds();
   // 1) 推本地改动
-  const byKind = { projects: [], records: [] };
+  const byKind = {};
+  for (const k of KINDS) byKind[k] = [];
   const items = {};
-  for (const kind of SYNC_KINDS) for (const x of data?.[kind] || []) items[x.id] = x;
+  for (const kind of KINDS) for (const x of data?.[kind] || []) items[x.id] = x;
 
   for (const [id, st] of Object.entries(sync.stamps)) {
     if (sync.pushed[id] === st.at) continue;       // 已经推过且没再改
@@ -150,28 +170,30 @@ export async function syncOnce(data, token) {
   }
 
   let pushed = 0, rejected = [];
-  if (byKind.projects.length || byKind.records.length) {
+  if (KINDS.some((k) => byKind[k].length)) {
     const res = await api("/api/sync", { method: "POST", body: byKind, token });
     pushed = res.applied || 0;
     rejected = res.rejected || [];
     const bad = new Set(rejected.map(r => r.id));
-    for (const kind of SYNC_KINDS)
-      for (const row of byKind[kind])
+    for (const kind of KINDS)
+      for (const row of byKind[kind] || [])
         if (!bad.has(row.id)) markClean(sync, row.id, row.updatedAt);
   }
 
   // 2) 拉服务器改动（可能分页）
-  const incoming = { projects: [], records: [] };
+  const incoming = {};
+  for (const k of ALL_KINDS) incoming[k] = [];
   let guard = 0;
   for (;;) {
     const res = await api(`/api/sync?since=${sync.cursor}`, { token });
-    for (const kind of SYNC_KINDS) incoming[kind].push(...(res[kind] || []));
+    for (const kind of KINDS) incoming[kind].push(...(res[kind] || []));
     sync.cursor = res.seq ?? sync.cursor;
     if (!res.more || ++guard > 50) break;
   }
 
   sync.lastSyncAt = Date.now();
-  return { sync, incoming, pushed, pulled: incoming.projects.length + incoming.records.length, rejected };
+  const pulled = KINDS.reduce((n, k) => n + incoming[k].length, 0);
+  return { sync, incoming, pushed, pulled, rejected };
 }
 
 /**
@@ -181,7 +203,7 @@ export async function syncOnce(data, token) {
 export function mergeIncoming(data, sync, incoming, myUserId) {
   const next = { ...data };
 
-  for (const kind of SYNC_KINDS) {
+  for (const kind of ALL_KINDS) {
     const rows = incoming[kind] || [];
     if (!rows.length) continue;
     const list = [...(next[kind] || [])];
