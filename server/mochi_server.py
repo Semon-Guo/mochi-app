@@ -38,7 +38,10 @@ ORIGINS = [o.strip() for o in (os.environ.get("MOCHI_ORIGINS") or
            "https://semon-guo.github.io,http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
 
 VAPID_PATH = Path(os.environ.get("MOCHI_VAPID") or Path.home() / "mochi" / "vapid.json")
-VAPID_SUBJECT = os.environ.get("MOCHI_VAPID_SUBJECT", "mailto:admin@mochi.invalid")
+# Apple 的推送服务会校验 sub 的有效性：填 mailto:xxx@mochi.invalid 会被直接
+# 403 BadJwtToken 拒掉（.invalid 是 RFC 2606 保留的永不解析域名）。必须是
+# 真实可达的 https URL 或真实邮箱——这里默认用前端地址，不涉及个人信息。
+VAPID_SUBJECT = os.environ.get("MOCHI_VAPID_SUBJECT", "https://semon-guo.github.io/mochi-app/")
 
 # 推送是可选能力：cryptography 缺失时整个服务照常跑，只是不发通知——
 # 同步是主线功能，不该被它拖垮。
@@ -634,7 +637,25 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         if n > MAX_PHOTO + 1024 * 1024:
             raise HttpError(413, "请求体过大")
+        self._body_read = True
         return self.rfile.read(n) if n else b""
+
+    def _drain(self):
+        """把没读的请求体丢掉。
+
+        HTTP/1.1 连接是复用的：有的处理分支（比如 /api/push/test）根本不看
+        请求体，也有的在读之前就抛错了，剩下的字节会被当成下一个请求的
+        起始行——日志里那条 `"{}POST /api/push/test" 501` 就是这么来的。
+        """
+        if getattr(self, "_body_read", False):
+            return
+        self._body_read = True
+        n = int(self.headers.get("Content-Length") or 0)
+        while n > 0:
+            chunk = self.rfile.read(min(n, 65536))
+            if not chunk:
+                break
+            n -= len(chunk)
 
     def _json_body(self):
         raw = self._body()
@@ -665,6 +686,7 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("POST")
 
     def _dispatch(self, method):
+        self._body_read = False
         try:
             path = urlparse(self.path).path
             query = parse_qs(urlparse(self.path).query)
@@ -764,6 +786,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"[ERROR] {method} {self.path}: {type(e).__name__}: {e}", flush=True)
             self._json({"error": "服务器内部错误"}, 500)
+        finally:
+            self._drain()
 
 
 CERT = os.environ.get("MOCHI_CERT", "")

@@ -288,6 +288,24 @@ def main():
         s, r = call("POST", "/api/push/unsubscribe", {"endpoint": FAKE_SUB["endpoint"]}, token=stu1)
         chk("可以退订", s == 200 and r.get("ok"))
 
+        # Apple 会校验 VAPID 的 sub：mailto:...@*.invalid 会被 403 BadJwtToken 拒掉
+        import subprocess as _sp
+        _out = _sp.run([sys.executable, "-c",
+                        "import sys; sys.path.insert(0,'.'); "
+                        "import mochi_server as m; print(m.VAPID_SUBJECT)"],
+                       capture_output=True, text=True, cwd=str(HERE), env=env).stdout.strip()
+        chk("VAPID sub 不是会被推送服务拒绝的 .invalid 域名",
+            ".invalid" not in _out and (_out.startswith("https://") or _out.startswith("mailto:")), _out)
+
+        print("\n── keep-alive 连接不会被未读的请求体污染 ──")
+        # 有的处理分支不看请求体，残留字节会被当成下一个请求的起始行（曾导致 501）
+        for _ in range(3):
+            call("POST", "/api/push/test", {"noise": "x" * 200}, token=stu1)
+        s, r = call("GET", "/api/health")
+        chk("连发几个带 body 的请求后接口仍正常", s == 200 and r.get("ok") is True, f"HTTP {s}")
+        s, r = call("GET", "/api/me", token=stu1)
+        chk("认证接口也未受影响", s == 200, f"HTTP {s}")
+
         print("\n── 导师视角 ──")
         s, r = call("GET", "/api/users", token=advisor)
         chk("导师能列出成员", s == 200 and len(r["users"]) == 3, f"n={len(r.get('users', []))}")
