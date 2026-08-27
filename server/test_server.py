@@ -240,6 +240,54 @@ def main():
                     token=advisor)
         chk("导师不能改学生的待办", r["applied"] == 0 and len(r["rejected"]) == 1)
 
+        print("\n── 推送订阅与提醒 ──")
+        s, r = call("GET", "/api/health")
+        chk("健康检查报告推送状态", "push" in r, f"push={r.get('push')}")
+        push_on = r.get("push")
+
+        s, r = call("GET", "/api/push/key")
+        chk("能取到 VAPID 公钥", s == 200 and (r.get("key") or not push_on),
+            f"enabled={r.get('enabled')}")
+        if push_on:
+            import base64 as _b64
+            chk("公钥是 65 字节未压缩点",
+                len(_b64.urlsafe_b64decode(r["key"] + "=" * (-len(r["key"]) % 4))) == 65)
+
+        FAKE_SUB = {"endpoint": "https://web.push.apple.com/fake-endpoint-aaa",
+                    "keys": {"p256dh": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+                             "auth": "BTBZMqHH6r4Tts7J_aSIgg"}}
+        s, r = call("POST", "/api/push/subscribe", {"subscription": FAKE_SUB})
+        chk("未登录不能订阅", s == 401, f"HTTP {s}")
+
+        s, r = call("POST", "/api/push/subscribe", {"subscription": FAKE_SUB}, token=stu1)
+        chk("登录后可订阅", s == 200 and r.get("ok"), f"HTTP {s}")
+        sub_id = r.get("id")
+        s, r = call("POST", "/api/push/subscribe", {"subscription": FAKE_SUB}, token=stu1)
+        chk("同一 endpoint 重复订阅不会堆积", r.get("id") == sub_id)
+
+        s, r = call("POST", "/api/push/subscribe", {"subscription": {"endpoint": "http://x", "keys": {}}}, token=stu1)
+        chk("残缺的订阅被拒", s == 400, f"HTTP {s}")
+
+        s, r = call("POST", "/api/reminders", {"reminders": [
+            {"id": "td1", "dueAt": now + 3600_000, "title": "⏰ 跑柱子", "body": "主线 · 预期 60m"},
+            {"id": "td9", "dueAt": now + 7200_000, "title": "⏰ 写综述"},
+        ]}, token=stu1)
+        chk("上传提醒", s == 200 and r.get("count") == 2, f"count={r.get('count')}")
+
+        s, r = call("POST", "/api/reminders", {"reminders": [
+            {"id": "td1", "dueAt": now + 3600_000, "title": "⏰ 跑柱子"},
+        ]}, token=stu1)
+        chk("全量替换：删掉的提醒不再保留", s == 200 and r.get("count") == 1, f"count={r.get('count')}")
+
+        s, r = call("POST", "/api/reminders", {"reminders": [{"id": "bad"}]}, token=stu1)
+        chk("缺少 dueAt 的条目被跳过", s == 200 and r.get("count") == 0, f"count={r.get('count')}")
+
+        s, r = call("POST", "/api/push/test", {}, token=stu2)
+        chk("没订阅的用户测试推送会明确报错", s in (400, 503), f"HTTP {s}")
+
+        s, r = call("POST", "/api/push/unsubscribe", {"endpoint": FAKE_SUB["endpoint"]}, token=stu1)
+        chk("可以退订", s == 200 and r.get("ok"))
+
         print("\n── 导师视角 ──")
         s, r = call("GET", "/api/users", token=advisor)
         chk("导师能列出成员", s == 200 and len(r["users"]) == 3, f"n={len(r.get('users', []))}")

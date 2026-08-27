@@ -37,6 +37,19 @@ INVITE_CODE = os.environ.get("MOCHI_INVITE_CODE", "")
 ORIGINS = [o.strip() for o in (os.environ.get("MOCHI_ORIGINS") or
            "https://semon-guo.github.io,http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
 
+VAPID_PATH = Path(os.environ.get("MOCHI_VAPID") or Path.home() / "mochi" / "vapid.json")
+VAPID_SUBJECT = os.environ.get("MOCHI_VAPID_SUBJECT", "mailto:admin@mochi.invalid")
+
+# 推送是可选能力：cryptography 缺失时整个服务照常跑，只是不发通知——
+# 同步是主线功能，不该被它拖垮。
+try:
+    import webpush
+    PUSH_OK = True
+except Exception as _e:
+    webpush = None
+    PUSH_OK = False
+    _PUSH_ERR = str(_e)
+
 MAX_PHOTO = 8 * 1024 * 1024
 SESSION_TTL = 90 * 24 * 3600
 SYNC_TABLES = ("projects", "records", "photos", "todos")
@@ -74,6 +87,19 @@ CREATE TABLE IF NOT EXISTS records (
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_records_seq ON records(seq);
 CREATE INDEX IF NOT EXISTS idx_records_owner ON records(owner_id, seq);
+
+CREATE TABLE IF NOT EXISTS push_subs (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+  created_at INTEGER NOT NULL, last_ok INTEGER, fail_count INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subs(user_id);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  due_at INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+  fired_at INTEGER, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_rem_due ON reminders(fired_at, due_at);
+CREATE INDEX IF NOT EXISTS idx_rem_owner ON reminders(owner_id);
 
 CREATE TABLE IF NOT EXISTS todos (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -125,6 +151,29 @@ def current_seq(c):
 
 def new_id():
     return secrets.token_hex(10)
+
+
+def load_vapid():
+    """VAPID 密钥要长期固定：前端的订阅绑定了公钥，换了就得所有人重新订阅。"""
+    if not PUSH_OK:
+        return None
+    try:
+        if VAPID_PATH.exists():
+            v = json.loads(VAPID_PATH.read_text())
+        else:
+            v = webpush.generate_vapid_keys()
+            VAPID_PATH.parent.mkdir(parents=True, exist_ok=True)
+            VAPID_PATH.write_text(json.dumps(v, indent=2))
+            VAPID_PATH.chmod(0o600)
+            print(f"已生成 VAPID 密钥: {VAPID_PATH}", flush=True)
+        v["subject"] = VAPID_SUBJECT
+        return v
+    except Exception as e:
+        print(f"[push] VAPID 密钥加载失败: {e}", flush=True)
+        return None
+
+
+VAPID = None   # 在 main() 里初始化
 
 
 # ─────────────────────────── 认证 ───────────────────────────
@@ -406,6 +455,136 @@ def claim_photo(user, pid, mime, size):
     return row
 
 
+# ─────────────────────────── 推送 ───────────────────────────
+
+def save_subscription(user, sub):
+    """一台设备一条订阅。endpoint 唯一，重复订阅就更新而不是堆积。"""
+    ep = str((sub or {}).get("endpoint") or "")
+    keys = (sub or {}).get("keys") or {}
+    # 真实推送端点一律是 https；回环地址放行是为了让端到端测试能跑起来，
+    # 跟浏览器判定 secure context 的规则一致。
+    ok_scheme = ep.startswith("https://") or ep.startswith("http://127.0.0.1:") \
+        or ep.startswith("http://localhost:")
+    if not ok_scheme or not keys.get("p256dh") or not keys.get("auth"):
+        raise HttpError(400, "订阅信息不完整")
+    sid = hashlib.sha256(ep.encode()).hexdigest()[:32]
+    now = int(time.time() * 1000)
+    c = conn()
+    with _write_lock:
+        c.execute("INSERT INTO push_subs (id, user_id, endpoint, p256dh, auth, created_at, last_ok, fail_count)"
+                  " VALUES (?,?,?,?,?,?,NULL,0)"
+                  " ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id,"
+                  " p256dh=excluded.p256dh, auth=excluded.auth, fail_count=0",
+                  (sid, user["id"], ep, keys["p256dh"], keys["auth"], now))
+        c.commit()
+    return {"ok": True, "id": sid}
+
+
+def drop_subscription(user, endpoint):
+    c = conn()
+    sid = hashlib.sha256(str(endpoint or "").encode()).hexdigest()[:32]
+    with _write_lock:
+        c.execute("DELETE FROM push_subs WHERE id = ? AND user_id = ?", (sid, user["id"]))
+        c.commit()
+    return {"ok": True}
+
+
+def put_reminders(user, items):
+    """全量替换该用户的待发提醒。
+
+    客户端每次同步都把「当前所有未来的提醒」整份传上来，服务端照单替换——
+    比增量维护简单得多，也不会因为漏传一条删除就在半夜误报。
+    """
+    if not isinstance(items, list):
+        raise HttpError(400, "reminders 必须是数组")
+    now = int(time.time() * 1000)
+    rows = []
+    for it in items[:500]:
+        try:
+            due = int(it.get("dueAt") or 0)
+        except (TypeError, ValueError):
+            continue
+        rid = str(it.get("id") or "")
+        if not rid or not due:
+            continue
+        rows.append((rid, user["id"], due, str(it.get("title") or "提醒")[:200],
+                     str(it.get("body") or "")[:300], now))
+    c = conn()
+    with _write_lock:
+        old = {r["id"]: r["fired_at"] for r in
+               c.execute("SELECT id, fired_at FROM reminders WHERE owner_id = ?", (user["id"],))}
+        c.execute("DELETE FROM reminders WHERE owner_id = ?", (user["id"],))
+        for r in rows:
+            # 时间没变的旧提醒保留已发标记，避免客户端每次同步都让它重发一遍
+            fired = old.get(r[0]) if r[0] in old else None
+            c.execute("INSERT INTO reminders (id, owner_id, due_at, title, body, fired_at, updated_at)"
+                      " VALUES (?,?,?,?,?,?,?)", (r[0], r[1], r[2], r[3], r[4], fired, r[5]))
+        c.commit()
+    return {"ok": True, "count": len(rows)}
+
+
+def push_due_reminders():
+    """扫描到期提醒并推送。由后台线程每 30 秒调一次。"""
+    if not (PUSH_OK and VAPID):
+        return 0
+    now = int(time.time() * 1000)
+    c = conn()
+    # 只补发最近 1 小时内到期的：机器关过一整晚的话，早上不该被十几条隔夜提醒砸醒
+    due = c.execute(
+        "SELECT * FROM reminders WHERE fired_at IS NULL AND due_at <= ? AND due_at > ?",
+        (now, now - 3600 * 1000)).fetchall()
+    if not due:
+        # 顺手把过期太久、永远不会发的清掉，别让表无限长
+        with _write_lock:
+            c.execute("DELETE FROM reminders WHERE fired_at IS NULL AND due_at <= ?",
+                      (now - 7 * 24 * 3600 * 1000,))
+            c.commit()
+        return 0
+
+    sent = 0
+    for rem in due:
+        subs = c.execute("SELECT * FROM push_subs WHERE user_id = ?", (rem["owner_id"],)).fetchall()
+        payload = {"title": rem["title"], "body": rem["body"], "tag": f"mochi-{rem['id']}",
+                   "todoId": rem["id"]}
+        for sub in subs:
+            try:
+                webpush.send({"endpoint": sub["endpoint"],
+                              "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
+                             payload, VAPID)
+                with _write_lock:
+                    c.execute("UPDATE push_subs SET last_ok = ?, fail_count = 0 WHERE id = ?",
+                              (now, sub["id"]))
+                    c.commit()
+                sent += 1
+            except webpush.PushGone:
+                # 设备卸载了 app 或清了数据，订阅永久失效，留着只会每次都失败
+                with _write_lock:
+                    c.execute("DELETE FROM push_subs WHERE id = ?", (sub["id"],))
+                    c.commit()
+                print(f"[push] 订阅已失效，已移除 {sub['id'][:8]}", flush=True)
+            except Exception as e:
+                with _write_lock:
+                    c.execute("UPDATE push_subs SET fail_count = fail_count + 1 WHERE id = ?", (sub["id"],))
+                    c.execute("DELETE FROM push_subs WHERE fail_count >= 10")
+                    c.commit()
+                print(f"[push] 发送失败 {sub['id'][:8]}: {e}", flush=True)
+        with _write_lock:
+            c.execute("UPDATE reminders SET fired_at = ? WHERE id = ?", (now, rem["id"]))
+            c.commit()
+    return sent
+
+
+def push_loop():
+    while True:
+        try:
+            n = push_due_reminders()
+            if n:
+                print(f"[push] 已发送 {n} 条通知", flush=True)
+        except Exception as e:
+            print(f"[push] 扫描出错: {e}", flush=True)
+        time.sleep(30)
+
+
 def readable_photo(user, pid):
     row = conn().execute("SELECT * FROM photos WHERE id = ?", (pid,)).fetchone()
     if not row or row["deleted_at"]:
@@ -491,7 +670,8 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
 
             if path == "/api/health":
-                return self._json({"ok": True, "now": int(time.time() * 1000)})
+                return self._json({"ok": True, "now": int(time.time() * 1000),
+                                   "push": bool(PUSH_OK and VAPID)})
             if method == "POST" and path == "/api/register":
                 return self._json(register(self._json_body(), self.client_address[0]))
             if method == "POST" and path == "/api/login":
@@ -514,6 +694,39 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT id, username, display_name, role FROM users ORDER BY created_at").fetchall()
                 return self._json({"users": [{"id": r["id"], "username": r["username"],
                                               "displayName": r["display_name"], "role": r["role"]} for r in rows]})
+            if method == "GET" and path == "/api/push/key":
+                # 前端订阅时要用它做 applicationServerKey
+                return self._json({"key": VAPID["public"] if (PUSH_OK and VAPID) else None,
+                                   "enabled": bool(PUSH_OK and VAPID)})
+            if method == "POST" and path == "/api/push/subscribe":
+                return self._json(save_subscription(self._need_user(), self._json_body().get("subscription")))
+            if method == "POST" and path == "/api/push/unsubscribe":
+                return self._json(drop_subscription(self._need_user(), self._json_body().get("endpoint")))
+            if method == "POST" and path == "/api/reminders":
+                return self._json(put_reminders(self._need_user(), self._json_body().get("reminders")))
+            if method == "POST" and path == "/api/push/test":
+                # 用户点「发送测试通知」时走这条，立刻推一条，不用等到点
+                u = self._need_user()
+                if not (PUSH_OK and VAPID):
+                    raise HttpError(503, "服务器未启用推送")
+                c = conn()
+                subs = c.execute("SELECT * FROM push_subs WHERE user_id = ?", (u["id"],)).fetchall()
+                if not subs:
+                    raise HttpError(400, "这台设备还没有订阅推送")
+                ok, errs = 0, []
+                for sub in subs:
+                    try:
+                        webpush.send({"endpoint": sub["endpoint"],
+                                      "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
+                                     {"title": "✅ 推送已就绪", "body": "到点时就会像这样提醒你",
+                                      "tag": "mochi-test"}, VAPID)
+                        ok += 1
+                    except Exception as e:
+                        errs.append(str(e)[:120])
+                if not ok:
+                    raise HttpError(502, "推送失败：" + "；".join(errs[:2]))
+                return self._json({"ok": True, "sent": ok})
+
             if method == "GET" and path == "/api/sync":
                 since = query.get("since", ["0"])[0]
                 try:
@@ -689,6 +902,14 @@ def main():
     init_db()
     if not INVITE_CODE:
         print("⚠️  未设置 MOCHI_INVITE_CODE，任何人都能注册")
+
+    global VAPID
+    VAPID = load_vapid()
+    if PUSH_OK and VAPID:
+        threading.Thread(target=push_loop, daemon=True).start()
+        print(f"推送已启用，VAPID 公钥: {VAPID['public'][:24]}…")
+    else:
+        print(f"⚠️  推送未启用（{'缺少 cryptography' if not PUSH_OK else 'VAPID 密钥不可用'}），同步功能不受影响")
 
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     srv.daemon_threads = True

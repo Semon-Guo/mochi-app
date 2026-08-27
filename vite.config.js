@@ -46,6 +46,9 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // 把推送处理器注入生成的 sw.js。用 importScripts 而不是切到 injectManifest，
+        // 是为了不动现成的离线缓存策略。
+        importScripts: ['push-sw.js'],
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {

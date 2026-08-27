@@ -285,3 +285,98 @@ export async function syncPhotos(data, token, sync) {
   sync.photos = state;
   return { uploaded, downloaded, changed: uploaded > 0 || downloaded > 0 };
 }
+
+/* ── 推送通知 ──
+ * 页面里的定时器在 app 退到后台后就被冻结了，所以「到点提醒」只能靠服务器
+ * 推过来唤醒 Service Worker。iOS 上还有两个前提：必须是「添加到主屏幕」的
+ * PWA，且权限必须在用户手势里申请。
+ */
+
+const b64ToBytes = (b64) => {
+  const s = (b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(s);
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+};
+
+export const pushSupported = () =>
+  typeof window !== "undefined" && "serviceWorker" in navigator &&
+  "PushManager" in window && "Notification" in window;
+
+/** iOS 只对已加到主屏幕的 PWA 开放推送，在 Safari 标签页里连 API 都没有 */
+export const isStandalone = () => {
+  try {
+    return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  } catch { return false; }
+};
+
+export async function pushStatus() {
+  if (!pushSupported()) return { supported: false, subscribed: false, permission: "unsupported" };
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    return { supported: true, subscribed: !!sub, permission: Notification.permission,
+             endpoint: sub?.endpoint || null };
+  } catch {
+    return { supported: true, subscribed: false, permission: Notification.permission };
+  }
+}
+
+/** 必须在用户手势（点击）里调用，否则 Safari 不会弹权限框 */
+export async function enablePush(token) {
+  if (!pushSupported()) throw new Error("此浏览器不支持推送通知");
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") {
+    throw new Error(perm === "denied"
+      ? "通知权限被拒绝了。iPhone 上要到 设置 → 通知 → Mochi 里重新打开"
+      : "没有获得通知权限");
+  }
+  const { key, enabled } = await api("/api/push/key", { token });
+  if (!enabled || !key) throw new Error("服务器未启用推送");
+
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  // 服务器换过 VAPID 密钥的话，旧订阅是废的，得退掉重订
+  if (sub) {
+    const old = new Uint8Array(sub.options?.applicationServerKey || []);
+    const now = b64ToBytes(key);
+    if (old.length !== now.length || !old.every((v, i) => v === now[i])) {
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
+  }
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+  }
+  await api("/api/push/subscribe", { method: "POST", token, body: { subscription: sub.toJSON() } });
+  return sub;
+}
+
+export async function disablePush(token) {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) return;
+  await api("/api/push/unsubscribe", { method: "POST", token, body: { endpoint: sub.endpoint } })
+    .catch(() => {});
+  await sub.unsubscribe().catch(() => {});
+}
+
+export const testPush = (token) => api("/api/push/test", { method: "POST", token, body: {} });
+
+/**
+ * 把「未来还会响的提醒」整份上报，服务端照单替换。
+ * 只有开了推送才上报——没开的话服务器不需要知道你要做什么、什么时候做。
+ */
+export async function syncReminders(data, token) {
+  const now = Date.now();
+  const list = (data?.todos || [])
+    .filter((t) => !t.done && t.remind && !t.remind.fired && t.remind.at > now)
+    .slice(0, 300)
+    .map((t) => ({
+      id: t.id,
+      dueAt: t.remind.at,
+      title: `⏰ ${t.text}`.slice(0, 120),
+      body: [t.importance === "main" ? "主线" : t.importance === "side" ? "支线" : "休闲",
+             t.duration ? `预期 ${t.duration} 分钟` : ""].filter(Boolean).join(" · "),
+    }));
+  return api("/api/reminders", { method: "POST", token, body: { reminders: list } });
+}

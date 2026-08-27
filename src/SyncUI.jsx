@@ -110,7 +110,38 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   const [err, setErr] = useState("");
   const [tick, setTick] = useState(0);
   const [syncTodos, setSyncTodos] = useState(() => Sync.getSyncTodos());
+  const [push, setPush] = useState({ supported: false, subscribed: false, permission: "default" });
+  const [pushBusy, setPushBusy] = useState("");
+  const [pushMsg, setPushMsg] = useState("");
   const running = useRef(false);
+
+  useEffect(() => { Sync.pushStatus().then(setPush).catch(() => {}); }, [auth?.token]);
+
+  const togglePush = async (on) => {
+    setPushMsg(""); setPushBusy(on ? "on" : "off");
+    try {
+      if (on) {
+        await Sync.enablePush(auth.token);
+        await Sync.syncReminders(data, auth.token);   // 立刻把已有的提醒送上去
+        setPushMsg("已开启，到点会推送到这台设备");
+      } else {
+        await Sync.disablePush(auth.token);
+        setPushMsg("已关闭");
+      }
+      setPush(await Sync.pushStatus());
+    } catch (e) {
+      setPushMsg(e.message);
+    } finally { setPushBusy(""); }
+  };
+
+  const doTestPush = async () => {
+    setPushMsg(""); setPushBusy("test");
+    try {
+      await Sync.testPush(auth.token);
+      setPushMsg("已发出，通知应该马上就到");
+    } catch (e) { setPushMsg(e.message); }
+    finally { setPushBusy(""); }
+  };
 
   const pending = Sync.pendingCount(data);
   const lastAt = data?._sync?.lastSyncAt || 0;
@@ -137,6 +168,11 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
       };
       const ph = await Sync.syncPhotos(withIncoming, auth.token, sync);
       if (ph.changed) applySync((prev) => ({ ...prev, _sync: { ...prev._sync, photos: sync.photos } }));
+
+      // 开了推送才上报提醒——没开的话服务器不需要知道你要做什么、什么时候做
+      if ((await Sync.pushStatus()).subscribed) {
+        await Sync.syncReminders(data, auth.token).catch(() => {});
+      }
     } catch (e) {
       if (/HTTP 401/.test(e.message)) { Sync.setAuth(null); setAuthState(null); setErr("登录已过期，请重新登录"); }
       else if (!quiet) setErr(/Failed to fetch|NetworkError|Load failed/i.test(e.message)
@@ -213,6 +249,60 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                   查看全组记录
                 </button>
               )}
+              {/* 推送：app 关着也能收到提醒，代价是任务标题要上传 */}
+              <div style={{ padding: "10px 11px", borderRadius: 12, border: `1px solid ${C.line}`,
+                background: "#FCFAF6", marginTop: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: C.ink, flex: 1 }}>
+                    到点推送通知
+                  </span>
+                  {push.supported && push.permission !== "denied" && (
+                    <button onClick={() => togglePush(!push.subscribed)} disabled={!!pushBusy}
+                      style={{ ...btn(push.subscribed ? "#FFF" : C.ink, push.subscribed ? C.dim : "#FFF",
+                        { padding: "6px 12px", fontSize: 12, borderRadius: 10,
+                          border: push.subscribed ? `1px solid ${C.edge}` : "none",
+                          opacity: pushBusy ? .5 : 1 }) }}>
+                      {pushBusy === "on" ? "开启中…" : pushBusy === "off" ? "关闭中…"
+                        : push.subscribed ? "关闭" : "开启"}
+                    </button>
+                  )}
+                </div>
+
+                {!Sync.isStandalone() && push.supported && (
+                  <div style={{ fontSize: 11.5, color: "#C08838", marginTop: 6, lineHeight: 1.6 }}>
+                    iPhone 上需要先把 Mochi「添加到主屏幕」，在 Safari 标签页里收不到通知。
+                  </div>
+                )}
+                {!push.supported && (
+                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6, lineHeight: 1.6 }}>
+                    此浏览器不支持推送。iPhone 需 iOS 16.4 以上，且已添加到主屏幕。
+                  </div>
+                )}
+                {push.permission === "denied" && (
+                  <div style={{ fontSize: 11.5, color: C.red, marginTop: 6, lineHeight: 1.6 }}>
+                    通知权限被拒绝了。iPhone 上到「设置 → 通知 → Mochi」重新打开。
+                  </div>
+                )}
+
+                <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6, lineHeight: 1.6 }}>
+                  {push.subscribed
+                    ? "app 关着也会到点提醒。任务标题会存在服务器上用于推送，通知内容对推送服务是加密的。"
+                    : "不开的话，提醒只在打开 app 时补弹——退到后台后系统不会推送。"}
+                </div>
+
+                {push.subscribed && (
+                  <button onClick={doTestPush} disabled={!!pushBusy}
+                    style={{ ...btn("#FFF", C.ink, { width: "100%", marginTop: 8, padding: "8px 0",
+                      fontSize: 12, borderRadius: 10, border: `1px solid ${C.edge}`, opacity: pushBusy ? .5 : 1 }) }}>
+                    {pushBusy === "test" ? "发送中…" : "发送测试通知"}
+                  </button>
+                )}
+                {pushMsg && (
+                  <div style={{ fontSize: 11.5, marginTop: 7, lineHeight: 1.6,
+                    color: /失败|拒绝|不支持|未启用|没有/.test(pushMsg) ? C.red : C.green }}>{pushMsg}</div>
+                )}
+              </div>
+
               <button onClick={() => { Sync.setAuth(null); setAuthState(null); setOpen(false); }}
                 style={{ ...btn("#FFF", C.red, { width: "100%", border: `2px solid ${C.edge}`, marginTop: 8 }) }}>
                 退出登录
