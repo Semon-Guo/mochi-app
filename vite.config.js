@@ -8,9 +8,15 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { execSync } from "node:child_process";
 let BUILD = "dev";
 try {
-  const h = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-  const d = execSync('git log -1 --format=%cd --date=format:%m-%d\\ %H:%M', { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-  BUILD = `${d} ${h}`;
+  const q = { stdio: ["ignore", "pipe", "ignore"] };
+  const h = execSync("git rev-parse --short HEAD", q).toString().trim();
+  // 用提交的 UNIX 时间戳再自己按 UTC 格式化：%cd 会跟着本地时区变，
+  // CI 在 UTC、我在 UTC+8，同一个 commit 会构建出不同产物，文件名对不上，
+  // 那这个版本标识就失去了「用来核对部署」的意义。
+  const ts = parseInt(execSync("git log -1 --format=%ct", q).toString().trim(), 10) * 1000;
+  const d = new Date(ts);
+  const p2 = (n) => String(n).padStart(2, "0");
+  BUILD = `${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}Z ${h}`;
 } catch {}
 
 export default defineConfig({
