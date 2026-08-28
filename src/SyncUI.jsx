@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import * as Sync from "./sync.js";
 
 const C = {
@@ -179,6 +179,23 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
         ? "连不上服务器（不在实验室网络，或根证书未信任）" : e.message);
     } finally { running.current = false; setBusy(false); }
   };
+
+  // 提醒的指纹：只要有人新增/改动/取消了提醒，这串就会变
+  const remindKey = useMemo(() => (data?.todos || [])
+    .filter((t) => !t.done && t.remind && !t.remind.fired)
+    .map((t) => `${t.id}@${t.remind.at}`)
+    .sort().join(","), [data?.todos]);
+
+  // 设完提醒就立刻上报，不能等下一个同步周期。
+  // 用户设个「2 分钟后」的提醒然后马上划掉 app，等 2 分钟一轮的同步根本来不及——
+  // 服务器压根不知道有这条提醒，自然也就不会推。
+  useEffect(() => {
+    if (!auth || !push.subscribed) return;
+    const t = setTimeout(() => {
+      Sync.syncReminders(data, auth.token).catch(() => {});
+    }, 600);   // 稍等一下，避免连点几下时间选择器时每次都发请求
+    return () => clearTimeout(t);
+  }, [remindKey, auth?.token, push.subscribed]);
 
   // 打开 app 时同步一次，之后每 2 分钟一次；回到前台也补一次。
   // syncTodos 变化时也重跑：刚打开开关就该把待办推上去，不用干等两分钟。
