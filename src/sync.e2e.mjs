@@ -231,6 +231,36 @@ try {
   const still = (checkA.data.records || []).find((r) => r.id === "dr1");
   chk("A 的记录仍属于 A，内容完好", still?.text === "A 的实验记录", still?.text || "丢失");
 
+  console.log("\n── 清空本机后必须能全量拉回 ──");
+  // 复现用户遇到的问题：清空后如果拿旧 data（旧游标）去同步，会一条都拉不回来
+  asDevice("RESET"); Sync.setServer(BASE);
+  let dR = base();
+  res = await syncDevice("RESET", dR, a.token);
+  dR = res.data;
+  const beforeReset = (dR.records || []).length;
+  chk("清空前有数据", beforeReset > 0, `records=${beforeReset}`);
+  const staleCursor = dR._sync?.cursor || 0;
+
+  const cleared = await Sync.resetLocalData();
+  chk("清空后本地为空", (cleared.records || []).length === 0);
+  chk("清空后游标归零", (cleared._sync?.cursor || 0) === 0);
+
+  // 正确做法：用清空后的那份去同步
+  res = await syncDevice("RESET", cleared, a.token);
+  chk("用清空后的数据同步能全量拉回", (res.data.records || []).length === beforeReset,
+      `拉回 ${(res.data.records || []).length} / 原有 ${beforeReset}`);
+
+  // 错误做法（修复前的行为）：拿着旧游标去要增量，什么都拉不到
+  const wrong = { ...cleared, _sync: { ...cleared._sync, cursor: staleCursor } };
+  res = await syncDevice("RESET", wrong, a.token);
+  // 加了自愈之后，即使带着旧游标也能恢复：本地空 + 游标非 0 会被判定为
+  // 状态错乱，自动从头拉一次
+  const wrong2 = { ...cleared, _sync: { ...cleared._sync, cursor: staleCursor } };
+  res = await syncDevice("RESET", wrong2, a.token);
+  chk("本地空但游标非 0 时会自愈并全量拉回",
+      (res.data.records || []).length === beforeReset,
+      `拉回 ${(res.data.records || []).length} / 原有 ${beforeReset}`);
+
   console.log("\n── 旧版本升级：数据来路不明就得清 ──");
   // 模拟旧版本遗留：有同步过的数据，但没有归属记录
   asDevice("OLD"); Sync.setServer(BASE);

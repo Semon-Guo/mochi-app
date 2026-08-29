@@ -115,6 +115,13 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   const [push, setPush] = useState({ supported: false, subscribed: false, permission: "default" });
   const [pushBusy, setPushBusy] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
+
+  // 同步必须读「此刻」的 data，不能读闭包捕获的那份。
+  // 自动同步的 effect 只依赖 [token, syncTodos]，它里面的 doSync 是 effect
+  // 创建那一刻的闭包——若直接用 props.data，定时同步和回前台补同步就会一直
+  // 拿着过期数据跑：本地新增的记录推不上去，游标也会被回写成旧值。
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
   const [pushMsg, setPushMsg] = useState("");
   const running = useRef(false);
 
@@ -154,8 +161,8 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   const handleAuthDone = async (res) => {
     try {
       const prev = Sync.getDataOwner();
-      const fresh = await Sync.switchAccount(data, prev, res.user.id);
-      if (fresh !== data) applySync(() => fresh);
+      const fresh = await Sync.switchAccount(dataRef.current, prev, res.user.id);
+      if (fresh !== dataRef.current) { applySync(() => fresh); dataRef.current = fresh; }
     } catch (e) {
       setErr("切换账号时清理本机数据失败：" + e.message);
     }
@@ -166,21 +173,24 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   // 让「x 分钟前」自己走动
   useEffect(() => { const iv = setInterval(() => setTick((n) => n + 1), 30000); return () => clearInterval(iv); }, []);
 
-  const doSync = async (quiet = false) => {
+  // override：清空本机数据后要立刻用「清空后的那份」去同步，
+  // 否则又会带着旧游标去要增量，结果一条都拉不回来。
+  const doSync = async (quiet = false, override = null) => {
     if (!auth || running.current) return;
     running.current = true;
     if (!quiet) setBusy(true);
     setErr("");
+    const base = override || dataRef.current;
     try {
-      const { sync, incoming } = await Sync.syncOnce(data, auth.token);
+      const { sync, incoming } = await Sync.syncOnce(base, auth.token);
       // 用 prev 而不是发起时的 data —— 同步是异步的，这期间用户可能又改了东西
       applySync((prev) => Sync.mergeIncoming(prev, sync, incoming));
 
       // 照片走二进制端点，单独一轮。把刚拉回来的记录也算进引用集合，
       // 这样新记录的照片当轮就能下载，不用等下一次同步。
       const withIncoming = {
-        ...data,
-        records: [...(data.records || []),
+        ...base,
+        records: [...(base.records || []),
                   ...incoming.records.filter((r) => !r.deletedAt).map((r) => ({ ...r.data, id: r.id }))],
       };
       const ph = await Sync.syncPhotos(withIncoming, auth.token, sync);
@@ -188,7 +198,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
 
       // 开了推送才上报提醒——没开的话服务器不需要知道你要做什么、什么时候做
       if ((await Sync.pushStatus()).subscribed) {
-        await Sync.syncReminders(data, auth.token).catch(() => {});
+        await Sync.syncReminders(dataRef.current, auth.token).catch(() => {});
       }
     } catch (e) {
       if (/HTTP 401/.test(e.message)) { Sync.setAuth(null); setAuthState(null); setErr("登录已过期，请重新登录"); }
@@ -345,8 +355,9 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                 try {
                   const fresh = await Sync.resetLocalData();
                   applySync(() => fresh);
+                  dataRef.current = fresh;
                   setErr("");
-                  setTimeout(() => doSync(), 100);
+                  await doSync(false, fresh);   // 用清空后的那份，游标为 0 才能全量拉回
                 } catch (e) { setErr("清除失败：" + e.message); }
               }}
                 style={{ ...btn("#FFF", confirmReset ? C.red : C.dim,

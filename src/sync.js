@@ -202,6 +202,17 @@ export async function syncOnce(data, token) {
   };
 
   const KINDS = syncKinds();
+
+  // 自愈：本地一条同步记录都没有、游标却不为 0，说明状态错乱了
+  // （比如清空本机数据时游标被错误地写了回来）。这种状态下增量拉取
+  // 永远返回空，只能从头再来一次。真删光了记录也不怕——重来一次拉到的
+  // 是墓碑，结果一样，只是多传一趟。
+  const localCount = ALL_KINDS.reduce((n, k) => n + (data?.[k] || []).length, 0);
+  if (localCount === 0 && sync.cursor > 0) {
+    sync.cursor = 0;
+    sync.stamps = {}; sync.tombs = {}; sync.pushed = {};
+  }
+
   // 1) 推本地改动
   const byKind = {};
   for (const k of KINDS) byKind[k] = [];
