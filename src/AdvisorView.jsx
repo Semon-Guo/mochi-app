@@ -172,6 +172,67 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
   );
 }
 
+/* ── 待审批的导师申请（只有管理员看得到） ── */
+function RequestPanel({ token, onChanged }) {
+  const [reqs, setReqs] = useState([]);
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+
+  const load = () => Sync.fetchRequests(token)
+    .then((r) => setReqs(r.requests || []))
+    .catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, [token]);
+
+  const decide = async (u, approve) => {
+    setErr(""); setBusy(u.id + (approve ? "y" : "n"));
+    try {
+      await Sync.decideRequest(token, u.id, approve);
+      await load();
+      onChanged?.();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(""); }
+  };
+
+  if (!reqs.length && !err) return null;
+  return (
+    <div style={{ border: `1px solid ${C.amber}`, borderRadius: 14, background: "#FFFBF0",
+      padding: 14, marginBottom: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: C.amber, letterSpacing: "0.4px",
+        textTransform: "uppercase", marginBottom: 4 }}>
+        待审批的导师申请 · {reqs.length}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.sub, marginBottom: 10, lineHeight: 1.6 }}>
+        这些人用导师码注册。<b>批准前他们只是普通学生</b>，看不到任何别人的记录。
+      </div>
+      {err && <div style={{ color: C.red, fontSize: 12, marginBottom: 8 }}>{err}</div>}
+      {reqs.map((u) => (
+        <div key={u.id} style={{ display: "flex", alignItems: "center", gap: 10,
+          padding: "9px 0", borderTop: `1px solid ${C.hair}` }}>
+          <Avatar user={u} size={32} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>{u.displayName}</div>
+            <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
+              @{u.username} · {fmtAgo(u.requestedAt)}申请
+            </div>
+          </div>
+          <button onClick={() => decide(u, false)} disabled={!!busy}
+            style={{ padding: "6px 12px", borderRadius: 9, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 12, fontWeight: 600, border: `1px solid ${C.line}`, background: "#FFF",
+              color: C.sub, opacity: busy ? .5 : 1 }}>
+            {busy === u.id + "n" ? "…" : "驳回"}
+          </button>
+          <button onClick={() => decide(u, true)} disabled={!!busy}
+            style={{ padding: "6px 12px", borderRadius: 9, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 12, fontWeight: 600, border: "none", background: C.ink, color: "#FFF",
+              opacity: busy ? .5 : 1 }}>
+            {busy === u.id + "y" ? "…" : "批准为导师"}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ── 导师端主界面 ── */
 export function AdvisorView({ data, onClose, onPhoto }) {
   const auth = Sync.getAuth();
@@ -180,6 +241,8 @@ export function AdvisorView({ data, onClose, onPhoto }) {
   const [members, setMembers] = useState([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
+  const [nonce, setNonce] = useState(0);
+  const reload = () => setNonce((n) => n + 1);
 
   useEffect(() => {
     if (!auth) return;
@@ -187,7 +250,7 @@ export function AdvisorView({ data, onClose, onPhoto }) {
       .then((r) => setMembers(r.members || []))
       .catch((e) => setErr(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [nonce]);
 
   const byId = useMemo(() => Object.fromEntries(members.map((m) => [m.id, m])), [members]);
   const records = useMemo(
@@ -293,8 +356,13 @@ export function AdvisorView({ data, onClose, onPhoto }) {
 
   /* ── 总览 ── */
   return (
-    <Shell onClose={onClose} title="课题组进展" subtitle={`${students.length} 名成员 · 只读视图`}>
+    <Shell onClose={onClose} title="课题组进展"
+      subtitle={`${students.length} 名成员 · 只读视图${Sync.isAdmin(auth?.user) ? " · 管理员" : ""}`}>
       {err && <Panel><div style={{ color: C.red, fontSize: 13 }}>{err}</div></Panel>}
+
+      {Sync.isAdmin(auth?.user) && (
+        <RequestPanel token={auth.token} onChanged={reload} />
+      )}
 
       {/* 统计数字来自服务端聚合，记录正文来自本地同步——刚登录时两者会对不上，
           说清楚比让人以为「记录丢了」强 */}

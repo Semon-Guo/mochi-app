@@ -5,13 +5,25 @@
 
 学生读写自己的记录，导师只读全组的（导师也**不能**修改学生的记录，服务端强制）。
 
-导师身份有两条途径：
-- **导师邀请码**（`MOCHI_ADVISOR_CODE`）：用它注册直接得到导师身份
-- **`set_role.py`**：在服务器上手动提升或收回
+### 角色
 
-两个码必须不同——相同的话每个学生注册都会变成导师，所以服务启动时会直接拒绝。
-导师码等于「知道这串字符就能读全组记录」，只私下发给导师本人，泄露了立刻换
-（换码不影响已注册的账号）。用导师码注册会在日志里留痕。
+| 角色 | 能做什么 |
+|---|---|
+| `student` | 只读写自己的记录 |
+| `advisor` | 加上：读全组的实验记录（改不了别人的，服务端强制） |
+| `admin` | 加上：审批导师申请 |
+
+导师身份有两条途径：
+
+- **导师邀请码**（`MOCHI_ADVISOR_CODE`）：用它注册**只是提交一份申请**，
+  账号先按学生对待，管理员批准后才变成导师
+- **`set_role.py`**：在服务器上直接指定，不走审批
+
+这样即使导师码外泄，拿到的人也只能得到一个普通学生账号加一条待审批记录，
+读不到任何别人的数据——门槛仍然落在「管理员点头」上，而不是「知道一串字符」。
+
+两个码必须不同（相同的话每个学生都会变成待审批导师），服务启动时会直接拒绝。
+用导师码注册和每次审批都会在日志里留痕。管理员不能批准自己的申请。
 
 ## 为什么是纯标准库 Python
 
@@ -63,7 +75,12 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | POST | `/api/login` | `{username, password}` → `{token, user}` |
 | POST | `/api/logout` | 吊销当前 token |
 | GET | `/api/me` | 当前用户 |
-| GET | `/api/users` | 成员列表（仅导师） |
+| GET | `/api/users` | 成员列表（导师 / 管理员） |
+| GET | `/api/overview` | 全组统计聚合（导师 / 管理员） |
+| GET | `/api/admin/requests` | 待审批的导师申请（仅管理员） |
+| POST | `/api/admin/decide` | `{userId, approve}` 批准或驳回（仅管理员） |
+| POST | `/api/avatar` | 设置头像（data URL，≤96KB） |
+| POST | `/api/profile` | 改显示名 |
 | GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, seq, more}` |
 | POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[]}` |
 | POST | `/api/photo/<id>` | 上传照片二进制（元数据须先经 `/api/sync` 建好） |

@@ -118,6 +118,13 @@ export const register = (info) =>
 export const fetchMe = (token) => api("/api/me", { token });
 export const fetchUsers = (token) => api("/api/users", { token });
 export const fetchOverview = (token) => api("/api/overview", { token });
+export const fetchRequests = (token) => api("/api/admin/requests", { token });
+export const decideRequest = (token, userId, approve) =>
+  api("/api/admin/decide", { method: "POST", token, body: { userId, approve } });
+
+/** 能读全组记录的角色。admin 是 advisor 的超集。 */
+export const canReadGroup = (user) => ["advisor", "admin"].includes(user?.role);
+export const isAdmin = (user) => user?.role === "admin";
 export const uploadAvatar = (token, avatar) =>
   api("/api/avatar", { method: "POST", token, body: { avatar } });
 export const updateProfile = (token, displayName) =>

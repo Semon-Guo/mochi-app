@@ -64,6 +64,20 @@ SYNC_TABLES = ("projects", "records", "photos", "todos")
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
 ADVISOR_VISIBLE = ("projects", "records", "photos")
+
+# 三种角色。admin 是 advisor 的超集：除了能看全组记录，还能审批导师申请。
+# 用导师码注册只是「申请」，在管理员点头之前一律按学生对待——否则导师码
+# 一旦外泄，拿到的人立刻就能读全组记录。
+ROLES = ("student", "advisor", "admin")
+GROUP_READERS = ("advisor", "admin")
+
+
+def can_read_group(user):
+    return user and user.get("role") in GROUP_READERS
+
+
+def is_admin(user):
+    return user and user.get("role") == "admin"
 PAGE = 500
 
 PHOTO_DIR.mkdir(parents=True, exist_ok=True)
@@ -77,7 +91,8 @@ INSERT OR IGNORE INTO seq_counter (id, n) VALUES (1, 0);
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at INTEGER NOT NULL,
-  avatar TEXT, updated_at INTEGER NOT NULL DEFAULT 0);
+  avatar TEXT, updated_at INTEGER NOT NULL DEFAULT 0,
+  pending_role TEXT, requested_at INTEGER);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -146,7 +161,8 @@ def init_db():
     c.executescript(SCHEMA)
     # 老库补列——不能靠改 CREATE TABLE，那对已存在的表不生效
     have = {r[1] for r in c.execute("PRAGMA table_info(users)")}
-    for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0")):
+    for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+                      ("pending_role", "TEXT"), ("requested_at", "INTEGER")):
         if col not in have:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
     c.commit()
@@ -292,6 +308,9 @@ def public_user(row, with_avatar=True):
     try:
         if with_avatar and row["avatar"]:
             u["avatar"] = row["avatar"]
+        if row["pending_role"]:
+            u["pendingRole"] = row["pending_role"]
+            u["requestedAt"] = row["requested_at"]
     except (IndexError, KeyError):
         pass
     return u
@@ -323,8 +342,11 @@ def register(body, client_ip="?"):
 
     # 用哪个码注册，决定拿到什么身份。两个码都没配时才允许裸注册。
     code = str(body.get("inviteCode") or "")
+    pending = None
     if ADVISOR_CODE and hmac.compare_digest(code, ADVISOR_CODE):
-        role = "advisor"
+        # 关键：导师码换来的是一张「申请单」，不是权限本身。
+        # 管理员点头之前，这个账号和普通学生没有任何区别。
+        role, pending = "student", "advisor"
     elif INVITE_CODE and hmac.compare_digest(code, INVITE_CODE):
         role = "student"
     elif not INVITE_CODE and not ADVISOR_CODE:
@@ -337,12 +359,13 @@ def register(body, client_ip="?"):
         raise HttpError(409, "用户名已被占用")
 
     uid, now = new_id(), int(time.time() * 1000)
-    if role == "advisor":
-        # 导师账号留痕，方便事后核对是不是本人注册的
-        print(f"[auth] 用导师码注册: {username} 来自 {client_ip}", flush=True)
+    if pending:
+        print(f"[auth] 用导师码注册，待审批: {username} 来自 {client_ip}", flush=True)
     with _write_lock:
-        c.execute("INSERT INTO users (id, username, password_hash, display_name, role, created_at)"
-                  " VALUES (?,?,?,?,?,?)", (uid, username, hash_password(password), display, role, now))
+        c.execute("INSERT INTO users (id, username, password_hash, display_name, role, created_at,"
+                  " pending_role, requested_at) VALUES (?,?,?,?,?,?,?,?)",
+                  (uid, username, hash_password(password), display, role, now,
+                   pending, now if pending else None))
         c.commit()
     row = c.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
     return {"token": start_session(c, uid), "user": public_user(row)}
@@ -403,7 +426,7 @@ def pull(user, since):
     c = conn()
     out = {"since": since, "seq": since, "more": False}
     for t in SYNC_TABLES:
-        advisor = user["role"] == "advisor" and t in ADVISOR_VISIBLE
+        advisor = can_read_group(user) and t in ADVISOR_VISIBLE
         if advisor:
             rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?", (since, PAGE)).fetchall()
         else:
@@ -525,16 +548,54 @@ def set_profile(user, body):
     return {"user": public_user(row)}
 
 
+def list_requests(user):
+    """待审批的导师申请。只有管理员看得到。"""
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能审批")
+    rows = conn().execute(
+        "SELECT * FROM users WHERE pending_role IS NOT NULL ORDER BY requested_at").fetchall()
+    return {"requests": [public_user(r) for r in rows]}
+
+
+def decide_request(user, target_id, approve):
+    """批准或驳回一份导师申请。
+
+    驳回不删账号——那个人仍然是正常学生，只是拿不到全组读取权限。
+    """
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能审批")
+    c = conn()
+    row = c.execute("SELECT * FROM users WHERE id = ?", (str(target_id or ""),)).fetchone()
+    if not row:
+        raise HttpError(404, "没有这个用户")
+    if not row["pending_role"]:
+        raise HttpError(409, "该用户没有待审批的申请")
+    if row["id"] == user["id"]:
+        # 自己批自己等于导师码直通，把整套审批架空了
+        raise HttpError(403, "不能审批自己的申请")
+
+    new_role = row["pending_role"] if approve else row["role"]
+    now = int(time.time() * 1000)
+    with _write_lock:
+        c.execute("UPDATE users SET role = ?, pending_role = NULL, requested_at = NULL,"
+                  " updated_at = ? WHERE id = ?", (new_role, now, row["id"]))
+        c.commit()
+    print(f"[auth] {user['username']} {'批准' if approve else '驳回'}了 {row['username']} 的导师申请",
+          flush=True)
+    fresh = c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
+    return {"user": public_user(fresh), "approved": bool(approve)}
+
+
 def group_overview(user):
     """导师端用的一次性概览：成员、每人的项目/记录数、活跃度。
 
     这些聚合放服务端算，前端不用把全组数据拉下来再统计——导师那边只是看，
     没必要把所有人的记录都塞进他的本地库。
     """
-    if user["role"] != "advisor":
+    if not can_read_group(user):
         raise HttpError(403, "只有导师能查看")
     c = conn()
-    users = c.execute("SELECT * FROM users ORDER BY (role = 'advisor') DESC, created_at").fetchall()
+    users = c.execute("SELECT * FROM users ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'advisor' THEN 1 ELSE 2 END, created_at").fetchall()
     out = []
     for u in users:
         recs = c.execute(
@@ -554,7 +615,9 @@ def group_overview(user):
         item = public_user(u)
         item.update(projects=projs, records=len(recs), lastAt=max(ats) if ats else 0)
         out.append(item)
-    return {"members": out, "now": int(time.time() * 1000)}
+    pending = c.execute("SELECT COUNT(*) FROM users WHERE pending_role IS NOT NULL").fetchone()[0]
+    return {"members": out, "now": int(time.time() * 1000),
+            "pendingRequests": pending if is_admin(user) else 0}
 
 
 # ─────────────────────────── 推送 ───────────────────────────
@@ -691,7 +754,7 @@ def readable_photo(user, pid):
     row = conn().execute("SELECT * FROM photos WHERE id = ?", (pid,)).fetchone()
     if not row or row["deleted_at"]:
         return None
-    if row["owner_id"] != user["id"] and user["role"] != "advisor":
+    if row["owner_id"] != user["id"] and not can_read_group(user):
         return None
     return row
 
@@ -809,14 +872,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"user": self._need_user()})
             if method == "GET" and path == "/api/users":
                 u = self._need_user()
-                if u["role"] != "advisor":
+                if not can_read_group(u):
                     raise HttpError(403, "只有导师能查看成员列表")
-                rows = conn().execute("SELECT * FROM users ORDER BY (role = 'advisor') DESC, created_at").fetchall()
+                rows = conn().execute("SELECT * FROM users ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'advisor' THEN 1 ELSE 2 END, created_at").fetchall()
                 return self._json({"users": [public_user(r) for r in rows]})
             if method == "POST" and path == "/api/avatar":
                 return self._json(set_avatar(self._need_user(), self._json_body().get("avatar")))
             if method == "POST" and path == "/api/profile":
                 return self._json(set_profile(self._need_user(), self._json_body()))
+            if method == "GET" and path == "/api/admin/requests":
+                return self._json(list_requests(self._need_user()))
+            if method == "POST" and path == "/api/admin/decide":
+                b = self._json_body()
+                return self._json(decide_request(self._need_user(), b.get("userId"),
+                                                 bool(b.get("approve"))))
+
             if method == "GET" and path == "/api/overview":
                 return self._json(group_overview(self._need_user()))
 

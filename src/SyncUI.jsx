@@ -305,7 +305,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                   </span>
                 </span>
               </label>
-              {auth.user.role === "advisor" && (
+              {Sync.canReadGroup(auth.user) && (
                 <button onClick={() => { setOpen(false); onOpenAdvisor(); }}
                   style={{ ...btn("#FFF", C.ink, { width: "100%", border: `2px solid ${C.edge}`, marginTop: 6 }) }}>
                   查看全组记录
@@ -473,8 +473,12 @@ function ProfileCard({ auth, onUpdate }) {
               </div>
               <div style={{ fontSize: 11.5, color: C.dim, marginTop: 1 }}>
                 @{auth.user.username} ·{" "}
-                {auth.user.role === "advisor"
+                {auth.user.role === "admin"
+                  ? <b style={{ color: C.amber }}>管理员 · 可查看全组记录并审批导师申请</b>
+                  : auth.user.role === "advisor"
                   ? <b style={{ color: C.amber }}>导师 · 可查看全组记录</b>
+                  : auth.user.pendingRole === "advisor"
+                  ? <b style={{ color: C.amber }}>学生 · 导师申请待管理员审批</b>
                   : "学生 · 只同步自己的记录"}
               </div>
             </>
