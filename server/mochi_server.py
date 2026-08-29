@@ -34,6 +34,10 @@ PHOTO_DIR = DATA_DIR / "photos"
 DB_PATH = DATA_DIR / "mochi.db"
 PORT = int(os.environ.get("MOCHI_PORT") or 3000)
 INVITE_CODE = os.environ.get("MOCHI_INVITE_CODE", "")
+# 导师码：用它注册直接拿到导师身份。这等于把「谁能看全组记录」的门槛从
+# 「需要 SSH 到服务器」降到「知道一串字符」，所以它该比学生码更长、
+# 只私下发给导师本人，泄露了就立刻换掉（换码不影响已注册的账号）。
+ADVISOR_CODE = os.environ.get("MOCHI_ADVISOR_CODE", "")
 ORIGINS = [o.strip() for o in (os.environ.get("MOCHI_ORIGINS") or
            "https://semon-guo.github.io,http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
 
@@ -313,18 +317,29 @@ def register(body, client_ip="?"):
         raise HttpError(400, "密码至少 8 位")
 
     c = conn()
-    # 注册一律是学生。导师角色只能在服务器上用 set_role.py 授予——否则谁先抢注
-    # 谁就拿到了看全组记录的权限。
     wait = rate_blocked([f"reg:{client_ip}"])
     if wait:
         raise HttpError(429, f"尝试次数过多，请 {wait // 60 + 1} 分钟后再试")
-    if INVITE_CODE and body.get("inviteCode") != INVITE_CODE:
+
+    # 用哪个码注册，决定拿到什么身份。两个码都没配时才允许裸注册。
+    code = str(body.get("inviteCode") or "")
+    if ADVISOR_CODE and hmac.compare_digest(code, ADVISOR_CODE):
+        role = "advisor"
+    elif INVITE_CODE and hmac.compare_digest(code, INVITE_CODE):
+        role = "student"
+    elif not INVITE_CODE and not ADVISOR_CODE:
+        role = "student"
+    else:
         note_fail([f"reg:{client_ip}"])          # 邀请码也不能随便试
         raise HttpError(403, "邀请码不正确")
+
     if c.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         raise HttpError(409, "用户名已被占用")
 
-    uid, role, now = new_id(), "student", int(time.time() * 1000)
+    uid, now = new_id(), int(time.time() * 1000)
+    if role == "advisor":
+        # 导师账号留痕，方便事后核对是不是本人注册的
+        print(f"[auth] 用导师码注册: {username} 来自 {client_ip}", flush=True)
     with _write_lock:
         c.execute("INSERT INTO users (id, username, password_hash, display_name, role, created_at)"
                   " VALUES (?,?,?,?,?,?)", (uid, username, hash_password(password), display, role, now))
@@ -1013,8 +1028,15 @@ def main():
     # /home/wang 本身是 750 已经挡住了别人，这里是第二道防线。
     os.umask(0o077)
     init_db()
-    if not INVITE_CODE:
-        print("⚠️  未设置 MOCHI_INVITE_CODE，任何人都能注册")
+    if not INVITE_CODE and not ADVISOR_CODE:
+        print("⚠️  未设置邀请码，任何人都能注册")
+    if ADVISOR_CODE and ADVISOR_CODE == INVITE_CODE:
+        # 两码相同的话每个学生都会注册成导师，这是灾难性的配置错误，
+        # 与其带病运行不如直接拒绝启动
+        raise SystemExit("✗ MOCHI_ADVISOR_CODE 不能和 MOCHI_INVITE_CODE 相同，"
+                         "否则所有人注册都会拿到导师身份")
+    if ADVISOR_CODE and len(ADVISOR_CODE) < 16:
+        print("⚠️  导师码偏短，建议 16 位以上——它能直接换来全组记录的读取权限")
 
     global VAPID
     VAPID = load_vapid()

@@ -5,8 +5,13 @@
 
 学生读写自己的记录，导师只读全组的（导师也**不能**修改学生的记录，服务端强制）。
 
-导师角色只能在服务器上用 `set_role.py` 授予——接口注册一律是学生，
-否则组里谁先抢注谁就拿到了看全组记录的权限。
+导师身份有两条途径：
+- **导师邀请码**（`MOCHI_ADVISOR_CODE`）：用它注册直接得到导师身份
+- **`set_role.py`**：在服务器上手动提升或收回
+
+两个码必须不同——相同的话每个学生注册都会变成导师，所以服务启动时会直接拒绝。
+导师码等于「知道这串字符就能读全组记录」，只私下发给导师本人，泄露了立刻换
+（换码不影响已注册的账号）。用导师码注册会在日志里留痕。
 
 ## 为什么是纯标准库 Python
 
@@ -21,7 +26,7 @@
 | 机器 | `wang@172.29.249.177` |
 | 代码 | `~/mochi/server/` |
 | 数据 | `~/mochi-data/`（`mochi.db` + `photos/`，权限 700/600） |
-| 配置 | `~/mochi/server.env`（含邀请码，权限 600） |
+| 配置 | `~/mochi/server.env`（含学生码和导师码，权限 600） |
 | 日志 | `~/mochi/server.log` |
 | 备份 | `~/mochi/backups/`，每天 3:30 自动备份，保留 14 份 |
 | 服务 | systemd user unit `mochi.service`，已 enable + linger（重启自动拉起） |
@@ -54,7 +59,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/register` | `{username, password, displayName, inviteCode}` → `{token, user}`，**一律注册为学生** |
+| POST | `/api/register` | `{username, password, displayName, inviteCode}` → `{token, user}`；身份由用的哪个码决定 |
 | POST | `/api/login` | `{username, password}` → `{token, user}` |
 | POST | `/api/logout` | 吊销当前 token |
 | GET | `/api/me` | 当前用户 |

@@ -79,7 +79,13 @@ function AuthForm({ onDone, onCancel }) {
             <input style={input} value={f.displayName} onChange={set("displayName")} placeholder="导师看到的名字" />
           </label>
           <label style={{ fontSize: 12, color: C.dim, display: "block", marginTop: 10 }}>邀请码
-            <input style={input} value={f.inviteCode} onChange={set("inviteCode")} placeholder="问组里要" />
+            <input style={input} value={f.inviteCode} onChange={set("inviteCode")}
+              autoCapitalize="none" autoCorrect="off" placeholder="问组里要" />
+          </label>
+          <div style={{ fontSize: 11, color: C.faint, marginTop: 4, lineHeight: 1.6 }}>
+            用哪个码注册决定身份：学生码 → 学生；导师码 → 导师（可查看全组记录）。
+          </div>
+          <label style={{ display: "none" }}>
           </label>
         </>
       )}
@@ -200,6 +206,18 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
       if ((await Sync.pushStatus()).subscribed) {
         await Sync.syncReminders(dataRef.current, auth.token).catch(() => {});
       }
+
+      // 顺带刷新身份：角色是在服务器上改的（set_role.py 或导师码），
+      // 本地 localStorage 里那份不会自己变。不刷的话被提为导师的人
+      // 得退出重登才能看到导师入口。
+      try {
+        const me = await Sync.fetchMe(auth.token);
+        if (me?.user && JSON.stringify(me.user) !== JSON.stringify(auth.user)) {
+          const next = { ...auth, user: me.user };
+          Sync.setAuth(next);
+          setAuthState(next);
+        }
+      } catch { /* 刷不到就下次再说，不影响同步 */ }
     } catch (e) {
       if (/HTTP 401/.test(e.message)) { Sync.setAuth(null); setAuthState(null); setErr("登录已过期，请重新登录"); }
       else if (!quiet) setErr(/Failed to fetch|NetworkError|Load failed/i.test(e.message)

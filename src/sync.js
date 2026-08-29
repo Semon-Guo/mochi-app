@@ -115,6 +115,7 @@ export const login = (username, password) =>
   api("/api/login", { method: "POST", body: { username, password } });
 export const register = (info) =>
   api("/api/register", { method: "POST", body: info });
+export const fetchMe = (token) => api("/api/me", { token });
 export const fetchUsers = (token) => api("/api/users", { token });
 export const fetchOverview = (token) => api("/api/overview", { token });
 export const uploadAvatar = (token, avatar) =>

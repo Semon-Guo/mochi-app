@@ -20,6 +20,7 @@ from pathlib import Path
 PORT = 39217
 BASE = f"http://127.0.0.1:{PORT}"
 INVITE = "test-invite-code"
+ADVISOR_INVITE = "test-advisor-code-longer"
 HERE = Path(__file__).parent
 
 passed = failed = 0
@@ -59,7 +60,8 @@ def call(method, path, body=None, token=None, raw=None, ctype="application/json"
 def main():
     tmp = tempfile.mkdtemp(prefix="mochi-test-")
     env = {**os.environ, "MOCHI_DATA": tmp, "MOCHI_PORT": str(PORT),
-           "MOCHI_INVITE_CODE": INVITE, "MOCHI_ORIGINS": "https://semon-guo.github.io,http://localhost:5173"}
+           "MOCHI_INVITE_CODE": INVITE, "MOCHI_ADVISOR_CODE": ADVISOR_INVITE,
+           "MOCHI_ORIGINS": "https://semon-guo.github.io,http://localhost:5173"}
     proc = subprocess.Popen([sys.executable, str(HERE / "mochi_server.py")], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -306,6 +308,24 @@ def main():
         s, r = call("GET", "/api/me", token=stu1)
         chk("认证接口也未受影响", s == 200, f"HTTP {s}")
 
+        print("\n── 导师邀请码 ──")
+        s, r = call("POST", "/api/register", {"username": "prof2", "password": "prof2-passwd-1",
+                                              "displayName": "另一位导师", "inviteCode": ADVISOR_INVITE})
+        chk("用导师码注册直接拿到导师身份", s == 200 and r["user"]["role"] == "advisor",
+            r.get("user", {}).get("role"))
+        prof2 = r.get("token")
+        s, r = call("GET", "/api/overview", token=prof2)
+        chk("该账号确实有导师权限", s == 200 and "members" in r, f"HTTP {s}")
+
+        s, r = call("POST", "/api/register", {"username": "stu3", "password": "stu3-passwd-1",
+                                              "inviteCode": INVITE})
+        chk("学生码仍然只给学生身份", s == 200 and r["user"]["role"] == "student",
+            r.get("user", {}).get("role"))
+
+        s, r = call("POST", "/api/register", {"username": "stu4", "password": "stu4-passwd-1",
+                                              "inviteCode": ADVISOR_INVITE[:-1]})
+        chk("导师码差一个字符也不行", s in (403, 429), f"HTTP {s}")
+
         print("\n── 头像与资料 ──")
         TINY = "data:image/jpeg;base64," + "A" * 200
         s, r = call("POST", "/api/avatar", {"avatar": TINY})
@@ -358,7 +378,10 @@ def main():
 
         print("\n── 导师视角 ──")
         s, r = call("GET", "/api/users", token=advisor)
-        chk("导师能列出成员", s == 200 and len(r["users"]) == 3, f"n={len(r.get('users', []))}")
+        # 不写死人数：后面每加一个测试账号都会让硬编码的断言失败
+        names = {u["username"] for u in r.get("users", [])}
+        chk("导师能列出成员", s == 200 and {"prof", "stu1", "stu2"} <= names,
+            f"n={len(names)}")
         s, r = call("GET", "/api/users", token=stu1)
         chk("学生不能列出成员", s == 403, f"HTTP {s}")
 
