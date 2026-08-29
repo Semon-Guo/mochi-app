@@ -191,6 +191,86 @@ try {
   chk("本地新建的待办不受影响，仍在本地", (before.data.todos || []).some((t) => t.id === "td2"));
   Sync.setSyncTodos(true);
 
+  console.log("\n── 同一台设备换账号（数据必须隔离）──");
+  // 设备 D：先用账号 A 建记录并同步
+  asDevice("D");
+  Sync.setServer(BASE);
+  Sync.setDataOwner?.(null);
+  let dD = base();
+  dD = Sync.stampChanges(dD, {
+    ...dD,
+    projects: [{ id: "dp1", name: "A 的私密项目" }],
+    records: [{ id: "dr1", projectId: "dp1", at: Date.now(), text: "A 的实验记录", photos: [] }],
+    todos: [{ id: "dt1", text: "A 的待办" }],
+  }, 40000);
+  res = await syncDevice("D", dD, a.token);
+  dD = res.data;
+  chk("账号 A 在设备 D 上同步成功", res.pushed === 3, `pushed=${res.pushed}`);
+
+  // 换成账号 B 登录同一台设备
+  const afterSwitch = await Sync.switchAccount(dD, a.user.id, b.user.id);
+  chk("换账号后 A 的实验记录被清除", (afterSwitch.records || []).length === 0,
+      `剩 ${(afterSwitch.records || []).length} 条`);
+  chk("换账号后 A 的项目被清除", (afterSwitch.projects || []).length === 0,
+      `剩 ${(afterSwitch.projects || []).length} 个`);
+  chk("换账号后 A 的待办被清除", (afterSwitch.todos || []).length === 0,
+      `剩 ${(afterSwitch.todos || []).length} 条`);
+  chk("同步游标被重置", !(afterSwitch._sync?.cursor), String(afterSwitch._sync?.cursor));
+  chk("待推送队列被清空（否则会把 A 的数据推到 B 名下）",
+      Sync.pendingCount(afterSwitch) === 0, String(Sync.pendingCount(afterSwitch)));
+
+  // B 同步：不该拿到 A 的东西，也不该把 A 的东西推上去
+  res = await syncDevice("D", afterSwitch, b.token);
+  const dSwitched = res.data;
+  chk("B 同步后没有推送任何 A 的数据", res.pushed === 0, `pushed=${res.pushed}`);
+  chk("B 看不到 A 的记录", !(dSwitched.records || []).some((r) => r.id === "dr1"));
+
+  // 从服务器侧确认 A 的记录没有被划到 B 名下
+  asDevice("D2"); Sync.setServer(BASE);
+  const checkA = await syncDevice("D2", base(), a.token);
+  const still = (checkA.data.records || []).find((r) => r.id === "dr1");
+  chk("A 的记录仍属于 A，内容完好", still?.text === "A 的实验记录", still?.text || "丢失");
+
+  console.log("\n── 旧版本升级：数据来路不明就得清 ──");
+  // 模拟旧版本遗留：有同步过的数据，但没有归属记录
+  asDevice("OLD"); Sync.setServer(BASE);
+  Sync.setDataOwner(null);
+  let dOld = base();
+  res = await syncDevice("OLD", dOld, a.token);
+  dOld = res.data;
+  Sync.setDataOwner(null);                       // 抹掉归属，装成旧版本的状态
+  chk("旧版本遗留的数据里有同步游标", (dOld._sync?.cursor || 0) > 0, String(dOld._sync?.cursor));
+  const migrated = await Sync.switchAccount(dOld, null, b.user.id);
+  chk("来路不明的数据被清除", (migrated.records || []).length === 0,
+      `剩 ${(migrated.records || []).length} 条`);
+
+  // 而真正的首次登录（离线攒的数据、从未同步）必须保留
+  asDevice("FRESH"); Sync.setServer(BASE);
+  Sync.setDataOwner(null);
+  let dFresh = Sync.stampChanges(base(), {
+    ...base(), records: [{ id: "own1", projectId: "x", at: Date.now(), text: "登录前自己记的" }],
+  }, 50000);
+  const kept = await Sync.switchAccount(dFresh, null, a.user.id);
+  chk("首次登录时离线攒的数据不会被清掉",
+      (kept.records || []).some((r) => r.id === "own1"), `records=${(kept.records || []).length}`);
+
+  console.log("\n── 同一账号在新设备上登录 ──");
+  // D3 之前用过账号 B，游标是脏的；改登 A 后必须拿得到 A 的全部数据
+  asDevice("D3"); Sync.setServer(BASE);
+  let dD3 = base();
+  res = await syncDevice("D3", dD3, b.token);       // 先以 B 同步一轮，把游标推上去
+  dD3 = res.data;
+  const dirtyCursor = dD3._sync?.cursor || 0;
+  chk("设备上已有别的账号留下的游标", dirtyCursor > 0, String(dirtyCursor));
+
+  const switched = await Sync.switchAccount(dD3, b.user.id, a.user.id);
+  res = await syncDevice("D3", switched, a.token);
+  const gotA = res.data;
+  chk("换回账号 A 后能拉到 A 的实验记录",
+      (gotA.records || []).some((r) => r.id === "dr1"), `records=${(gotA.records || []).length}`);
+  chk("也能拉到 A 的待办（原来会因游标不重置而漏掉）",
+      (gotA.todos || []).some((t) => t.id === "dt1"), `todos=${(gotA.todos || []).length}`);
+
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {
   proc.kill();

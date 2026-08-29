@@ -8,9 +8,10 @@
  * 渲染代码看不见它，也就不会被它影响。
  */
 
-import { getPhoto, putPhoto, localPhotoIds } from "./photos.js";
+import { getPhoto, putPhoto, localPhotoIds, clearPhotos } from "./photos.js";
 
 const AUTH_SK = "mochi_auth";
+const OWNER_SK = "mochi_data_owner";
 const SERVER_SK = "mochi_server";
 const DEFAULT_SERVER = "https://172.29.249.177:3000";
 
@@ -46,6 +47,52 @@ export function getAuth() {
 }
 export function setAuth(a) {
   try { a ? localStorage.setItem(AUTH_SK, JSON.stringify(a)) : localStorage.removeItem(AUTH_SK); } catch {}
+}
+
+/* ── 本地数据的归属 ──
+ * 本机的 projects / records / todos / 照片 和同步游标都是设备级的，
+ * 不跟着账号走。不记归属的话换个账号登录会有两个后果：
+ *   1) 上一个人的记录还摊在屏幕上（数据泄露）；
+ *   2) 那些记录带着未推送标记，会被推成新账号的东西（数据串号）；
+ *   3) 游标停在上一个账号的进度上，新账号反而拉不到自己的数据。
+ */
+export function getDataOwner() {
+  try { return localStorage.getItem(OWNER_SK); } catch { return null; }
+}
+export function setDataOwner(id) {
+  try { id ? localStorage.setItem(OWNER_SK, id) : localStorage.removeItem(OWNER_SK); } catch {}
+}
+
+/** 手动重置：清空本机同步数据并把游标归零，下一轮同步会从服务器全量拉回。 */
+export async function resetLocalData() {
+  await clearPhotos().catch(() => {});
+  return {
+    todos: [], notes: [], projects: [], records: [],
+    _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
+  };
+}
+
+/**
+ * 登录时调用。换了人就把本机数据清干净并重置游标；同一个人（或首次登录，
+ * 此时本地数据本来就是他自己攒的）则原样保留。
+ * 返回应当替换掉当前状态的 data。
+ */
+export async function switchAccount(data, prevOwnerId, nextOwnerId) {
+  setDataOwner(nextOwnerId);
+  if (prevOwnerId === nextOwnerId) return data;
+
+  // prevOwnerId 为空有两种可能，得分开对待：
+  //   a) 真的首次登录——本地数据是用户自己离线攒的，必须保留；
+  //   b) 从不记归属的旧版本升级上来——本地数据可能是别人的。
+  // 用游标区分：同步过（cursor>0）说明数据是从某个账号拉下来的，
+  // 而我们无从判断是谁的，清掉最稳妥。
+  if (!prevOwnerId && !(data?._sync?.cursor > 0)) return data;
+
+  await clearPhotos().catch(() => {});
+  return {
+    todos: [], notes: [], projects: [], records: [],
+    _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
+  };
 }
 
 async function api(path, { method = "GET", body, token, raw, ctype } = {}) {

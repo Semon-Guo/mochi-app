@@ -114,6 +114,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   const [syncTodos, setSyncTodos] = useState(() => Sync.getSyncTodos());
   const [push, setPush] = useState({ supported: false, subscribed: false, permission: "default" });
   const [pushBusy, setPushBusy] = useState("");
+  const [confirmReset, setConfirmReset] = useState(false);
   const [pushMsg, setPushMsg] = useState("");
   const running = useRef(false);
 
@@ -147,6 +148,20 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
 
   const pending = Sync.pendingCount(data);
   const lastAt = data?._sync?.lastSyncAt || 0;
+
+  // 换账号必须清本机数据：否则上一个人的记录既留在屏幕上，又会被当成
+  // 本地未推送的改动推成新账号的东西，同时游标不重置会让新账号拉不到自己的数据。
+  const handleAuthDone = async (res) => {
+    try {
+      const prev = Sync.getDataOwner();
+      const fresh = await Sync.switchAccount(data, prev, res.user.id);
+      if (fresh !== data) applySync(() => fresh);
+    } catch (e) {
+      setErr("切换账号时清理本机数据失败：" + e.message);
+    }
+    setAuthState(res);
+    setOpen(false);
+  };
 
   // 让「x 分钟前」自己走动
   useEffect(() => { const iv = setInterval(() => setTick((n) => n + 1), 30000); return () => clearInterval(iv); }, []);
@@ -239,7 +254,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
       {open && (
         <div style={{ padding: "4px 12px 12px", borderTop: `1px solid ${C.line}` }}>
           {!auth ? (
-            <AuthForm onDone={(a) => { setAuthState(a); setOpen(false); }} onCancel={() => setOpen(false)} />
+            <AuthForm onDone={handleAuthDone} onCancel={() => setOpen(false)} />
           ) : (
             <>
               <ProfileCard auth={auth} onUpdate={(u) => {
@@ -322,10 +337,31 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                 )}
               </div>
 
+              {/* 恢复手段：本机数据和服务器对不上时（比如从旧版本升级过来、
+                  或者曾经换过账号），清空重拉是最直接的办法 */}
+              <button onClick={async () => {
+                if (!confirmReset) { setConfirmReset(true); return; }
+                setConfirmReset(false);
+                try {
+                  const fresh = await Sync.resetLocalData();
+                  applySync(() => fresh);
+                  setErr("");
+                  setTimeout(() => doSync(), 100);
+                } catch (e) { setErr("清除失败：" + e.message); }
+              }}
+                style={{ ...btn("#FFF", confirmReset ? C.red : C.dim,
+                  { width: "100%", border: `2px solid ${confirmReset ? C.red : C.edge}`, marginTop: 8,
+                    fontSize: 12.5, padding: "9px 0" }) }}>
+                {confirmReset ? "确认清除？本机未同步的改动会丢失" : "清除本机数据并重新同步"}
+              </button>
+
               <button onClick={() => { Sync.setAuth(null); setAuthState(null); setOpen(false); }}
                 style={{ ...btn("#FFF", C.red, { width: "100%", border: `2px solid ${C.edge}`, marginTop: 8 }) }}>
                 退出登录
               </button>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 6, lineHeight: 1.6, textAlign: "center" }}>
+                退出后数据仍留在这台设备上；换成别的账号登录时会自动清除。
+              </div>
             </>
           )}
         </div>

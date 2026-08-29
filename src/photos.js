@@ -27,3 +27,5 @@ export const putPhoto = (id, blob) => photoTx("readwrite", st => st.put(blob, id
 export const getPhoto = (id) => photoTx("readonly", st => st.get(id));
 export const delPhoto = (id) => photoTx("readwrite", st => st.delete(id)).then(() => true);
 export const localPhotoIds = () => photoTx("readonly", st => st.getAllKeys());
+/** 换账号时要连照片一起清——它们属于上一个登录的人 */
+export const clearPhotos = () => photoTx("readwrite", st => st.clear()).then(() => true);
