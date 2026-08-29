@@ -72,7 +72,8 @@ INSERT OR IGNORE INTO seq_counter (id, n) VALUES (1, 0);
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
-  display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at INTEGER NOT NULL);
+  display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at INTEGER NOT NULL,
+  avatar TEXT, updated_at INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -139,6 +140,11 @@ def conn():
 def init_db():
     c = sqlite3.connect(DB_PATH)
     c.executescript(SCHEMA)
+    # 老库补列——不能靠改 CREATE TABLE，那对已存在的表不生效
+    have = {r[1] for r in c.execute("PRAGMA table_info(users)")}
+    for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0")):
+        if col not in have:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
     c.commit()
     c.close()
 
@@ -276,9 +282,15 @@ def note_success(keys):
             _fails.pop(k, None)
 
 
-def public_user(row):
-    return {"id": row["id"], "username": row["username"],
-            "displayName": row["display_name"], "role": row["role"]}
+def public_user(row, with_avatar=True):
+    u = {"id": row["id"], "username": row["username"],
+         "displayName": row["display_name"], "role": row["role"]}
+    try:
+        if with_avatar and row["avatar"]:
+            u["avatar"] = row["avatar"]
+    except (IndexError, KeyError):
+        pass
+    return u
 
 
 def start_session(c, user_id):
@@ -456,6 +468,78 @@ def claim_photo(user, pid, mime, size):
                   (mime or row["mime"], size, next_seq(c), pid))
         c.commit()
     return row
+
+
+MAX_AVATAR = 96 * 1024   # 前端压到 192px JPEG，正常 10-20KB；留足余量
+
+def set_avatar(user, data_url):
+    """头像存成 data URL 直接进 users 表。
+
+    导师端一屏要显示十几个人的头像，走单独的文件端点就是十几个请求；
+    存字段里能随 /api/users 一次返回。代价是库大一点——20 人 × 20KB 不值一提。
+    """
+    if data_url is None:
+        v = None
+    else:
+        v = str(data_url)
+        if not v.startswith("data:image/"):
+            raise HttpError(400, "头像格式不对")
+        if len(v) > MAX_AVATAR:
+            raise HttpError(413, f"头像太大（上限 {MAX_AVATAR // 1024}KB）")
+    now = int(time.time() * 1000)
+    c = conn()
+    with _write_lock:
+        c.execute("UPDATE users SET avatar = ?, updated_at = ? WHERE id = ?", (v, now, user["id"]))
+        c.commit()
+    row = c.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return {"user": public_user(row)}
+
+
+def set_profile(user, body):
+    name = str(body.get("displayName") or "").strip()
+    if not name:
+        raise HttpError(400, "显示名不能为空")
+    if len(name) > 32:
+        raise HttpError(400, "显示名最长 32 个字")
+    now = int(time.time() * 1000)
+    c = conn()
+    with _write_lock:
+        c.execute("UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?", (name, now, user["id"]))
+        c.commit()
+    row = c.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return {"user": public_user(row)}
+
+
+def group_overview(user):
+    """导师端用的一次性概览：成员、每人的项目/记录数、活跃度。
+
+    这些聚合放服务端算，前端不用把全组数据拉下来再统计——导师那边只是看，
+    没必要把所有人的记录都塞进他的本地库。
+    """
+    if user["role"] != "advisor":
+        raise HttpError(403, "只有导师能查看")
+    c = conn()
+    users = c.execute("SELECT * FROM users ORDER BY (role = 'advisor') DESC, created_at").fetchall()
+    out = []
+    for u in users:
+        recs = c.execute(
+            "SELECT data, updated_at FROM records WHERE owner_id = ? AND deleted_at IS NULL",
+            (u["id"],)).fetchall()
+        projs = c.execute(
+            "SELECT COUNT(*) FROM projects WHERE owner_id = ? AND deleted_at IS NULL",
+            (u["id"],)).fetchone()[0]
+        ats = []
+        for r in recs:
+            try:
+                at = json.loads(r["data"]).get("at")
+                if at:
+                    ats.append(int(at))
+            except Exception:
+                pass
+        item = public_user(u)
+        item.update(projects=projs, records=len(recs), lastAt=max(ats) if ats else 0)
+        out.append(item)
+    return {"members": out, "now": int(time.time() * 1000)}
 
 
 # ─────────────────────────── 推送 ───────────────────────────
@@ -712,10 +796,15 @@ class Handler(BaseHTTPRequestHandler):
                 u = self._need_user()
                 if u["role"] != "advisor":
                     raise HttpError(403, "只有导师能查看成员列表")
-                rows = conn().execute(
-                    "SELECT id, username, display_name, role FROM users ORDER BY created_at").fetchall()
-                return self._json({"users": [{"id": r["id"], "username": r["username"],
-                                              "displayName": r["display_name"], "role": r["role"]} for r in rows]})
+                rows = conn().execute("SELECT * FROM users ORDER BY (role = 'advisor') DESC, created_at").fetchall()
+                return self._json({"users": [public_user(r) for r in rows]})
+            if method == "POST" and path == "/api/avatar":
+                return self._json(set_avatar(self._need_user(), self._json_body().get("avatar")))
+            if method == "POST" and path == "/api/profile":
+                return self._json(set_profile(self._need_user(), self._json_body()))
+            if method == "GET" and path == "/api/overview":
+                return self._json(group_overview(self._need_user()))
+
             if method == "GET" and path == "/api/push/key":
                 # 前端订阅时要用它做 applicationServerKey
                 return self._json({"key": VAPID["public"] if (PUSH_OK and VAPID) else None,

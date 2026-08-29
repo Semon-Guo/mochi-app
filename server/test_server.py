@@ -306,6 +306,56 @@ def main():
         s, r = call("GET", "/api/me", token=stu1)
         chk("认证接口也未受影响", s == 200, f"HTTP {s}")
 
+        print("\n── 头像与资料 ──")
+        TINY = "data:image/jpeg;base64," + "A" * 200
+        s, r = call("POST", "/api/avatar", {"avatar": TINY})
+        chk("未登录不能改头像", s == 401, f"HTTP {s}")
+
+        s, r = call("POST", "/api/avatar", {"avatar": TINY}, token=stu1)
+        chk("设置头像", s == 200 and r["user"].get("avatar") == TINY, f"HTTP {s}")
+
+        s, r = call("GET", "/api/me", token=stu1)
+        chk("/api/me 返回头像", r["user"].get("avatar") == TINY)
+
+        s, r = call("POST", "/api/avatar", {"avatar": "javascript:alert(1)"}, token=stu1)
+        chk("非图片 data URL 被拒", s == 400, f"HTTP {s}")
+
+        s, r = call("POST", "/api/avatar", {"avatar": "data:image/jpeg;base64," + "A" * 200000}, token=stu1)
+        chk("超大头像被拒", s == 413, f"HTTP {s}")
+
+        s, r = call("POST", "/api/avatar", {"avatar": None}, token=stu1)
+        chk("可以清除头像", s == 200 and not r["user"].get("avatar"))
+        call("POST", "/api/avatar", {"avatar": TINY}, token=stu1)
+
+        s, r = call("POST", "/api/profile", {"displayName": "学生甲改名"}, token=stu1)
+        chk("能改显示名", s == 200 and r["user"]["displayName"] == "学生甲改名")
+        s, r = call("POST", "/api/profile", {"displayName": ""}, token=stu1)
+        chk("空显示名被拒", s == 400, f"HTTP {s}")
+
+        s, r = call("GET", "/api/users", token=advisor)
+        who = {u["username"]: u for u in r.get("users", [])}
+        chk("导师看到的成员列表带头像", who.get("stu1", {}).get("avatar") == TINY)
+        chk("导师排在最前（role DESC）", r["users"][0]["role"] == "advisor", r["users"][0]["role"])
+
+        print("\n── 导师概览聚合 ──")
+        # 前面的墓碑测试把 stu1 唯一那条记录删了，这里补一条真实数据再统计
+        call("POST", "/api/sync", {"records": [
+            {"id": "r-ov", "updatedAt": now + 30000,
+             "data": {"projectId": "p1", "at": now + 30000, "text": "概览统计用"}}]}, token=stu1)
+        s, r = call("GET", "/api/overview", token=stu1)
+        chk("学生不能看概览", s == 403, f"HTTP {s}")
+
+        s, r = call("GET", "/api/overview", token=advisor)
+        chk("导师能取概览", s == 200 and "members" in r, f"HTTP {s}")
+        m = {x["username"]: x for x in r.get("members", [])}
+        chk("统计了每人的项目数", m.get("stu1", {}).get("projects") == 1,
+            str(m.get("stu1", {}).get("projects")))
+        chk("统计了每人的记录数", m.get("stu1", {}).get("records") >= 1,
+            str(m.get("stu1", {}).get("records")))
+        chk("给出最后活跃时间", m.get("stu1", {}).get("lastAt", 0) > 0)
+        chk("没记录的成员计数为 0", m.get("stu2", {}).get("records") == 0,
+            str(m.get("stu2", {}).get("records")))
+
         print("\n── 导师视角 ──")
         s, r = call("GET", "/api/users", token=advisor)
         chk("导师能列出成员", s == 200 and len(r["users"]) == 3, f"n={len(r.get('users', []))}")

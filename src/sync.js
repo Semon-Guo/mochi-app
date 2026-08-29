@@ -69,6 +69,11 @@ export const login = (username, password) =>
 export const register = (info) =>
   api("/api/register", { method: "POST", body: info });
 export const fetchUsers = (token) => api("/api/users", { token });
+export const fetchOverview = (token) => api("/api/overview", { token });
+export const uploadAvatar = (token, avatar) =>
+  api("/api/avatar", { method: "POST", token, body: { avatar } });
+export const updateProfile = (token, displayName) =>
+  api("/api/profile", { method: "POST", token, body: { displayName } });
 
 /* ── 变更打戳 ──
  * 每次状态更新时比对前后，给变化的记录盖 updatedAt、给消失的记录留墓碑。

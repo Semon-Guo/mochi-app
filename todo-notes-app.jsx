@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import * as Sync from "./src/sync.js";
-import { SyncBar, AdvisorView } from "./src/SyncUI.jsx";
+import { SyncBar } from "./src/SyncUI.jsx";
+import { AdvisorView } from "./src/AdvisorView.jsx";
 import { putPhoto, getPhoto, delPhoto } from "./src/photos.js";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
@@ -1880,7 +1881,8 @@ export default function MochiApp() {
   // 导师视图是独立一屏，走在主视图之前
   if (advisorOpen) {
     return (<>
-      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} />
+      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)}
+        onPhoto={(ids)=>setViewPhoto(ids?.[0] || null)} />
       <style>{CSS}</style>
     </>);
   }
@@ -2128,6 +2130,15 @@ const CSS = `
     .proj-grid > * { margin-bottom: 0 !important; }
   }
   .pcard { transition: transform .15s ease, box-shadow .15s ease; }
+
+  /* 导师端：成员/项目卡片。窄屏一列，宽屏铺网格——导师多半在电脑上看 */
+  .adv-grid { display: grid; grid-template-columns: 1fr; gap: 10px; padding-bottom: 20px; }
+  @media (min-width: 560px) { .adv-grid { grid-template-columns: repeat(auto-fill, minmax(248px, 1fr)); } }
+  .adv-card { transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+  @media (hover: hover) and (pointer: fine) {
+    .adv-card:hover { border-color: #D9D2C4 !important; transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(120,100,70,.07); }
+  }
   @media (hover: hover) and (pointer: fine) {
     .pcard:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,.07); }
   }

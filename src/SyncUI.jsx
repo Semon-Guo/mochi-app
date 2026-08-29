@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import * as Sync from "./sync.js";
+import { Avatar } from "./AdvisorView.jsx";
+import { fileToAvatar } from "./avatar.js";
 
 const C = {
   bg: "#FDFBF7", ink: "#2C2C2C", dim: "#999", faint: "#C0B8A8",
@@ -240,10 +242,10 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
             <AuthForm onDone={(a) => { setAuthState(a); setOpen(false); }} onCancel={() => setOpen(false)} />
           ) : (
             <>
-              <div style={{ fontSize: 12.5, color: C.dim, padding: "8px 0", lineHeight: 1.7 }}>
-                <div>账号：<b style={{ color: C.ink }}>{auth.user.displayName}</b>（{auth.user.username}）</div>
-                <div>身份：{auth.user.role === "advisor" ? "导师 · 可查看全组记录" : "学生 · 只同步自己的记录"}</div>
-              </div>
+              <ProfileCard auth={auth} onUpdate={(u) => {
+                const next = { ...auth, user: u };
+                Sync.setAuth(next); setAuthState(next);
+              }} />
 
               <label style={{
                 display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer",
@@ -332,81 +334,92 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   );
 }
 
-/* ── 导师视图：按人分组看全组记录（只读） ── */
-export function AdvisorView({ data, onClose }) {
-  const auth = Sync.getAuth();
-  const [users, setUsers] = useState([]);
-  const [err, setErr] = useState("");
-  const [who, setWho] = useState("all");
 
-  useEffect(() => {
-    if (!auth) return;
-    Sync.fetchUsers(auth.token).then((r) => setUsers(r.users || [])).catch((e) => setErr(e.message));
-  }, []);
+/* ── 个人资料：头像 + 显示名 ──
+ * 头像是导师端认人的主要线索（20 个人的列表全是文字很难扫），
+ * 所以上传入口放在同步面板里，登录后立刻能看到。
+ */
+function ProfileCard({ auth, onUpdate }) {
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(auth.user.displayName || "");
+  const fileRef = useRef(null);
 
-  const nameOf = (id) => users.find((u) => u.id === id)?.displayName || "（未知成员）";
-  const projName = (pid) => (data.projects || []).find((p) => p.id === pid)?.name || "未归类";
+  const pick = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";                       // 同一张图再选一次也要能触发
+    if (!f) return;
+    setMsg(""); setBusy("avatar");
+    try {
+      const dataUrl = await fileToAvatar(f);   // 裁方 + 压到 192px
+      const r = await Sync.uploadAvatar(auth.token, dataUrl);
+      onUpdate(r.user);
+      setMsg("头像已更新");
+    } catch (err) { setMsg(err.message); }
+    finally { setBusy(""); }
+  };
 
-  const records = [...(data.records || [])]
-    .filter((r) => who === "all" || r.ownerId === who)
-    .sort((a, b) => (b.at || 0) - (a.at || 0));
-
-  const byOwner = {};
-  for (const r of data.records || []) byOwner[r.ownerId || "me"] = (byOwner[r.ownerId || "me"] || 0) + 1;
+  const saveName = async () => {
+    const v = name.trim();
+    if (!v || v === auth.user.displayName) { setEditing(false); return; }
+    setMsg(""); setBusy("name");
+    try {
+      const r = await Sync.updateProfile(auth.token, v);
+      onUpdate(r.user);
+      setEditing(false);
+      setMsg("显示名已更新");
+    } catch (err) { setMsg(err.message); }
+    finally { setBusy(""); }
+  };
 
   return (
-    <div className="app-shell" style={{ fontFamily: "'Outfit','Noto Serif SC',sans-serif",
-      background: C.bg, minHeight: "100vh", maxWidth: "var(--app-w)", margin: "0 auto",
-      paddingBottom: 60, color: C.ink }}>
-      <div style={{ padding: "52px 24px 12px", display: "flex", alignItems: "center", gap: 10 }}>
-        <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer",
-          fontSize: 20, color: C.dim, padding: 0 }}>‹</button>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 700 }}>全组记录</div>
-          <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>只读 · 共 {(data.records || []).length} 条</div>
+    <div style={{ padding: "10px 0 4px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+        <button onClick={() => fileRef.current?.click()} disabled={!!busy} title="换头像"
+          style={{ border: "none", background: "none", padding: 0, cursor: "pointer",
+            position: "relative", borderRadius: "50%", lineHeight: 0, opacity: busy === "avatar" ? .5 : 1 }}>
+          <Avatar user={auth.user} size={46} ring />
+          <span style={{ position: "absolute", right: -1, bottom: -1, width: 17, height: 17,
+            borderRadius: "50%", background: C.ink, color: "#FFF", fontSize: 9,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 0 0 2px #FFF" }}>✎</span>
+        </button>
+        <input ref={fileRef} type="file" accept="image/*" onChange={pick} style={{ display: "none" }} />
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {editing ? (
+            <div style={{ display: "flex", gap: 6 }}>
+              <input value={name} onChange={(e) => setName(e.target.value)} autoFocus
+                onKeyDown={(e) => { if (e.key === "Enter") saveName(); if (e.key === "Escape") setEditing(false); }}
+                style={{ ...input, marginTop: 0, padding: "7px 9px", fontSize: 14 }} />
+              <button onClick={saveName} disabled={!!busy}
+                style={{ ...btn(C.ink, "#FFF", { padding: "7px 12px", fontSize: 12.5, borderRadius: 10 }) }}>
+                {busy === "name" ? "…" : "保存"}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <b style={{ color: C.ink, fontSize: 14.5 }}>{auth.user.displayName}</b>
+                <button onClick={() => { setName(auth.user.displayName); setEditing(true); }}
+                  style={{ border: "none", background: "none", cursor: "pointer", color: C.faint,
+                    fontSize: 11, padding: 2, fontFamily: "inherit" }}>改名</button>
+              </div>
+              <div style={{ fontSize: 11.5, color: C.dim, marginTop: 1 }}>
+                @{auth.user.username} ·{" "}
+                {auth.user.role === "advisor"
+                  ? <b style={{ color: C.amber }}>导师 · 可查看全组记录</b>
+                  : "学生 · 只同步自己的记录"}
+              </div>
+            </>
+          )}
         </div>
       </div>
-
-      {err && <div style={{ margin: "0 24px", color: C.red, fontSize: 13 }}>{err}</div>}
-
-      <div style={{ padding: "8px 24px", display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {[["all", `全部 ${(data.records || []).length}`],
-          ...users.filter(u => u.role !== "advisor").map((u) => [u.id, `${u.displayName} ${byOwner[u.id] || 0}`])]
-          .map(([k, label]) => (
-            <button key={k} onClick={() => setWho(k)} style={{
-              padding: "7px 12px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
-              fontSize: 12, fontWeight: 600,
-              border: who === k ? `2px solid ${C.ink}` : `2px solid ${C.edge}`,
-              background: who === k ? C.ink : "#FFF", color: who === k ? "#FFF" : C.dim,
-            }}>{label}</button>
-          ))}
-      </div>
-
-      <div style={{ padding: "8px 24px" }}>
-        {records.length === 0 && (
-          <div style={{ textAlign: "center", padding: "60px 0", color: C.faint }}>
-            <div style={{ fontSize: 40 }}>📓</div>
-            <div style={{ fontSize: 15, marginTop: 8 }}>还没有记录</div>
-          </div>
-        )}
-        {records.map((r) => (
-          <div key={r.id} style={{ padding: "12px 0", borderBottom: `1px solid ${C.line}` }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: C.amber, background: "#FFF6E5",
-                padding: "2px 8px", borderRadius: 5 }}>{nameOf(r.ownerId)}</span>
-              <span style={{ fontSize: 11, color: C.faint }}>{projName(r.projectId)}</span>
-              <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>
-                {new Date(r.at || 0).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })}
-              </span>
-            </div>
-            <div style={{ fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{r.text}</div>
-            {r.weather && <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>{r.weather}</div>}
-            {r.photos?.length > 0 && (
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>📷 {r.photos.length} 张照片</div>
-            )}
-          </div>
-        ))}
-      </div>
+      {msg && (
+        <div style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.6,
+          color: /失败|太大|不对|不能|读不了/.test(msg) ? C.red : C.green }}>{msg}</div>
+      )}
     </div>
   );
 }
