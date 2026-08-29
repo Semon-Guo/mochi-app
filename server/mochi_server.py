@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at INTEGER NOT NULL,
   avatar TEXT, updated_at INTEGER NOT NULL DEFAULT 0,
-  pending_role TEXT, requested_at INTEGER);
+  pending_role TEXT, requested_at INTEGER, archived_at INTEGER);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -169,7 +169,8 @@ def init_db():
     # 老库补列——不能靠改 CREATE TABLE，那对已存在的表不生效
     have = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
-                      ("pending_role", "TEXT"), ("requested_at", "INTEGER")):
+                      ("pending_role", "TEXT"), ("requested_at", "INTEGER"),
+                      ("archived_at", "INTEGER")):
         if col not in have:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
     c.commit()
@@ -349,6 +350,8 @@ def public_user(row, with_avatar=True):
         if row["pending_role"]:
             u["pendingRole"] = row["pending_role"]
             u["requestedAt"] = row["requested_at"]
+        if row["archived_at"]:
+            u["archivedAt"] = row["archived_at"]
     except (IndexError, KeyError):
         pass
     return u
@@ -621,10 +624,41 @@ def admin_set_role(user, target_id, role):
     return {"user": public_user(c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone())}
 
 
-def admin_remove_user(user, target_id):
-    """移除成员，连同其全部数据。毕业离组时用。"""
+def admin_archive_user(user, target_id, archived=True):
+    """标记离组 / 恢复在组。
+
+    离组不删任何东西——实验记录是课题组的资产，人走了数据得留下，
+    以后追溯某个结论怎么来的还得靠它。只是把人从默认视图里挪走。
+    """
     if not is_admin(user):
-        raise HttpError(403, "只有管理员能移除成员")
+        raise HttpError(403, "只有管理员能操作")
+    c = conn()
+    row = _target(c, target_id)
+    if row["id"] == user["id"]:
+        raise HttpError(403, "不能把自己标记为离组")
+    if archived and row["role"] == "admin" and _count_admins(c, row["id"]) == 0:
+        raise HttpError(409, "这是最后一个管理员，不能标记离组")
+
+    now = int(time.time() * 1000)
+    with _write_lock:
+        c.execute("UPDATE users SET archived_at = ?, updated_at = ? WHERE id = ?",
+                  (now if archived else None, now, row["id"]))
+        if archived:
+            # 人都离组了，会话不该继续有效
+            c.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+        c.commit()
+    audit(user["username"], "标记离组" if archived else "恢复在组", row["username"],
+          "记录全部保留" if archived else None)
+    return {"user": public_user(c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone())}
+
+
+def admin_delete_user(user, target_id):
+    """彻底删除账号及其全部数据。只该用来清理误注册和测试账号。
+
+    正常的离组走 archive——那个不删数据。
+    """
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能删除")
     c = conn()
     row = _target(c, target_id)
     if row["id"] == user["id"]:
@@ -632,7 +666,7 @@ def admin_remove_user(user, target_id):
     if row["role"] == "admin" and _count_admins(c, row["id"]) == 0:
         raise HttpError(409, "这是最后一个管理员，不能删除")
 
-    # 先数清楚要删多少，审计日志里写明白——删完就查不到了
+    # 先数清楚要删多少写进日志——删完就查不到了
     counts = {t: c.execute(f"SELECT COUNT(*) FROM {t} WHERE owner_id = ?", (row["id"],)).fetchone()[0]
               for t in SYNC_TABLES}
     photo_ids = [r["id"] for r in
@@ -645,7 +679,7 @@ def admin_remove_user(user, target_id):
             (PHOTO_DIR / pid).unlink(missing_ok=True)
         except Exception:
             pass
-    audit(user["username"], "移除成员", row["username"],
+    audit(user["username"], "彻底删除账号", row["username"],
           " ".join(f"{k}={v}" for k, v in counts.items()) + f" 照片文件={len(photo_ids)}")
     return {"ok": True, "removed": counts}
 
@@ -830,6 +864,9 @@ def group_overview(user):
                 pass
         item = public_user(u)
         item.update(projects=projs, records=len(recs), lastAt=max(ats) if ats else 0)
+        # 谁该出现在「按成员」里：做科研记录的人。纯管理账号（比如只用来
+        # 审批的导师/管理员，一条记录都没有）不该占着列表。
+        item["inGroup"] = (u["role"] == "student") or len(recs) > 0 or projs > 0
         out.append(item)
     pending = c.execute("SELECT COUNT(*) FROM users WHERE pending_role IS NOT NULL").fetchone()[0]
     return {"members": out, "now": int(time.time() * 1000),
@@ -1099,8 +1136,12 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/api/admin/role":
                 b = self._json_body()
                 return self._json(admin_set_role(self._need_user(), b.get("userId"), b.get("role")))
+            if method == "POST" and path == "/api/admin/archive":
+                b = self._json_body()
+                return self._json(admin_archive_user(self._need_user(), b.get("userId"),
+                                                     bool(b.get("archived", True))))
             if method == "POST" and path == "/api/admin/remove":
-                return self._json(admin_remove_user(self._need_user(), self._json_body().get("userId")))
+                return self._json(admin_delete_user(self._need_user(), self._json_body().get("userId")))
             if method == "POST" and path == "/api/admin/reset-password":
                 return self._json(admin_reset_password(self._need_user(), self._json_body().get("userId")))
             if method == "POST" and path == "/api/admin/revoke-sessions":

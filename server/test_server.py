@@ -373,22 +373,71 @@ def main():
         s, r = call("POST", "/api/register", {"username": "newbie", "password": "newbie-pass-1",
                                               "inviteCode": "brand-new-invite"})
         chk("新邀请码可用（无需重启服务）", s == 200, f"HTTP {s}")
+        # 存成独立变量：后面还有好几段测试会覆盖 r
         newbie_id = r.get("user", {}).get("id")
+        newbie_tok = r.get("token")
 
-        print("\n── 移除成员 ──")
+        print("\n── 离组归档（不删数据）──")
+        s, r = call("POST", "/api/register", {"username": "leaver", "password": "leaver-pass-1",
+                                              "displayName": "毕业生", "inviteCode": "brand-new-invite"})
+        leaver_id = r["user"]["id"]
+        leaver_tok = r["token"]
+        call("POST", "/api/sync", {
+            "projects": [{"id": "lp1", "updatedAt": now, "data": {"name": "毕业生的项目"}}],
+            "records": [{"id": "lr1", "updatedAt": now,
+                         "data": {"projectId": "lp1", "at": now, "text": "毕业生的实验记录"}}],
+        }, token=leaver_tok)
+
+        s, r = call("POST", "/api/admin/archive", {"userId": leaver_id}, token=stu1)
+        chk("非管理员不能标记离组", s == 403, f"HTTP {s}")
+
+        s, r = call("POST", "/api/admin/archive", {"userId": leaver_id}, token=admin)
+        chk("标记离组成功", s == 200 and r["user"].get("archivedAt"), f"HTTP {s}")
+
+        s, r = call("GET", "/api/me", token=leaver_tok)
+        chk("离组后其会话被吊销", s == 401, f"HTTP {s}")
+
+        s, r = call("GET", "/api/overview", token=admin)
+        lv = next((x for x in r["members"] if x["username"] == "leaver"), None)
+        chk("离组成员仍在成员数据里（带 archivedAt）", lv and lv.get("archivedAt"), str(bool(lv)))
+        chk("其记录数完好保留", lv and lv.get("records") == 1, str(lv and lv.get("records")))
+        chk("其项目数完好保留", lv and lv.get("projects") == 1, str(lv and lv.get("projects")))
+
+        s, r = call("GET", "/api/sync?since=0", token=admin)
+        chk("导师仍能同步到离组成员的记录",
+            any(x["id"] == "lr1" for x in r.get("records", [])),
+            f"records={len(r.get('records', []))}")
+
+        s, r = call("POST", "/api/admin/archive", {"userId": leaver_id, "archived": False}, token=admin)
+        chk("能恢复在组", s == 200 and not r["user"].get("archivedAt"))
+        call("POST", "/api/admin/archive", {"userId": leaver_id}, token=admin)
+
+        print("\n── 谁算科研成员 ──")
+        s, r = call("GET", "/api/overview", token=admin)
+        who = {x["username"]: x for x in r["members"]}
+        chk("纯管理账号（无任何记录）不算科研成员", who["prof"].get("inGroup") is False,
+            str(who["prof"].get("inGroup")))
+        chk("学生一律算科研成员", who["stu2"].get("inGroup") is True,
+            str(who["stu2"].get("inGroup")))
+        chk("有记录的人算科研成员", who["stu1"].get("inGroup") is True,
+            str(who["stu1"].get("inGroup")))
+
+        print("\n── 彻底删除（仅用于清理误注册）──")
         call("POST", "/api/sync", {"records": [
             {"id": "nb1", "updatedAt": now, "data": {"at": now, "text": "新人的记录"}}]},
-            token=r.get("token"))
+            token=newbie_tok)
         s, r = call("POST", "/api/admin/remove", {"userId": newbie_id}, token=stu1)
         chk("非管理员不能移除成员", s == 403, f"HTTP {s}")
         s, r = call("POST", "/api/admin/remove", {"userId": newbie_id}, token=admin)
-        chk("管理员能移除成员", s == 200 and r.get("ok"), f"HTTP {s}")
+        chk("管理员能彻底删除账号", s == 200 and r.get("ok"), f"HTTP {s}")
         chk("连同其数据一并删除", (r.get("removed") or {}).get("records") == 1,
             str(r.get("removed")))
         s, r = call("GET", "/api/users", token=admin)
         chk("成员列表里不再有他", not any(u["username"] == "newbie" for u in r.get("users", [])))
         s, r = call("POST", "/api/admin/remove", {"userId": me["id"]}, token=admin)
         chk("不能删除自己", s == 403, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/archive", {"userId": me["id"]}, token=admin)
+        chk("不能把自己标记为离组", s == 403, f"HTTP {s}")
 
         print("\n── 服务器状态与审计日志 ──")
         s, r = call("GET", "/api/admin/status", token=stu1)
@@ -402,7 +451,7 @@ def main():
         chk("非管理员看不到审计日志", s == 403, f"HTTP {s}")
         s, r = call("GET", "/api/admin/audit", token=admin)
         acts = [e["action"] for e in r.get("entries", [])]
-        chk("管理操作都留了痕", s == 200 and "改角色" in acts and "移除成员" in acts,
+        chk("管理操作都留了痕", s == 200 and "改角色" in acts and "标记离组" in acts,
             "，".join(dict.fromkeys(acts))[:70])
         chk("审计记录带操作者", all(e.get("actor") for e in r.get("entries", [])))
 

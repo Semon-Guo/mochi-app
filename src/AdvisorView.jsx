@@ -243,6 +243,7 @@ export function AdvisorView({ data, onClose, onPhoto }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
+  const [showArchived, setShowArchived] = useState(false);
   const reload = () => setNonce((n) => n + 1);
 
   useEffect(() => {
@@ -267,7 +268,11 @@ export function AdvisorView({ data, onClose, onPhoto }) {
   const weekAgo = Date.now() - 7 * DAY;
   const thisWeek = records.filter((r) => (r.at || 0) >= weekAgo).length;
   const activeThisWeek = new Set(records.filter((r) => (r.at || 0) >= weekAgo).map((r) => r.ownerId)).size;
-  const students = members.filter((m) => m.role !== "advisor");
+  // 「按成员」只列做科研记录的人：纯管理账号（比如只用来审批、一条记录都没有的
+  // 导师或管理员）不该占着列表。inGroup 由服务端算好。
+  const inGroup = members.filter((m) => m.inGroup !== false);
+  const students = inGroup.filter((m) => !m.archivedAt);
+  const archived = inGroup.filter((m) => m.archivedAt);
   const serverRecords = members.reduce((n, m) => n + (m.records || 0), 0);
 
   /* ── 详情：某个学生 ── */
@@ -277,7 +282,8 @@ export function AdvisorView({ data, onClose, onPhoto }) {
     const projIds = [...new Set(mine.map((r) => r.projectId))];
     return (
       <Shell onBack={() => setFocus(null)} title={u?.displayName || "成员"}
-        subtitle={`${mine.length} 条记录 · ${projIds.length} 个项目 · 最后 ${fmtAgo(mine[0]?.at)}`}
+        subtitle={(u?.archivedAt ? `已离组（${fmtAgo(u.archivedAt)}） · ` : "") +
+          `${mine.length} 条记录 · ${projIds.length} 个项目 · 最后 ${fmtAgo(mine[0]?.at)}`}
         avatar={u}>
         <Panel>
           <Heatmap records={mine} color={C.green} />
@@ -358,7 +364,8 @@ export function AdvisorView({ data, onClose, onPhoto }) {
   /* ── 总览 ── */
   return (
     <Shell onClose={onClose} title="课题组进展"
-      subtitle={`${students.length} 名成员 · 只读视图${Sync.isAdmin(auth?.user) ? " · 管理员" : ""}`}>
+      subtitle={`${students.length} 名成员${archived.length ? ` · ${archived.length} 人已离组` : ""}` +
+        ` · 只读视图${Sync.isAdmin(auth?.user) ? " · 管理员" : ""}`}>
       {err && <Panel><div style={{ color: C.red, fontSize: 13 }}>{err}</div></Panel>}
 
       {Sync.isAdmin(auth?.user) && (
@@ -404,8 +411,9 @@ export function AdvisorView({ data, onClose, onPhoto }) {
       )}
 
       {!loading && tab === "people" && (
+        <>
         <div className="adv-grid">
-          {students.length === 0 && <Empty text="组里还没有其他成员注册" />}
+          {students.length === 0 && <Empty text="组里还没有成员记录" />}
           {students.map((m) => {
             const mine = records.filter((r) => r.ownerId === m.id);
             const stale = mine[0] ? Math.floor((Date.now() - mine[0].at) / DAY) : 999;
@@ -437,6 +445,48 @@ export function AdvisorView({ data, onClose, onPhoto }) {
             );
           })}
         </div>
+
+        {/* 离组的人放在下面，不占主视图，但记录一条没少，点得进去 */}
+        {archived.length > 0 && (
+          <div style={{ marginTop: 4 }}>
+            <button onClick={() => setShowArchived((v) => !v)} style={{
+              width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
+              border: `1px solid ${C.line}`, borderRadius: 12, background: "transparent",
+              cursor: "pointer", fontFamily: "inherit", color: C.dim, fontSize: 12.5,
+            }}>
+              <span style={{ fontSize: 10 }}>{showArchived ? "▾" : "▸"}</span>
+              已离组 {archived.length} 人
+              <span style={{ marginLeft: "auto", fontSize: 11, color: C.dim }}>
+                记录保留，可查看
+              </span>
+            </button>
+            {showArchived && (
+              <div className="adv-grid" style={{ marginTop: 10 }}>
+                {archived.map((m) => {
+                  const mine = records.filter((r) => r.ownerId === m.id);
+                  return (
+                    <button key={m.id} onClick={() => setFocus({ type: "user", id: m.id })}
+                      className="adv-card" style={{ textAlign: "left", cursor: "pointer",
+                        fontFamily: "inherit", border: `1px solid ${C.line}`, borderRadius: 14,
+                        background: "transparent", padding: 13, opacity: 0.72 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ filter: "grayscale(1)" }}><Avatar user={m} size={34} /></span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden",
+                            textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.displayName}</div>
+                          <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
+                            {fmtAgo(m.archivedAt)}离组 · {m.records} 条记录
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+        </>
       )}
 
       {tab === "admin" && Sync.isAdmin(auth?.user) && (

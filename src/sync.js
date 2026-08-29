@@ -121,6 +121,8 @@ export const fetchOverview = (token) => api("/api/overview", { token });
 export const fetchRequests = (token) => api("/api/admin/requests", { token });
 export const adminSetRole = (token, userId, role) =>
   api("/api/admin/role", { method: "POST", token, body: { userId, role } });
+export const adminArchive = (token, userId, archived = true) =>
+  api("/api/admin/archive", { method: "POST", token, body: { userId, archived } });
 export const adminRemove = (token, userId) =>
   api("/api/admin/remove", { method: "POST", token, body: { userId } });
 export const adminResetPassword = (token, userId) =>

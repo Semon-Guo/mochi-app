@@ -71,7 +71,7 @@ function MemberRow({ m, me, token, onDone, onNotice }) {
   return (
     <div style={{ padding: "10px 0", borderTop: `1px solid ${C.hair}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-        <Avatar user={m} size={30} />
+        <span style={{ filter: m.archivedAt ? "grayscale(1)" : "none" }}><Avatar user={m} size={30} /></span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
             {m.displayName}
@@ -79,7 +79,7 @@ function MemberRow({ m, me, token, onDone, onNotice }) {
           </div>
           <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
             @{m.username} · <span style={{ color: roleColor, fontWeight: 700 }}>{roleLabel}</span>
-            {m.pendingRole && <span style={{ color: C.amber }}> · 申请导师中</span>}
+            {m.archivedAt && <span style={{ color: C.dim }}> · 已离组</span>}
           </div>
         </div>
       </div>
@@ -103,17 +103,29 @@ function MemberRow({ m, me, token, onDone, onNotice }) {
             onClick={() => run("rv", () => Sync.adminRevokeSessions(token, m.id),
               (r) => `✓ 已让 ${m.displayName} 的 ${r.revoked} 个登录设备全部登出`)}
             style={{ ...ghost, opacity: busy ? .5 : 1 }}>强制登出</button>
+          {m.archivedAt ? (
+            <button disabled={!!busy}
+              onClick={() => run("un", () => Sync.adminArchive(token, m.id, false),
+                () => `✓ ${m.displayName} 已恢复在组`)}
+              style={{ ...ghost, opacity: busy ? .5 : 1 }}>恢复在组</button>
+          ) : (
+            <button disabled={!!busy}
+              onClick={() => run("ar", () => Sync.adminArchive(token, m.id, true),
+                () => `✓ ${m.displayName} 已标记离组。记录一条没删，在导师端「已离组」里仍可查看`)}
+              style={{ ...ghost, opacity: busy ? .5 : 1 }}>标记离组</button>
+          )}
+          {/* 彻底删除只该用来清理误注册，所以要点两下、文案也说明白 */}
           <button disabled={!!busy}
             onClick={() => {
               if (confirm !== "remove") { setConfirm("remove"); return; }
               run("rm", () => Sync.adminRemove(token, m.id),
-                (r) => `✓ 已移除 ${m.displayName}，连同 ${r.removed?.records || 0} 条记录、` +
+                (r) => `✓ 已删除 ${m.displayName}，连同 ${r.removed?.records || 0} 条记录、` +
                        `${r.removed?.projects || 0} 个项目、${r.removed?.photos || 0} 张照片`);
             }}
             style={{ ...btn(confirm === "remove" ? C.red : "#FFF",
-              confirm === "remove" ? "#FFF" : C.red,
+              confirm === "remove" ? "#FFF" : C.dim,
               { border: `1px solid ${confirm === "remove" ? C.red : C.line}`, opacity: busy ? .5 : 1 }) }}>
-            {confirm === "remove" ? "确认移除？数据不可恢复" : "移除"}
+            {confirm === "remove" ? "确认彻底删除？记录一并消失，不可恢复" : "彻底删除"}
           </button>
         </div>
       )}
@@ -200,7 +212,8 @@ export function AdminPanel({ auth, onChanged }) {
       </Panel>
 
       <Panel title={`成员 · ${members.length}`}
-        hint="角色即时生效。自己的角色改不了，也删不掉自己——防止把自己锁在门外。">
+        hint="「标记离组」保留全部记录，只是把人从导师端主视图挪到「已离组」里；
+             「彻底删除」才会连数据一起清，只用于误注册。自己的角色改不了、也删不掉自己。">
         {members.map((m) => (
           <MemberRow key={m.id} m={m} me={auth.user} token={token}
             onDone={reload} onNotice={setNotice} />
