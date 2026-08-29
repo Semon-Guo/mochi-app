@@ -20,7 +20,6 @@ from pathlib import Path
 PORT = 39217
 BASE = f"http://127.0.0.1:{PORT}"
 INVITE = "test-invite-code"
-ADVISOR_INVITE = "test-advisor-code-longer"
 HERE = Path(__file__).parent
 
 passed = failed = 0
@@ -60,7 +59,7 @@ def call(method, path, body=None, token=None, raw=None, ctype="application/json"
 def main():
     tmp = tempfile.mkdtemp(prefix="mochi-test-")
     env = {**os.environ, "MOCHI_DATA": tmp, "MOCHI_PORT": str(PORT),
-           "MOCHI_INVITE_CODE": INVITE, "MOCHI_ADVISOR_CODE": ADVISOR_INVITE,
+           "MOCHI_INVITE_CODE": INVITE,
            "MOCHI_ORIGINS": "https://semon-guo.github.io,http://localhost:5173"}
     proc = subprocess.Popen([sys.executable, str(HERE / "mochi_server.py")], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -298,75 +297,114 @@ def main():
         s, r = call("GET", "/api/me", token=stu1)
         chk("认证接口也未受影响", s == 200, f"HTTP {s}")
 
-        print("\n── 导师码只换来申请，不换来权限 ──")
-        s, r = call("POST", "/api/register", {"username": "prof2", "password": "prof2-passwd-1",
-                                              "displayName": "待审批导师", "inviteCode": ADVISOR_INVITE})
-        prof2 = r.get("token")
-        prof2_id = r.get("user", {}).get("id")
-        chk("用导师码注册后仍是学生身份", s == 200 and r["user"]["role"] == "student",
-            r.get("user", {}).get("role"))
-        chk("但登记了待审批的导师申请", r["user"].get("pendingRole") == "advisor",
-            str(r["user"].get("pendingRole")))
-        s, r = call("GET", "/api/overview", token=prof2)
-        chk("审批前拿不到全组数据", s == 403, f"HTTP {s}")
-
-        s, r = call("GET", "/api/admin/requests", token=prof2)
-        chk("待审批者自己看不了审批列表", s == 403, f"HTTP {s}")
-        s, r = call("GET", "/api/admin/requests", token=advisor)
-        chk("普通导师也无权审批", s == 403, f"HTTP {s}")
-
-        # 把 prof 提为管理员
-        rc = subprocess.run([sys.executable, str(HERE / "set_role.py"), "prof", "admin"],
-                            env=env, capture_output=True, text=True)
+        print("\n── 管理员任命角色 ──")
+        subprocess.run([sys.executable, str(HERE / "set_role.py"), "prof", "admin"],
+                       env=env, capture_output=True, text=True)
         s, r = call("POST", "/api/login", {"username": "prof", "password": "prof-passwd-1"})
         admin = r.get("token")
-        chk("管理员登录", s == 200 and r.get("user", {}).get("role") == "admin",
-            f"HTTP {s} role={r.get('user',{}).get('role')} | set_role: {(rc.stdout+rc.stderr).strip()[:90]}")
+        chk("管理员登录", s == 200 and r["user"]["role"] == "admin", r.get("user", {}).get("role"))
 
-        s, r = call("GET", "/api/admin/requests", token=admin)
-        chk("管理员能看到待审批列表",
-            s == 200 and any(x["username"] == "prof2" for x in r.get("requests", [])),
-            f"n={len(r.get('requests', []))}")
+        s, r = call("POST", "/api/register", {"username": "prof2", "password": "prof2-passwd-1",
+                                              "displayName": "待任命", "inviteCode": INVITE})
+        prof2_id = r["user"]["id"]
+        chk("注册一律是学生（导师码已取消）", r["user"]["role"] == "student", r["user"]["role"])
 
-        s, r = call("GET", "/api/overview", token=admin)
-        chk("概览里带出待审批数量", r.get("pendingRequests", 0) >= 1, str(r.get("pendingRequests")))
-        chk("管理员本身也能读全组", "members" in r)
+        s, r = call("POST", "/api/admin/role", {"userId": prof2_id, "role": "advisor"}, token=stu1)
+        chk("非管理员不能任命", s == 403, f"HTTP {s}")
 
-        s, r = call("POST", "/api/admin/decide", {"userId": prof2_id, "approve": True}, token=prof2)
-        chk("非管理员不能审批", s == 403, f"HTTP {s}")
-
-        s, r = call("POST", "/api/admin/decide", {"userId": prof2_id, "approve": True}, token=admin)
-        chk("管理员批准后变成导师", s == 200 and r["user"]["role"] == "advisor",
-            r.get("user", {}).get("role"))
-        chk("申请标记被清掉", not r["user"].get("pendingRole"))
+        s, r = call("POST", "/api/admin/role", {"userId": prof2_id, "role": "advisor"}, token=admin)
+        chk("管理员直接任命为导师", s == 200 and r["user"]["role"] == "advisor", r["user"]["role"])
 
         s, r = call("POST", "/api/login", {"username": "prof2", "password": "prof2-passwd-1"})
         prof2 = r.get("token")
         s, r = call("GET", "/api/overview", token=prof2)
-        chk("批准后才拿得到全组数据", s == 200 and "members" in r, f"HTTP {s}")
+        chk("任命后立即拿到全组读取权限", s == 200 and "members" in r, f"HTTP {s}")
 
-        s, r = call("POST", "/api/admin/decide", {"userId": prof2_id, "approve": True}, token=admin)
-        chk("重复审批被拒", s == 409, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/role", {"userId": prof2_id, "role": "student"}, token=admin)
+        chk("能收回为学生", s == 200 and r["user"]["role"] == "student")
 
-        # 驳回的路径
-        s, r = call("POST", "/api/register", {"username": "prof3", "password": "prof3-passwd-1",
-                                              "displayName": "会被驳回的", "inviteCode": ADVISOR_INVITE})
-        prof3_id = r["user"]["id"]
-        s, r = call("POST", "/api/admin/decide", {"userId": prof3_id, "approve": False}, token=admin)
-        chk("驳回后仍是学生", s == 200 and r["user"]["role"] == "student", r["user"]["role"])
-        chk("驳回后申请标记也清掉", not r["user"].get("pendingRole"))
-        s, r = call("GET", "/api/admin/requests", token=admin)
-        chk("驳回的不再出现在待审批里",
-            not any(x["username"] == "prof3" for x in r.get("requests", [])))
+        me = call("GET", "/api/me", token=admin)[1]["user"]
+        s, r = call("POST", "/api/admin/role", {"userId": me["id"], "role": "student"}, token=admin)
+        chk("不能修改自己的角色（否则会把自己锁在门外）", s == 403, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/role", {"userId": "nonexistent", "role": "advisor"}, token=admin)
+        chk("对不存在的用户报 404", s == 404, f"HTTP {s}")
 
-        s, r = call("POST", "/api/register", {"username": "stu3", "password": "stu3-passwd-1",
+        print("\n── 重置密码与吊销会话 ──")
+        s, r = call("POST", "/api/admin/reset-password", {"userId": prof2_id}, token=stu1)
+        chk("非管理员不能重置密码", s == 403, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/reset-password", {"userId": prof2_id}, token=admin)
+        temp = r.get("tempPassword")
+        chk("管理员重置出临时密码", s == 200 and len(temp or "") >= 8, f"len={len(temp or '')}")
+        s, r = call("GET", "/api/me", token=prof2)
+        chk("重置后旧会话立即失效", s == 401, f"HTTP {s}")
+        s, r = call("POST", "/api/login", {"username": "prof2", "password": temp})
+        prof2 = r.get("token")
+        chk("能用临时密码登录", s == 200, f"HTTP {s}")
+
+        s, r = call("POST", "/api/password", {"oldPassword": "wrong", "newPassword": "brand-new-1"},
+                    token=prof2)
+        chk("改密码要验旧密码", s == 401, f"HTTP {s}")
+        s, r = call("POST", "/api/password", {"oldPassword": temp, "newPassword": "short"}, token=prof2)
+        chk("新密码太短被拒", s == 400, f"HTTP {s}")
+        s, r = call("POST", "/api/password", {"oldPassword": temp, "newPassword": "brand-new-pass-1"},
+                    token=prof2)
+        chk("本人能改密码", s == 200 and r.get("ok"))
+        s, r = call("POST", "/api/login", {"username": "prof2", "password": "brand-new-pass-1"})
+        prof2 = r.get("token")
+        chk("新密码可用", s == 200)
+
+        s, r = call("POST", "/api/admin/revoke-sessions", {"userId": prof2_id}, token=admin)
+        chk("能吊销某人全部会话", s == 200 and r.get("revoked", 0) >= 1, f"n={r.get('revoked')}")
+        s, r = call("GET", "/api/me", token=prof2)
+        chk("吊销后 token 立即失效", s == 401, f"HTTP {s}")
+
+        print("\n── 邀请码管理 ──")
+        s, r = call("GET", "/api/admin/invite", token=stu1)
+        chk("非管理员看不到邀请码", s == 403, f"HTTP {s}")
+        s, r = call("GET", "/api/admin/invite", token=admin)
+        chk("管理员能查看当前邀请码", s == 200 and r.get("code") == INVITE, r.get("code"))
+        s, r = call("POST", "/api/admin/invite", {"code": "short"}, token=admin)
+        chk("过短的邀请码被拒", s == 400, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/invite", {"code": "brand-new-invite"}, token=admin)
+        chk("能更换邀请码", s == 200 and r.get("code") == "brand-new-invite")
+        s, r = call("POST", "/api/register", {"username": "newbie", "password": "newbie-pass-1",
                                               "inviteCode": INVITE})
-        chk("学生码仍然只给学生身份", s == 200 and r["user"]["role"] == "student",
-            r.get("user", {}).get("role"))
+        chk("旧邀请码立即失效", s in (403, 429), f"HTTP {s}")
+        s, r = call("POST", "/api/register", {"username": "newbie", "password": "newbie-pass-1",
+                                              "inviteCode": "brand-new-invite"})
+        chk("新邀请码可用（无需重启服务）", s == 200, f"HTTP {s}")
+        newbie_id = r.get("user", {}).get("id")
 
-        s, r = call("POST", "/api/register", {"username": "stu4", "password": "stu4-passwd-1",
-                                              "inviteCode": ADVISOR_INVITE[:-1]})
-        chk("导师码差一个字符也不行", s in (403, 429), f"HTTP {s}")
+        print("\n── 移除成员 ──")
+        call("POST", "/api/sync", {"records": [
+            {"id": "nb1", "updatedAt": now, "data": {"at": now, "text": "新人的记录"}}]},
+            token=r.get("token"))
+        s, r = call("POST", "/api/admin/remove", {"userId": newbie_id}, token=stu1)
+        chk("非管理员不能移除成员", s == 403, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/remove", {"userId": newbie_id}, token=admin)
+        chk("管理员能移除成员", s == 200 and r.get("ok"), f"HTTP {s}")
+        chk("连同其数据一并删除", (r.get("removed") or {}).get("records") == 1,
+            str(r.get("removed")))
+        s, r = call("GET", "/api/users", token=admin)
+        chk("成员列表里不再有他", not any(u["username"] == "newbie" for u in r.get("users", [])))
+        s, r = call("POST", "/api/admin/remove", {"userId": me["id"]}, token=admin)
+        chk("不能删除自己", s == 403, f"HTTP {s}")
+
+        print("\n── 服务器状态与审计日志 ──")
+        s, r = call("GET", "/api/admin/status", token=stu1)
+        chk("非管理员看不到服务器状态", s == 403, f"HTTP {s}")
+        s, r = call("GET", "/api/admin/status", token=admin)
+        chk("能查看服务器状态", s == 200 and "counts" in r, f"HTTP {s}")
+        chk("含磁盘信息", (r.get("disk") or {}).get("freeBytes", 0) > 0)
+        chk("含数据量统计", r["counts"].get("users", 0) > 0, str(r["counts"].get("users")))
+
+        s, r = call("GET", "/api/admin/audit", token=stu1)
+        chk("非管理员看不到审计日志", s == 403, f"HTTP {s}")
+        s, r = call("GET", "/api/admin/audit", token=admin)
+        acts = [e["action"] for e in r.get("entries", [])]
+        chk("管理操作都留了痕", s == 200 and "改角色" in acts and "移除成员" in acts,
+            "，".join(dict.fromkeys(acts))[:70])
+        chk("审计记录带操作者", all(e.get("actor") for e in r.get("entries", [])))
 
         print("\n── 头像与资料 ──")
         TINY = "data:image/jpeg;base64," + "A" * 200

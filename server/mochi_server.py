@@ -33,11 +33,9 @@ DATA_DIR = Path(os.environ.get("MOCHI_DATA") or Path.home() / "mochi-data")
 PHOTO_DIR = DATA_DIR / "photos"
 DB_PATH = DATA_DIR / "mochi.db"
 PORT = int(os.environ.get("MOCHI_PORT") or 3000)
-INVITE_CODE = os.environ.get("MOCHI_INVITE_CODE", "")
-# 导师码：用它注册直接拿到导师身份。这等于把「谁能看全组记录」的门槛从
-# 「需要 SSH 到服务器」降到「知道一串字符」，所以它该比学生码更长、
-# 只私下发给导师本人，泄露了就立刻换掉（换码不影响已注册的账号）。
-ADVISOR_CODE = os.environ.get("MOCHI_ADVISOR_CODE", "")
+# 环境变量里的邀请码只作为初始值，之后以数据库里的为准——
+# 管理员在界面上换码要能立刻生效，不该还得 SSH 上来改文件重启。
+INVITE_CODE_ENV = os.environ.get("MOCHI_INVITE_CODE", "")
 ORIGINS = [o.strip() for o in (os.environ.get("MOCHI_ORIGINS") or
            "https://semon-guo.github.io,http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
 
@@ -111,6 +109,15 @@ CREATE TABLE IF NOT EXISTS records (
 CREATE INDEX IF NOT EXISTS idx_records_seq ON records(seq);
 CREATE INDEX IF NOT EXISTS idx_records_owner ON records(owner_id, seq);
 
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
+  target TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at DESC);
+
 CREATE TABLE IF NOT EXISTS push_subs (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   endpoint TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
@@ -167,6 +174,37 @@ def init_db():
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
     c.commit()
     c.close()
+
+
+def get_setting(key, default=""):
+    try:
+        row = conn().execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
+def set_setting(key, value):
+    now = int(time.time() * 1000)
+    c = conn()
+    with _write_lock:
+        c.execute("INSERT INTO settings (key, value, updated_at) VALUES (?,?,?)"
+                  " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                  (key, str(value), now))
+        c.commit()
+
+
+def audit(actor, action, target=None, detail=None):
+    """管理操作一律留痕。出了事要能回答「谁在什么时候动了什么」。"""
+    try:
+        c = conn()
+        with _write_lock:
+            c.execute("INSERT INTO audit_log (at, actor, action, target, detail) VALUES (?,?,?,?,?)",
+                      (int(time.time() * 1000), actor, action, target, detail))
+            c.commit()
+        print(f"[audit] {actor} {action} {target or ''} {detail or ''}", flush=True)
+    except Exception as e:
+        print(f"[audit] 写入失败: {e}", flush=True)
 
 
 def next_seq(c):
@@ -341,26 +379,20 @@ def register(body, client_ip="?"):
         raise HttpError(429, f"尝试次数过多，请 {wait // 60 + 1} 分钟后再试")
 
     # 用哪个码注册，决定拿到什么身份。两个码都没配时才允许裸注册。
+    # 注册一律是学生。导师和管理员由管理员在界面上直接任命——
+    # 靠一串字符换权限的路子已经取消了。
     code = str(body.get("inviteCode") or "")
-    pending = None
-    if ADVISOR_CODE and hmac.compare_digest(code, ADVISOR_CODE):
-        # 关键：导师码换来的是一张「申请单」，不是权限本身。
-        # 管理员点头之前，这个账号和普通学生没有任何区别。
-        role, pending = "student", "advisor"
-    elif INVITE_CODE and hmac.compare_digest(code, INVITE_CODE):
-        role = "student"
-    elif not INVITE_CODE and not ADVISOR_CODE:
-        role = "student"
-    else:
+    invite = get_setting("invite_code", INVITE_CODE_ENV)
+    if invite and not hmac.compare_digest(code, invite):
         note_fail([f"reg:{client_ip}"])          # 邀请码也不能随便试
         raise HttpError(403, "邀请码不正确")
+    role, pending = "student", None
 
     if c.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         raise HttpError(409, "用户名已被占用")
 
     uid, now = new_id(), int(time.time() * 1000)
-    if pending:
-        print(f"[auth] 用导师码注册，待审批: {username} 来自 {client_ip}", flush=True)
+
     with _write_lock:
         c.execute("INSERT INTO users (id, username, password_hash, display_name, role, created_at,"
                   " pending_role, requested_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -548,6 +580,191 @@ def set_profile(user, body):
     return {"user": public_user(row)}
 
 
+# ─────────────────────────── 管理功能 ───────────────────────────
+
+def _target(c, user_id):
+    row = c.execute("SELECT * FROM users WHERE id = ?", (str(user_id or ""),)).fetchone()
+    if not row:
+        raise HttpError(404, "没有这个用户")
+    return row
+
+
+def _count_admins(c, exclude=None):
+    q = "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+    args = ()
+    if exclude:
+        q += " AND id != ?"
+        args = (exclude,)
+    return c.execute(q, args).fetchone()[0]
+
+
+def admin_set_role(user, target_id, role):
+    """直接任命角色。取代了原来的导师邀请码。"""
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能改角色")
+    if role not in ROLES:
+        raise HttpError(400, "角色不对")
+    c = conn()
+    row = _target(c, target_id)
+    if row["id"] == user["id"]:
+        # 自己把自己降级就再也改不回来了，只能 SSH 上服务器救
+        raise HttpError(403, "不能修改自己的角色，请让另一位管理员操作")
+    if row["role"] == "admin" and role != "admin" and _count_admins(c, row["id"]) == 0:
+        raise HttpError(409, "这是最后一个管理员，降级后就没人能管理了")
+
+    now = int(time.time() * 1000)
+    with _write_lock:
+        c.execute("UPDATE users SET role = ?, pending_role = NULL, requested_at = NULL,"
+                  " updated_at = ? WHERE id = ?", (role, now, row["id"]))
+        c.commit()
+    audit(user["username"], "改角色", row["username"], f'{row["role"]} → {role}')
+    return {"user": public_user(c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone())}
+
+
+def admin_remove_user(user, target_id):
+    """移除成员，连同其全部数据。毕业离组时用。"""
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能移除成员")
+    c = conn()
+    row = _target(c, target_id)
+    if row["id"] == user["id"]:
+        raise HttpError(403, "不能删除自己")
+    if row["role"] == "admin" and _count_admins(c, row["id"]) == 0:
+        raise HttpError(409, "这是最后一个管理员，不能删除")
+
+    # 先数清楚要删多少，审计日志里写明白——删完就查不到了
+    counts = {t: c.execute(f"SELECT COUNT(*) FROM {t} WHERE owner_id = ?", (row["id"],)).fetchone()[0]
+              for t in SYNC_TABLES}
+    photo_ids = [r["id"] for r in
+                 c.execute("SELECT id FROM photos WHERE owner_id = ?", (row["id"],)).fetchall()]
+    with _write_lock:
+        c.execute("DELETE FROM users WHERE id = ?", (row["id"],))   # 外键级联删掉其余
+        c.commit()
+    for pid in photo_ids:                                            # 磁盘上的文件不受外键管
+        try:
+            (PHOTO_DIR / pid).unlink(missing_ok=True)
+        except Exception:
+            pass
+    audit(user["username"], "移除成员", row["username"],
+          " ".join(f"{k}={v}" for k, v in counts.items()) + f" 照片文件={len(photo_ids)}")
+    return {"ok": True, "removed": counts}
+
+
+def admin_reset_password(user, target_id):
+    """生成一次性临时密码。
+
+    管理员不能指定密码——那样他就知道了别人的密码，之后能冒充对方。
+    随机生成、只回显一次，让本人登录后自己改。
+    """
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能重置密码")
+    c = conn()
+    row = _target(c, target_id)
+    temp = secrets.token_urlsafe(9)
+    now = int(time.time() * 1000)
+    with _write_lock:
+        c.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                  (hash_password(temp), now, row["id"]))
+        c.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))   # 旧会话一并踢掉
+        c.commit()
+    audit(user["username"], "重置密码", row["username"], "旧会话已全部吊销")
+    return {"ok": True, "tempPassword": temp, "username": row["username"]}
+
+
+def admin_revoke_sessions(user, target_id):
+    """强制某人所有设备登出。设备丢了、或者怀疑账号被盗时用。"""
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能吊销会话")
+    c = conn()
+    row = _target(c, target_id)
+    with _write_lock:
+        n = c.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],)).rowcount
+        c.commit()
+    audit(user["username"], "吊销会话", row["username"], f"{n} 个会话")
+    return {"ok": True, "revoked": n}
+
+
+def admin_invite(user, new_code=None):
+    """查看或更换邀请码。存数据库，改完立刻生效，不用重启。"""
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能管理邀请码")
+    if new_code is None:
+        return {"code": get_setting("invite_code", INVITE_CODE_ENV)}
+    code = str(new_code).strip()
+    if code and len(code) < 6:
+        raise HttpError(400, "邀请码至少 6 位")
+    set_setting("invite_code", code)
+    audit(user["username"], "更换邀请码", None, "已清空（任何人可注册）" if not code else "已更新")
+    return {"code": code}
+
+
+def admin_status(user):
+    """服务器状态：磁盘、数据量、备份、推送。省得为了看一眼还要 SSH。"""
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能查看")
+    c = conn()
+    counts = {t: c.execute(f"SELECT COUNT(*) FROM {t} WHERE deleted_at IS NULL").fetchone()[0]
+              for t in SYNC_TABLES}
+    counts["users"] = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    counts["sessions"] = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+
+    try:
+        st = os.statvfs(DATA_DIR)
+        disk = {"freeBytes": st.f_bavail * st.f_frsize, "totalBytes": st.f_blocks * st.f_frsize}
+    except Exception:
+        disk = None
+
+    photo_bytes = 0
+    try:
+        for f in PHOTO_DIR.iterdir():
+            if f.is_file():
+                photo_bytes += f.stat().st_size
+    except Exception:
+        pass
+
+    backups = []
+    try:
+        bdir = Path.home() / "mochi" / "backups"
+        for f in sorted(bdir.glob("mochi-*.db"), key=lambda x: x.stat().st_mtime, reverse=True)[:3]:
+            backups.append({"name": f.name, "at": int(f.stat().st_mtime * 1000), "size": f.stat().st_size})
+    except Exception:
+        pass
+
+    return {
+        "counts": counts, "disk": disk, "photoBytes": photo_bytes,
+        "dbBytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+        "backups": backups, "push": bool(PUSH_OK and VAPID),
+        "inviteSet": bool(get_setting("invite_code", INVITE_CODE_ENV)),
+        "now": int(time.time() * 1000),
+    }
+
+
+def admin_audit(user, limit=60):
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能查看")
+    rows = conn().execute("SELECT * FROM audit_log ORDER BY at DESC LIMIT ?",
+                          (max(1, min(int(limit or 60), 200)),)).fetchall()
+    return {"entries": [{"at": r["at"], "actor": r["actor"], "action": r["action"],
+                         "target": r["target"], "detail": r["detail"]} for r in rows]}
+
+
+def change_password(user, body):
+    """本人改密码。要验旧密码——否则设备被人短暂拿到就能改掉密码锁死账号。"""
+    c = conn()
+    row = c.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not verify_password(str(body.get("oldPassword") or ""), row["password_hash"]):
+        raise HttpError(401, "当前密码不正确")
+    new = str(body.get("newPassword") or "")
+    if len(new) < 8:
+        raise HttpError(400, "新密码至少 8 位")
+    now = int(time.time() * 1000)
+    with _write_lock:
+        c.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                  (hash_password(new), now, row["id"]))
+        c.commit()
+    return {"ok": True}
+
+
 def list_requests(user):
     """待审批的导师申请。只有管理员看得到。"""
     if not is_admin(user):
@@ -580,8 +797,7 @@ def decide_request(user, target_id, approve):
         c.execute("UPDATE users SET role = ?, pending_role = NULL, requested_at = NULL,"
                   " updated_at = ? WHERE id = ?", (new_role, now, row["id"]))
         c.commit()
-    print(f"[auth] {user['username']} {'批准' if approve else '驳回'}了 {row['username']} 的导师申请",
-          flush=True)
+    audit(user["username"], "批准导师申请" if approve else "驳回导师申请", row["username"])
     fresh = c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
     return {"user": public_user(fresh), "approved": bool(approve)}
 
@@ -880,6 +1096,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(set_avatar(self._need_user(), self._json_body().get("avatar")))
             if method == "POST" and path == "/api/profile":
                 return self._json(set_profile(self._need_user(), self._json_body()))
+            if method == "POST" and path == "/api/admin/role":
+                b = self._json_body()
+                return self._json(admin_set_role(self._need_user(), b.get("userId"), b.get("role")))
+            if method == "POST" and path == "/api/admin/remove":
+                return self._json(admin_remove_user(self._need_user(), self._json_body().get("userId")))
+            if method == "POST" and path == "/api/admin/reset-password":
+                return self._json(admin_reset_password(self._need_user(), self._json_body().get("userId")))
+            if method == "POST" and path == "/api/admin/revoke-sessions":
+                return self._json(admin_revoke_sessions(self._need_user(), self._json_body().get("userId")))
+            if method == "GET" and path == "/api/admin/invite":
+                return self._json(admin_invite(self._need_user()))
+            if method == "POST" and path == "/api/admin/invite":
+                return self._json(admin_invite(self._need_user(), self._json_body().get("code", "")))
+            if method == "GET" and path == "/api/admin/status":
+                return self._json(admin_status(self._need_user()))
+            if method == "GET" and path == "/api/admin/audit":
+                return self._json(admin_audit(self._need_user()))
+            if method == "POST" and path == "/api/password":
+                return self._json(change_password(self._need_user(), self._json_body()))
+
             if method == "GET" and path == "/api/admin/requests":
                 return self._json(list_requests(self._need_user()))
             if method == "POST" and path == "/api/admin/decide":
@@ -1098,15 +1334,8 @@ def main():
     # /home/wang 本身是 750 已经挡住了别人，这里是第二道防线。
     os.umask(0o077)
     init_db()
-    if not INVITE_CODE and not ADVISOR_CODE:
+    if not get_setting("invite_code", INVITE_CODE_ENV):
         print("⚠️  未设置邀请码，任何人都能注册")
-    if ADVISOR_CODE and ADVISOR_CODE == INVITE_CODE:
-        # 两码相同的话每个学生都会注册成导师，这是灾难性的配置错误，
-        # 与其带病运行不如直接拒绝启动
-        raise SystemExit("✗ MOCHI_ADVISOR_CODE 不能和 MOCHI_INVITE_CODE 相同，"
-                         "否则所有人注册都会拿到导师身份")
-    if ADVISOR_CODE and len(ADVISOR_CODE) < 16:
-        print("⚠️  导师码偏短，建议 16 位以上——它能直接换来全组记录的读取权限")
 
     global VAPID
     VAPID = load_vapid()

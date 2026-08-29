@@ -11,19 +11,23 @@
 |---|---|
 | `student` | 只读写自己的记录 |
 | `advisor` | 加上：读全组的实验记录（改不了别人的，服务端强制） |
-| `admin` | 加上：审批导师申请 |
+| `admin` | 加上：成员管理、邀请码、服务器状态、审计日志 |
 
-导师身份有两条途径：
+**注册一律是学生**，导师和管理员由管理员在界面上直接任命。曾经有过「导师邀请码」
+（用它注册即导师），后来取消了——那等于把「谁能看全组记录」的门槛降成「知道一串
+字符」，而任命本来就是低频操作，没必要为它开一道后门。
 
-- **导师邀请码**（`MOCHI_ADVISOR_CODE`）：用它注册**只是提交一份申请**，
-  账号先按学生对待，管理员批准后才变成导师
-- **`set_role.py`**：在服务器上直接指定，不走审批
+管理员在导师端的「管理」tab 里可以：任命/收回角色、重置密码、强制某人所有设备
+登出、移除成员（连同其全部数据）、更换邀请码、查看服务器状态和操作日志。
 
-这样即使导师码外泄，拿到的人也只能得到一个普通学生账号加一条待审批记录，
-读不到任何别人的数据——门槛仍然落在「管理员点头」上，而不是「知道一串字符」。
+几条刻意加的约束：
 
-两个码必须不同（相同的话每个学生都会变成待审批导师），服务启动时会直接拒绝。
-用导师码注册和每次审批都会在日志里留痕。管理员不能批准自己的申请。
+- **管理员不能改自己的角色、不能删自己**——降错了就只能 SSH 上服务器救
+- **不能降级或删除最后一个管理员**——否则没人能再管理
+- **重置密码只能生成随机临时密码**，管理员无法指定。否则他就知道了别人的密码，
+  之后能冒充对方；临时密码只回显一次，且会顺带吊销该用户所有旧会话
+- **本人改密码要验旧密码**，否则设备被人短暂拿到就能改掉密码锁死账号
+- 所有管理动作写入 `audit_log`，界面上可查
 
 ## 为什么是纯标准库 Python
 
@@ -38,7 +42,7 @@
 | 机器 | `wang@172.29.249.177` |
 | 代码 | `~/mochi/server/` |
 | 数据 | `~/mochi-data/`（`mochi.db` + `photos/`，权限 700/600） |
-| 配置 | `~/mochi/server.env`（含学生码和导师码，权限 600） |
+| 配置 | `~/mochi/server.env`（权限 600）；邀请码存在数据库里，界面可改 |
 | 日志 | `~/mochi/server.log` |
 | 备份 | `~/mochi/backups/`，每天 3:30 自动备份，保留 14 份 |
 | 服务 | systemd user unit `mochi.service`，已 enable + linger（重启自动拉起） |
@@ -77,8 +81,14 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | GET | `/api/me` | 当前用户 |
 | GET | `/api/users` | 成员列表（导师 / 管理员） |
 | GET | `/api/overview` | 全组统计聚合（导师 / 管理员） |
-| GET | `/api/admin/requests` | 待审批的导师申请（仅管理员） |
-| POST | `/api/admin/decide` | `{userId, approve}` 批准或驳回（仅管理员） |
+| POST | `/api/admin/role` | `{userId, role}` 任命角色（仅管理员） |
+| POST | `/api/admin/remove` | `{userId}` 移除成员及其全部数据（仅管理员） |
+| POST | `/api/admin/reset-password` | `{userId}` → `{tempPassword}`（仅管理员） |
+| POST | `/api/admin/revoke-sessions` | `{userId}` 强制登出（仅管理员） |
+| GET/POST | `/api/admin/invite` | 查看 / 更换邀请码（仅管理员） |
+| GET | `/api/admin/status` | 磁盘、数据量、备份、推送状态（仅管理员） |
+| GET | `/api/admin/audit` | 操作日志（仅管理员） |
+| POST | `/api/password` | `{oldPassword, newPassword}` 本人改密码 |
 | POST | `/api/avatar` | 设置头像（data URL，≤96KB） |
 | POST | `/api/profile` | 改显示名 |
 | GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, seq, more}` |

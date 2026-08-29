@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import * as Sync from "./sync.js";
 import { avatarFallback } from "./avatar.js";
+import { AdminPanel } from "./AdminPanel.jsx";
 
 /* 导师端：按学生或按项目看全组进展。
  *
@@ -386,7 +387,8 @@ export function AdvisorView({ data, onClose, onPhoto }) {
       </Panel>
 
       <div style={{ display: "flex", gap: 6, padding: "0 0 10px" }}>
-        {[["people", "按成员"], ["projects", "按项目"]].map(([k, label]) => (
+        {[["people", "按成员"], ["projects", "按项目"],
+          ...(Sync.isAdmin(auth?.user) ? [["admin", "管理"]] : [])].map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} style={{
             padding: "8px 16px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
             fontSize: 13, fontWeight: 600,
@@ -435,6 +437,10 @@ export function AdvisorView({ data, onClose, onPhoto }) {
             );
           })}
         </div>
+      )}
+
+      {tab === "admin" && Sync.isAdmin(auth?.user) && (
+        <AdminPanel auth={auth} onChanged={reload} />
       )}
 
       {tab === "projects" && (

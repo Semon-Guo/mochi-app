@@ -119,6 +119,21 @@ export const fetchMe = (token) => api("/api/me", { token });
 export const fetchUsers = (token) => api("/api/users", { token });
 export const fetchOverview = (token) => api("/api/overview", { token });
 export const fetchRequests = (token) => api("/api/admin/requests", { token });
+export const adminSetRole = (token, userId, role) =>
+  api("/api/admin/role", { method: "POST", token, body: { userId, role } });
+export const adminRemove = (token, userId) =>
+  api("/api/admin/remove", { method: "POST", token, body: { userId } });
+export const adminResetPassword = (token, userId) =>
+  api("/api/admin/reset-password", { method: "POST", token, body: { userId } });
+export const adminRevokeSessions = (token, userId) =>
+  api("/api/admin/revoke-sessions", { method: "POST", token, body: { userId } });
+export const adminGetInvite = (token) => api("/api/admin/invite", { token });
+export const adminSetInvite = (token, code) =>
+  api("/api/admin/invite", { method: "POST", token, body: { code } });
+export const adminStatus = (token) => api("/api/admin/status", { token });
+export const adminAudit = (token) => api("/api/admin/audit", { token });
+export const changePassword = (token, oldPassword, newPassword) =>
+  api("/api/password", { method: "POST", token, body: { oldPassword, newPassword } });
 export const decideRequest = (token, userId, approve) =>
   api("/api/admin/decide", { method: "POST", token, body: { userId, approve } });
 
