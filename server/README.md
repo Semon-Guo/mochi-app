@@ -71,7 +71,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 ~/mochi/server/test_server.py   # 跑回归测试（用临时库，不碰正式数据）
+python3 server/test_server.py   # 服务端 API（170 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -239,10 +239,27 @@ extendedKeyUsage 含 serverAuth。
 ### 测试
 
 ```bash
-node src/sync.test.mjs      # 同步引擎纯逻辑（42 项）
+node src/sync.test.mjs      # 同步引擎纯逻辑（49 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（74 项）
 python3 server/test_server.py   # 服务端 API（169 项）
 ```
+
+### 排版自检
+
+界面上的错测试基本抓不到。`dev/preview.html` 用**真实组件 + 造的数据**渲染，
+配 `dev/shot.mjs`（CDP 驱动无头 Chrome）截图，改完界面能自己看一眼：
+
+```bash
+npm run dev
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+  --remote-debugging-port=9333 --user-data-dir=/tmp/mochi-shot --hide-scrollbars &
+node dev/shot.mjs "http://localhost:5173/mochi-app/dev/preview.html?view=按项目" out.png
+```
+
+`?app=1` 看学生端，`?view=` 切页签，`?open=` 点进详情。
+
+`migrateLab` 每次启动抹掉项目 `ownerId`/`members` 那个 bug 就是这么发现的——
+渲染出学生端那一屏，看见本该是「组级项目」标签的位置摆着删除按钮。
 
 `sync.e2e.mjs` 会自己起一个临时服务实例，不碰正式数据。它覆盖了多设备双向同步、
 学生间隔离、导师只读、LWW 冲突、删除传播，以及**待办和计时数据确认不上传**。

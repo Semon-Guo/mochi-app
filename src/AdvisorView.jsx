@@ -12,7 +12,8 @@ import { AdminPanel } from "./AdminPanel.jsx";
  * 视觉上走「实验记录本」的路子——数字一律等宽字体，横平竖直的细线分栏，
  * 少装饰多信息。导师是来看进展的，不是来看动效的。
  *
- * 只读：服务端不接受导师改学生的记录，这里也不提供任何编辑入口。
+ * 学生的记录一律只读——服务端不接受导师改别人的记录，这里也不给编辑入口。
+ * 导师能写的只有三样：自己建的项目、回复、点赞。
  */
 
 const C = {
@@ -340,15 +341,14 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
         </div>
       )}
 
-      <div style={{ borderTop: `1px solid ${C.hair}`, marginTop: 11, paddingTop: 4,
-        display: "flex", alignItems: "flex-start", gap: 10 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <Thread thread={thread} meId={meId} onToggleLike={onLike}
-            onReply={onReply} onDelete={onDropComment} />
-        </div>
-        <button onClick={onSeen} style={{ marginTop: 9, flexShrink: 0, padding: "4px 10px",
-          borderRadius: 999, border: `1px solid ${C.line}`, background: "#FFF", color: C.dim,
-          fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>✓ 已读</button>
+      <div style={{ borderTop: `1px solid ${C.hair}`, marginTop: 11, paddingTop: 4 }}>
+        <Thread thread={thread} meId={meId} onToggleLike={onLike}
+          onReply={onReply} onDelete={onDropComment}
+          trailing={
+            <button onClick={onSeen} style={{ padding: "4px 10px", borderRadius: 999,
+              border: `1px solid ${C.line}`, background: "#FFF", color: C.dim, fontSize: 12,
+              fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>✓ 已读</button>
+          } />
       </div>
     </div>
   );
@@ -392,7 +392,12 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
 
   // 已读状态只存本机：这是导师一个人的阅读进度，没理由让被看的学生知道
   // 他读没读、什么时候读的。
-  const [seen, setSeen] = useState(() => loadSeen(auth?.user?.id, records.map((r) => r.id)));
+  //
+  // 头一回用的时候只把**两周前**的记录标成已读：全标已读的话新导师第一次
+  // 打开永远是「没有新记录」，看着像坏了；一条不标又会被课题组历史上的
+  // 几百条糊一脸。留最近两周，正好是「最近新增的」那个量。
+  const [seen, setSeen] = useState(() => loadSeen(auth?.user?.id,
+    records.filter((r) => (r.at || 0) < Date.now() - 14 * DAY).map((r) => r.id)));
   const markSeen = (ids) => setSeen((prev) => {
     const next = new Set(prev);
     ids.forEach((i) => next.add(i));
@@ -499,18 +504,26 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
             </div>
             {students.length === 0 && <div style={{ fontSize: 12.5, color: C.dim }}>组里还没有成员</div>}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {students.map((m) => {
+              {/* 名单外但已经有记录的人也得列出来（比如刚被移出的），否则那些记录
+                  在这一页上像是没有主人 */}
+              {[...students, ...people.map((uid) => byId[uid]).filter(
+                  (m) => m && !students.some((s2) => s2.id === m.id))].map((m) => {
                 const on = (p.members || []).includes(m.id);
+                const n = mine.filter((r) => r.ownerId === m.id).length;
                 return (
                   <button key={m.id} onClick={() => toggleMember(p, m.id)} style={{
-                    display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 7, cursor: "pointer",
                     border: `1.5px solid ${on ? C.ink : C.line}`, borderRadius: 999,
-                    padding: "5px 13px 5px 5px", fontFamily: "inherit",
+                    padding: "5px 12px 5px 5px", fontFamily: "inherit",
                     background: on ? C.ink : "#FFF", color: on ? "#FFF" : C.sub,
                   }}>
                     <Avatar user={m} size={22} />
                     <span style={{ fontSize: 12.5, fontWeight: 600 }}>{m.displayName}</span>
-                    <span style={{ fontSize: 12 }}>{on ? "✓" : "＋"}</span>
+                    {n > 0 && (
+                      <span style={{ fontSize: 11, fontFamily: MONO,
+                        color: on ? "rgba(255,255,255,.65)" : C.dim }}>{n}</span>
+                    )}
+                    <span style={{ fontSize: 12, opacity: on ? 1 : .6 }}>{on ? "✓" : "＋"}</span>
                   </button>
                 );
               })}
@@ -523,7 +536,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
             </div>
           </Panel>
         )}
-        {people.length > 0 && (
+        {!ownsProject(p) && people.length > 0 && (
           <Panel title="有记录的成员">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {people.map((uid) => {
@@ -557,7 +570,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
   return (
     <Shell onClose={onClose} title="课题组进展"
       subtitle={`${students.length} 名成员${archived.length ? ` · ${archived.length} 人已离组` : ""}` +
-        ` · 只读视图${Sync.isAdmin(auth?.user) ? " · 管理员" : ""}`}>
+        ` · 学生记录只读${Sync.isAdmin(auth?.user) ? " · 管理员" : ""}`}>
       {err && <Panel><div style={{ color: C.red, fontSize: 13 }}>{err}</div></Panel>}
 
       {Sync.isAdmin(auth?.user) && (
@@ -772,6 +785,11 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
                   border: `1px solid ${C.line}`, borderRadius: 14, background: C.panel, padding: 13,
                   borderLeft: `3px solid ${projColor[p.id]}` }}>
                 <div style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.35 }}>{p.name}</div>
+                {(!p.ownerId || p.ownerId === meId) && (
+                  <div style={{ fontSize: 10.5, color: C.blue, fontWeight: 600, marginTop: 4 }}>
+                    我建的 · {(p.members || []).length} 人在组
+                  </div>
+                )}
                 <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 11,
                   paddingTop: 10, borderTop: `1px solid ${C.hair}` }}>
                   <div><div style={{ fontSize: 15, fontWeight: 700, fontFamily: MONO }}>{mine.length}</div>

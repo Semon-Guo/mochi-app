@@ -6,6 +6,7 @@
 import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_AFTER,
          LAB_KINDS, ALL_KINDS } from "./sync.js";
 import { indexComments, threadOf, myLike } from "./comments.js";
+import { migrateLab } from "./migrate.js";
 
 let passed = 0, failed = 0;
 const chk = (name, cond, info = "") => {
@@ -119,6 +120,35 @@ const freshSync = (d) => ({
     records: [{ id: "r1", ownerId: "u1", updatedAt: 100, data: { projectId: "p1", text: "a" } }],
   });
   chk("projects 和 records 一起合并", out.projects.length === 1 && out.records.length === 1);
+}
+
+console.log("\n── migrateLab：每次启动都跑，不能悄悄少留字段 ──");
+{
+  const out = migrateLab({ projects: [
+    { id: "p1", name: "组级项目", color: { bg: "#fff", accent: "#000" },
+      ownerId: "prof", members: ["u1", "u2"] }] });
+  const p = out.projects[0];
+  chk("保住 ownerId（丢了学生就以为组级项目是自己的，还给删除入口）", p.ownerId === "prof");
+  chk("保住 members（丢了导师一重载再一推，服务器上的名单就被清空）",
+      JSON.stringify(p.members) === '["u1","u2"]', JSON.stringify(p.members));
+}
+{
+  // 老三层结构：setup/stack 要转成记录，而且只能转一次
+  const legacy = { projects: [{ id: "p1", code: "FPM", setup: "光路搭好了", stack: "4f 系统" }],
+                   experiments: [], records: [] };
+  const once = migrateLab(legacy);
+  chk("旧的 setup/stack 转成了记录", once.records.length === 2, String(once.records.length));
+  chk("项目名退回 code", once.projects[0].name === "FPM", once.projects[0].name);
+  const twice = migrateLab(once);
+  chk("再跑一遍不会重复转（否则每次启动都多两条）", twice.records.length === 2,
+      String(twice.records.length));
+}
+{
+  const out = migrateLab({ projects: [], experiments: [
+    { id: "e1", projectId: "p1", title: "第一次上手", startedAt: 100,
+      entries: [{ id: "en1", at: 200, text: "标定完成" }] }], records: [] });
+  chk("旧的实验层内容一条不丢", out.records.length === 2 && out.records[1].text === "标定完成");
+  chk("实验层被清空", out.experiments.length === 0);
 }
 
 console.log("\n── 评论索引 ──");

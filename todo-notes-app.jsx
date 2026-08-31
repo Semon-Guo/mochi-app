@@ -6,6 +6,7 @@ import { putPhoto, delPhoto } from "./src/photos.js";
 import { Photo, FullPhoto } from "./src/PhotoView.jsx";
 import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
 import { Thread, indexComments, threadOf, LIKE, REPLY } from "./src/Comments.jsx";
+import { NC, uid, migrateLab } from "./src/migrate.js";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -81,7 +82,6 @@ function save(d) {
   try { localStorage.setItem(SK, JSON.stringify(d)); saveFailed = null; }
   catch (e) { saveFailed = e?.name === "QuotaExceededError" ? "存储写满了，这次改动没保存" : "保存失败"; }
 }
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
 // Beijing time helpers
 function bjNow() { return new Date(Date.now() + (8 * 3600000) + (new Date().getTimezoneOffset() * 60000)); }
@@ -112,12 +112,6 @@ function hexA(hex, a) {
   const n = parseInt(h.length === 3 ? h.split("").map(c=>c+c).join("") : h, 16);
   return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
 }
-
-const NC = [
-  {bg:"#FFF8E7",accent:"#E8A838"},{bg:"#F0F7EE",accent:"#5A9E4B"},
-  {bg:"#EEF2FA",accent:"#5B7FC7"},{bg:"#FBF0F0",accent:"#D4696A"},
-  {bg:"#F5F0FA",accent:"#8B6AAF"},{bg:"#F0F8F8",accent:"#4A9A96"},
-];
 
 const WDAYS = ["周一","周二","周三","周四","周五","周六","周日"];
 const HOURS = Array.from({length:17},(_,i)=>i+9); // 9:00~25:00 (24=0:00, 25=1:00 next day)
@@ -154,28 +148,6 @@ function fmtRecDay(ts) {
   const d = toBJ(ts);
   const w = ["周日","周一","周二","周三","周四","周五","周六"][d.getDay()];
   return `${d.getMonth()+1}月${d.getDate()}日 ${w}`;
-}
-
-// P1 的项目/实验/记录三层拍平成项目 + 记录两层，一条内容都不丢
-function migrateLab(d) {
-  const projects = (d.projects || []).map(pr => ({
-    id: pr.id, name: pr.name || pr.code || "未命名项目",
-    startedAt: pr.startedAt || Date.now(),
-    color: pr.color || NC[0],
-  }));
-  const records = [...(d.records || [])];
-  (d.projects || []).forEach(pr => {
-    [pr.setup, pr.stack].filter(Boolean).forEach((txt, i) =>
-      records.push({ id: uid(), projectId: pr.id, at: (pr.startedAt || Date.now()) + i, weather: "", text: txt, photos: [] }));
-  });
-  (d.experiments || []).forEach(ex => {
-    if (ex.title) records.push({ id: uid(), projectId: ex.projectId, at: ex.startedAt || Date.now(), weather: "", text: ex.title, photos: [] });
-    (ex.entries || []).forEach(e => {
-      if (!e.text) return;
-      records.push({ id: e.id, projectId: ex.projectId, at: e.at, weather: "", text: e.text, photos: [] });
-    });
-  });
-  return { ...d, projects, records: records.sort((a, b) => a.at - b.at), experiments: [] };
 }
 
 /* 用 hover/pointer 判断是不是鼠标设备——比用宽度可靠：iPad 接键盘算桌面，
@@ -2222,7 +2194,7 @@ export default function MochiApp() {
   );
 }
 
-const CSS = `
+export const CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Outfit:wght@400;500;600;700&display=swap');
 
   /* 一处控制全局宽度：容器、悬浮条、提醒横幅、FAB 都跟着它走。
