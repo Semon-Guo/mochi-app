@@ -236,13 +236,19 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
             )}
           </div>
         ) : (projectName || r.weather) && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
             {projectName && (
-              <span style={{ fontSize: 10, color: projectColor || C.sub, fontWeight: 600,
-                background: `color-mix(in srgb, ${projectColor || C.sub} 12%, transparent)`,
-                padding: "1.5px 7px", borderRadius: 4 }}>{projectName}</span>
+              <>
+                <span style={{ width: 3, height: 14, borderRadius: 2, flexShrink: 0,
+                  background: projectColor || C.sub }} />
+                <span style={{ fontSize: 13.5, fontWeight: 700, lineHeight: 1.35, minWidth: 0,
+                  color: projectColor || C.sub, wordBreak: "break-word" }}>{projectName}</span>
+              </>
             )}
-            {r.weather && <span style={{ fontSize: 10.5, color: C.dim }}>{r.weather}</span>}
+            {r.weather && (
+              <span style={{ fontSize: 10.5, color: C.dim, flexShrink: 0,
+                marginLeft: "auto" }}>{r.weather}</span>
+            )}
           </div>
         )}
         <div style={{ fontSize: 13.5, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
@@ -357,15 +363,20 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
             </div>
           </div>
         </button>
-        {projectName && (
-          <span style={{ fontSize: 10.5, color: projectColor || C.sub, fontWeight: 700, flexShrink: 0,
-            background: `color-mix(in srgb, ${projectColor || C.sub} 12%, transparent)`,
-            padding: "3px 9px", borderRadius: 6 }}>{projectName}</span>
-        )}
       </div>
 
       <div className="read-fade" style={{ opacity: read ? 0.42 : 1,
         filter: read ? "grayscale(1)" : "none" }}>
+      {/* 项目名单独一行。原来它挤在作者右边且不许收缩，「双矩法实时公里级三维
+          重建」这种长名字会把人名整个顶没——而这恰恰是最该一眼看清的两样东西。 */}
+      {projectName && (
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
+          <span style={{ width: 3, height: 15, borderRadius: 2, flexShrink: 0,
+            background: projectColor || C.sub }} />
+          <span style={{ fontSize: 14.5, fontWeight: 700, lineHeight: 1.35,
+            color: projectColor || C.sub, wordBreak: "break-word" }}>{projectName}</span>
+        </div>
+      )}
       <div style={{ fontSize: 14, lineHeight: 1.7, color: C.ink, whiteSpace: "pre-wrap",
         wordBreak: "break-word" }}>
         {r.text || <span style={{ color: C.dim }}>（无正文）</span>}

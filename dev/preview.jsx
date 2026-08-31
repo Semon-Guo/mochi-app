@@ -46,7 +46,7 @@ const MOCK_TODOS = [
 ];
 const data = {
   projects: [
-    { id: "p1", name: "编码孔径成像", color: "#5B7FC7", ownerId: "u1" },
+    { id: "p1", name: "双矩法实时公里级三维重建", color: "#5B7FC7", ownerId: "u1" },
     { id: "p2", name: "组级项目：光场重建", color: "#5A9E4B", ownerId: "prof", members: ["u1", "u2"] },
     { id: "p3", name: "单像素相机标定", color: "#C08A1E", ownerId: "u2" },
   ],
