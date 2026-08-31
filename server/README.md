@@ -241,7 +241,7 @@ extendedKeyUsage 含 serverAuth。
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（74 项）
-python3 server/test_server.py   # 服务端 API（169 项）
+python3 server/test_server.py   # 服务端 API（169 项；服务器上多一项 scrypt，共 170）
 ```
 
 ### 推送
@@ -320,7 +320,7 @@ node dev/shot.mjs "http://localhost:5173/mochi-app/dev/preview.html?view=按项�
 
 ```bash
 python3 server/test_webpush.py    # 用 RFC 8291 官方测试向量逐字节比对加密结果（16 项）
-python3 server/test_push_e2e.py   # 全链路：服务器真推一条 → 本地假端点接收 → 解密还原（16 项）
+python3 server/test_push_e2e.py   # 全链路：服务器真推一条 → 本地假端点接收 → 解密还原（28 项）
 ```
 
 `test_push_e2e.py` 自己扮演浏览器（生成 P-256 订阅密钥、按 RFC 解密），
