@@ -329,19 +329,45 @@ export function mergeIncoming(data, sync, incoming, myUserId) {
  * （服务端要靠它判断归属和权限），再 POST 二进制。
  * 只处理被记录引用的照片——没被任何记录引用的是废弃的，不占用带宽。
  */
-export async function syncPhotos(data, token, sync) {
-  const referenced = new Set();
-  for (const r of data.records || []) for (const pid of r.photos || []) referenced.add(pid);
-  if (!referenced.size) return { uploaded: 0, downloaded: 0, changed: false };
 
+/**
+ * 算出这一轮该传哪些、该拉哪些。抽成纯函数是为了能单测——判断错了的代价
+ * 是每两分钟一次的死循环，而那种问题在真实环境里只会表现为日志里越堆越多
+ * 的 403，界面上一点动静都没有。
+ *
+ * 关键区分：**本地有这张照片 ≠ 这张照片是我的**。导师和管理员会拉到全组的
+ * 记录，照片下到本地只是为了看；把它们当成自己的往上传，服务端每次都回
+ * 403「不能上传别人的照片」，而且永远不会变。
+ */
+export function planPhotoSync({ records = [], localIds, state = {}, myUserId }) {
+  const referenced = new Set();
+  const mine = new Set();
+  for (const r of records) {
+    // 本机新建的记录没有 ownerId；从服务器拉回来的都带着。myUserId 缺失时
+    // 退回旧行为（一律当自己的），免得哪个调用点忘了传就把上传整个停掉。
+    const isMine = !r.ownerId || !myUserId || r.ownerId === myUserId;
+    for (const pid of r.photos || []) {
+      referenced.add(pid);
+      if (isMine) mine.add(pid);
+    }
+  }
+  return {
+    referenced,
+    toUpload: [...mine].filter((id) => localIds.has(id) && !state[id]?.up && !state[id]?.noUp),
+    toDownload: [...referenced].filter((id) => !localIds.has(id) && !state[id]?.gone),
+  };
+}
+
+export async function syncPhotos(data, token, sync, myUserId) {
   const state = { ...(sync.photos || {}) };
   let localIds;
   try { localIds = new Set(await localPhotoIds()); } catch { return { uploaded: 0, downloaded: 0, changed: false }; }
 
-  const toUpload = [...referenced].filter((id) => localIds.has(id) && !state[id]?.up);
-  const toDownload = [...referenced].filter((id) => !localIds.has(id) && !state[id]?.gone);
+  const { referenced, toUpload, toDownload } =
+    planPhotoSync({ records: data.records, localIds, state, myUserId });
+  if (!referenced.size) return { uploaded: 0, downloaded: 0, changed: false };
 
-  let uploaded = 0, downloaded = 0;
+  let uploaded = 0, downloaded = 0, marked = 0;
 
   if (toUpload.length) {
     const now = Date.now();
@@ -352,9 +378,14 @@ export async function syncPhotos(data, token, sync) {
         const blob = await getPhoto(id);
         if (!blob) continue;
         await api(`/api/photo/${id}`, { method: "POST", token, raw: blob, ctype: blob.type || "image/jpeg" });
-        state[id] = { up: true };
+        state[id] = { ...state[id], up: true };
         uploaded++;
-      } catch { /* 单张失败不影响其余，下一轮再试 */ }
+      } catch (e) {
+        // 403/404/410 重试多少次结果都一样：照片不是我的，或服务器上那条元数据
+        // 已经没了。不记下来就会变成每 2 分钟一次、永不停止的重试——曾经这样
+        // 在日志里堆了 424 次，而界面上毫无提示。其它错误（掉线等）留给下一轮。
+        if (/HTTP 40[34]|HTTP 410/.test(e.message)) { state[id] = { ...state[id], noUp: true }; marked++; }
+      }
     }
   }
 
@@ -362,16 +393,17 @@ export async function syncPhotos(data, token, sync) {
     try {
       const buf = await api(`/api/photo/${id}`, { token });
       await putPhoto(id, new Blob([buf], { type: "image/jpeg" }));
-      state[id] = { up: true };
+      state[id] = { ...state[id], up: true };
       downloaded++;
     } catch (e) {
       // 上传方还没传上来，或者不是自己/导师的照片——记下来别每轮都重试
-      if (/HTTP 404|HTTP 403/.test(e.message)) state[id] = { gone: true };
+      if (/HTTP 404|HTTP 403/.test(e.message)) { state[id] = { ...state[id], gone: true }; marked++; }
     }
   }
 
   sync.photos = state;
-  return { uploaded, downloaded, changed: uploaded > 0 || downloaded > 0 };
+  // marked 也算「变了」：这些标记不落盘的话，下一轮又会从头重试一遍
+  return { uploaded, downloaded, changed: uploaded > 0 || downloaded > 0 || marked > 0 };
 }
 
 /* ── 推送通知 ──

@@ -199,7 +199,9 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
         records: [...(base.records || []),
                   ...incoming.records.filter((r) => !r.deletedAt).map((r) => ({ ...r.data, id: r.id }))],
       };
-      const ph = await Sync.syncPhotos(withIncoming, auth.token, sync);
+      // 必须把「我是谁」传进去：导师/管理员本地存着全组的照片，
+      // 不告诉它哪些是自己的，它会把别人的照片一张张往上传。
+      const ph = await Sync.syncPhotos(withIncoming, auth.token, sync, auth.user?.id);
       if (ph.changed) applySync((prev) => ({ ...prev, _sync: { ...prev._sync, photos: sync.photos } }));
 
       // 开了推送才上报提醒——没开的话服务器不需要知道你要做什么、什么时候做

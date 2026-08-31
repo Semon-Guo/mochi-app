@@ -3,7 +3,7 @@
  * stampChanges 和 mergeIncoming 是整套同步的地基，LWW、墓碑、dirty 判断
  * 出一点偏差就会静默丢数据，所以这里把每条规则都钉住。
  */
-import { stampChanges, mergeIncoming, pendingCount, LAB_KINDS, ALL_KINDS } from "./sync.js";
+import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, LAB_KINDS, ALL_KINDS } from "./sync.js";
 
 let passed = 0, failed = 0;
 const chk = (name, cond, info = "") => {
@@ -117,6 +117,68 @@ const freshSync = (d) => ({
     records: [{ id: "r1", ownerId: "u1", updatedAt: 100, data: { projectId: "p1", text: "a" } }],
   });
   chk("projects 和 records 一起合并", out.projects.length === 1 && out.records.length === 1);
+}
+
+console.log("\n── planPhotoSync ──");
+// 这一组钉的是一个真上过线的 bug：管理员那台设备把学生的照片当成自己的
+// 往上传，服务端每次 403，客户端什么都不记，于是每 2 分钟重试一次，
+// 两天堆了 424 次，而界面上一点提示都没有。
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", photos: ["ph1"] }],          // 本机新建，没有 ownerId
+    localIds: new Set(["ph1"]), state: {}, myUserId: "me",
+  });
+  chk("自己新建的记录，照片要上传", plan.toUpload.includes("ph1"));
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "me", photos: ["ph1"] }],   // 第二台设备上拉回来的自己的记录
+    localIds: new Set(["ph1"]), state: {}, myUserId: "me",
+  });
+  chk("自己的记录在别的设备上拉回来，照片照样要上传", plan.toUpload.includes("ph1"));
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "student", photos: ["ph1"] }],
+    localIds: new Set(["ph1"]), state: {}, myUserId: "advisor",
+  });
+  chk("导师本地存着学生的照片，绝不能往上传", plan.toUpload.length === 0,
+      JSON.stringify(plan.toUpload));
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "student", photos: ["ph1"] }],
+    localIds: new Set(), state: {}, myUserId: "advisor",
+  });
+  chk("但导师本地没有时仍然要下载下来看", plan.toDownload.includes("ph1"));
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", photos: ["ph1"] }],
+    localIds: new Set(["ph1"]), state: { ph1: { up: true } }, myUserId: "me",
+  });
+  chk("传过的不重复传", plan.toUpload.length === 0);
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", photos: ["ph1"] }],
+    localIds: new Set(["ph1"]), state: { ph1: { noUp: true } }, myUserId: "me",
+  });
+  chk("标了永久失败就不再重试（死循环的刹车）", plan.toUpload.length === 0);
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "x", photos: ["ph1"] }],
+    localIds: new Set(), state: { ph1: { gone: true } }, myUserId: "me",
+  });
+  chk("下不到的不重复下", plan.toDownload.length === 0);
+}
+{
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "someone", photos: ["ph1"] }],
+    localIds: new Set(["ph1"]), state: {},
+  });
+  chk("不知道自己是谁时退回旧行为，不把上传整个停掉", plan.toUpload.includes("ph1"));
 }
 
 console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);

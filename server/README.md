@@ -216,7 +216,7 @@ extendedKeyUsage 含 serverAuth。
 ### 测试
 
 ```bash
-node src/sync.test.mjs      # 同步引擎纯逻辑（21 项）
+node src/sync.test.mjs      # 同步引擎纯逻辑（29 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（61 项）
 python3 server/test_server.py   # 服务端 API（152 项）
 ```
