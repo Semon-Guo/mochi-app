@@ -46,6 +46,7 @@ function MiniAvatar({ name, id, size = 22 }) {
 export function Thread({ thread, meId, canLike = true, onToggleLike, onReply, onDelete, trailing }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
+  const [pop, setPop] = useState(0);      // 变一次就重放一次弹跳动画
   const liked = myLike(thread, meId);
   const n = thread.likes.length;
 
@@ -87,12 +88,17 @@ export function Thread({ thread, meId, canLike = true, onToggleLike, onReply, on
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {canLike && (
-          <button onClick={onToggleLike} style={{
+          <button onClick={() => { if (!liked) setPop((v) => v + 1); onToggleLike?.(); }} style={{
             display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 10px",
             borderRadius: 999, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600,
             border: `1px solid ${liked ? C.amber : C.line}`,
             background: liked ? "#FFF6E5" : "#FFF", color: liked ? "#B07C14" : C.sub,
-          }}>{liked ? "★" : "☆"} 赞{n > 0 ? ` ${n}` : ""}</button>
+            transition: "background .2s ease, border-color .2s ease, color .2s ease",
+          }}>
+            {/* key 变了才会重新挂载，动画才能重放 */}
+            <span key={pop} className={pop ? "like-pop" : undefined}>{liked ? "★" : "☆"}</span>
+            赞{n > 0 ? ` ${n}` : ""}
+          </button>
         )}
         {!canLike && n > 0 && (
           <span style={{ fontSize: 12, color: "#B07C14", fontWeight: 600 }}>★ {n} 个赞</span>

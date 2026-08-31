@@ -1,9 +1,9 @@
 /* 用 CDP 驱动无头 Chrome 给 dev/preview.html 截图：等页面自己说「渲染好了」再拍，
    不靠 --virtual-time-budget（那个会把 IndexedDB 的 promise 卡死）。
-   用法: node shot.mjs <url> <out.png> [width] [waitTitlePrefix] */
+   用法: node shot.mjs <url> <out.png> [width] [waitTitlePrefix] [截图前跑的 JS] */
 import { writeFileSync } from "node:fs";
 
-const [url, out, width = "430", wait = "READY"] = process.argv.slice(2);
+const [url, out, width = "430", wait = "READY", act = ""] = process.argv.slice(2);
 const PORT = 9333;
 // 先起一个带调试端口的无头 Chrome：
 //   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
@@ -48,6 +48,12 @@ if (!ok) {
   const dom = await send("Runtime.evaluate", { expression: "document.body.innerText.slice(0,500)" });
   const errs = await send("Runtime.evaluate", { expression: "(window.__errs||[]).join(' | ')" });
   console.error("页面没就绪。title 一直不对。body:", dom?.result?.value, "errs:", errs?.result?.value);
+}
+
+// 截图前先做点事（比如点一下某个按钮，看交互之后的样子）
+if (act) {
+  await send("Runtime.evaluate", { expression: act, awaitPromise: true });
+  await new Promise((r) => setTimeout(r, 900));   // 等动画走完
 }
 
 // 整页高度

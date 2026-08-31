@@ -9,6 +9,7 @@
  *
  * 参数：?app=1 看学生端（否则是导师端）、?view=按项目 切页签、?open=xxx 点进详情。
  */
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AdvisorView } from "../src/AdvisorView.jsx";
 import MochiApp, { CSS } from "../todo-notes-app.jsx";   // 导师端依赖主应用的全局样式
@@ -77,6 +78,28 @@ function fakePhoto(id, hue) {
   return new Promise((res) => cv.toBlob((b) => putPhoto(id, b).then(res), "image/jpeg", 0.85));
 }
 
+/* actions 要真的改数据——空桩的话点赞点了没反应，动效和计数都验不了 */
+function Preview() {
+  const [d, setD] = useState(data);
+  const rid = () => "x" + Math.random().toString(36).slice(2, 8);
+  const actions = {
+    createProject: (name) => setD((x) => ({ ...x,
+      projects: [{ id: rid(), name, color: "#8B6AAF", ownerId: "prof", members: [] }, ...x.projects] })),
+    setProjectMembers: (id, members) => setD((x) => ({ ...x,
+      projects: x.projects.map((p) => (p.id === id ? { ...p, members } : p)) })),
+    addComment: (recordId, kind, text) => setD((x) => ({ ...x,
+      comments: [...x.comments, { id: rid(), ownerId: "prof", recordId, kind,
+        text: text || "", byName: "郭老师", at: Date.now() }] })),
+    dropComment: (c) => setD((x) => ({ ...x, comments: x.comments.filter((y) => y.id !== c.id) })),
+  };
+  return (
+    <>
+      <style>{CSS}</style>
+      <AdvisorView data={d} onClose={() => {}} onPhoto={() => {}} actions={actions} />
+    </>
+  );
+}
+
 const params = new URLSearchParams(location.search);
 
 /* ?app=1 → 渲染学生端的真实 MochiApp（种好 localStorage 再挂载） */
@@ -110,12 +133,7 @@ if (params.get("app")) {
 Promise.all([fakePhoto("ph1", 210), fakePhoto("ph2", 30), fakePhoto("ph3", 140), fakePhoto("ph4", 280)])
   .then(() => {
     createRoot(document.getElementById("root")).render(
-      <>
-        <style>{CSS}</style>
-        <AdvisorView data={data} onClose={() => {}} onPhoto={() => {}}
-          actions={{ createProject: () => {}, setProjectMembers: () => {},
-                     addComment: () => {}, dropComment: () => {} }} />
-      </>);
+      <Preview />);
     // 想看哪个页签就点哪个，然后再告诉截图脚本可以拍了
     const want = params.get("view");
     setTimeout(() => {

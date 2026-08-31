@@ -299,10 +299,15 @@ function RequestPanel({ token, onChanged }) {
    导师打开 app 想知道的第一件事是「谁又干活了」，所以内容直接铺开：头像、
    正文、缩略图、附件一次看全，赞和回复就地能点，不用点进去再点回来。 */
 function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
-                    onLike, onReply, onDropComment, onSeen, onOpenUser }) {
+                    onLike, onReply, onDropComment, onSeen, onOpenUser, read }) {
   return (
-    <div style={{ border: `1px solid ${C.line}`, borderRadius: 14, background: C.panel,
-      padding: "13px 14px", marginBottom: 10, borderLeft: `3px solid ${C.amber}` }}>
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 14, marginBottom: 10,
+      padding: "13px 14px", background: read ? "#FBFAF7" : C.panel,
+      borderLeft: `3px solid ${read ? C.line : C.amber}`,
+      transition: "border-left-color .38s ease, background .38s ease" }}>
+      {/* 只把内容淡下去，动作那一行保持清楚——不然想撤销还得眯着眼找按钮 */}
+      <div className="read-fade" style={{ opacity: read ? 0.42 : 1,
+        filter: read ? "grayscale(1)" : "none" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
         <button onClick={() => onOpenUser?.(r.ownerId)} style={{ border: "none", background: "none",
           padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
@@ -340,14 +345,20 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
           {r.files.map((f) => <FileLink key={f.id} f={f} />)}
         </div>
       )}
+      </div>
 
       <div style={{ borderTop: `1px solid ${C.hair}`, marginTop: 11, paddingTop: 4 }}>
         <Thread thread={thread} meId={meId} onToggleLike={onLike}
           onReply={onReply} onDelete={onDropComment}
           trailing={
-            <button onClick={onSeen} style={{ padding: "4px 10px", borderRadius: 999,
-              border: `1px solid ${C.line}`, background: "#FFF", color: C.dim, fontSize: 12,
-              fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>✓ 已读</button>
+            <button onClick={onSeen} title={read ? "点一下撤销" : "标为已读"}
+              style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+                border: `1px solid ${read ? "transparent" : C.line}`,
+                background: read ? C.hair : "#FFF", color: read ? C.sub : C.dim,
+                transition: "background .25s ease, color .25s ease, border-color .25s ease" }}>
+              {read ? "已读 ↺" : "✓ 已读"}
+            </button>
           } />
       </div>
     </div>
@@ -404,8 +415,30 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     persistSeen(meId, next, recordIds);
     return next;
   });
+  // 点错了能撤回来——卡片本来就还在眼前，撤销的入口不该藏起来
+  const unmarkSeen = (id) => setSeen((prev) => {
+    const next = new Set(prev);
+    next.delete(id);
+    persistSeen(meId, next, recordIds);
+    return next;
+  });
 
   const fresh = freshRecords(records, seen, meId);
+
+  // 标记已读不能让这一条当场从眼前消失——刚点完手还在那儿，列表却已经
+  // 跳了一格，很容易点错下一条。所以进入这个页签时钉一份快照：这一轮看到的
+  // 记录一直留在原位，读过的变灰，等下次再进来才真的清掉。
+  const [pinned, setPinned] = useState(() => new Set());
+  useEffect(() => {
+    if (tab !== "feed") return;
+    setPinned(new Set(freshRecords(records, seen, meId).map((r) => r.id)));
+    // 只依赖 tab：把 records/seen 放进来会让它每同步一次、每点一次已读就重来
+  }, [tab]);
+
+  // 屏幕上这一轮要显示的：没看过的，加上这一轮里刚被标成已读的
+  const feedList = records.filter((r) => r.ownerId !== meId
+    && (r.at || 0) >= Date.now() - FRESH_WINDOW
+    && (!seen.has(r.id) || pinned.has(r.id)));
 
   // 点赞和回复都算「看过了」——都动手互动了，再让他手动点一下已读是多余的
   const toggleLike = (r) => {
@@ -611,32 +644,33 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
 
       {tab === "feed" && (
         <>
-          {fresh.length === 0 ? (
+          {feedList.length === 0 ? (
             <Empty text={records.length ? "没有新记录，都看过了" : "还没有任何记录"} />
           ) : (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 2px 10px" }}>
                 <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>
-                  {fresh.length} 条还没看
+                  {fresh.length ? `${fresh.length} 条还没看` : "都看过了，下次进来清空"}
                 </span>
                 <button onClick={() => markSeen(fresh.map((r) => r.id))} style={{
                   marginLeft: "auto", border: "none", background: "none", cursor: "pointer",
                   color: C.dim, fontSize: 12, fontWeight: 600, fontFamily: "inherit", padding: 2,
                 }}>全部标为已读</button>
               </div>
-              {fresh.slice(0, 30).map((r) => (
+              {feedList.slice(0, 30).map((r) => (
                 <FeedCard key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto}
                   projectName={projects.find((p) => p.id === r.projectId)?.name}
                   projectColor={projColor[r.projectId]}
                   thread={threadOf(cmtIndex, r.id)} meId={meId}
                   onLike={() => toggleLike(r)} onReply={(t) => reply(r, t)}
                   onDropComment={actions.dropComment}
-                  onSeen={() => markSeen([r.id])}
+                  read={seen.has(r.id)}
+                  onSeen={() => (seen.has(r.id) ? unmarkSeen(r.id) : markSeen([r.id]))}
                   onOpenUser={(id) => setFocus({ type: "user", id })} />
               ))}
-              {fresh.length > 30 && (
+              {feedList.length > 30 && (
                 <div style={{ textAlign: "center", color: C.dim, fontSize: 12, padding: "6px 0 2px" }}>
-                  还有 {fresh.length - 30} 条，处理完这批再看
+                  还有 {feedList.length - 30} 条，处理完这批再看
                 </div>
               )}
             </>

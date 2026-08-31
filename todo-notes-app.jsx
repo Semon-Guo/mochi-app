@@ -2289,6 +2289,14 @@ export const CSS = `
   @keyframes sheetUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
   @keyframes flashFade { from{opacity:0} to{opacity:1} }
 
+  /* 点赞：弹一下再落回。回弹曲线比线性有"手感"，但幅度压在 1.4 倍以内——
+     这是个每天点几十次的按钮，动静太大会烦。 */
+  @keyframes likePop { 0%{transform:scale(1)} 35%{transform:scale(1.4)}
+    62%{transform:scale(.92)} 100%{transform:scale(1)} }
+  .like-pop { display:inline-block; animation: likePop .42s cubic-bezier(.34,1.56,.64,1) both; }
+  /* 标已读：整条淡下去，不是消失。手还停在那儿，列表却跳一格是最容易点错的。 */
+  .read-fade { transition: opacity .38s ease, filter .38s ease; }
+
   /* ── Reminder light ──────────────────────────────────────────────
      Layers, back to front: a warm wash anchored at the left edge, a fine
      grain for material, a hairline ring, the sweeping sheen, and a comet
