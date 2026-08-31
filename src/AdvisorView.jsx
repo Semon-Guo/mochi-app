@@ -31,6 +31,25 @@ const fmtDate = (ts) => {
   const d = new Date(ts);
   return `${d.getMonth() + 1}/${d.getDate()}`;
 };
+const p2 = (n) => String(n).padStart(2, "0");
+/** 具体到分钟。跨年了才带年份——同一年里那四个字每条都印一遍是噪音。 */
+const fmtStamp = (ts) => {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  const y = d.getFullYear() !== new Date().getFullYear() ? `${d.getFullYear()}年` : "";
+  return `${y}${d.getMonth() + 1}月${d.getDate()}日 ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+};
+/** 窄的地方用这个：8/31 18:27 */
+const fmtShort = (ts) => {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+};
+/** 隔了几个自然日。不能用「经过毫秒 / 一天」——昨晚 23 点记的，
+ *  按时长算出来是 0 天，读着像没在说人话。 */
+const daysSince = (ts) => (ts
+  ? Math.round((new Date().setHours(0, 0, 0, 0) - new Date(ts).setHours(0, 0, 0, 0)) / DAY)
+  : 999);
 const fmtAgo = (ts) => {
   if (!ts) return "从无记录";
   const days = Math.floor((Date.now() - ts) / DAY);
@@ -127,14 +146,22 @@ function Heatmap({ records, weeks = 16, color = C.green }) {
 }
 
 /* ── 小统计块 ── */
-function Stat({ label, value, hint, accent }) {
+function Stat({ label, value, hint, accent, onClick }) {
+  const Tag = onClick ? "button" : "div";
   return (
-    <div style={{ flex: 1, minWidth: 0 }}>
+    <Tag onClick={onClick} className={onClick ? "adv-stat" : undefined} style={{
+      flex: 1, minWidth: 0, textAlign: "left", fontFamily: "inherit",
+      border: "none", background: "none", padding: onClick ? "2px 4px 3px" : 0,
+      margin: onClick ? "-2px -4px -3px" : 0, borderRadius: 8,
+      cursor: onClick ? "pointer" : "default",
+    }}>
       <div style={{ fontSize: 22, fontWeight: 700, fontFamily: MONO, letterSpacing: "-0.5px",
         color: accent || C.ink, lineHeight: 1.1 }}>{value}</div>
-      <div style={{ fontSize: 11, color: C.sub, marginTop: 3 }}>{label}</div>
+      <div style={{ fontSize: 11, color: C.sub, marginTop: 3 }}>
+        {label}{onClick && <span style={{ color: C.dim }}> ›</span>}
+      </div>
       {hint && <div style={{ fontSize: 10, color: C.dim, marginTop: 1 }}>{hint}</div>}
-    </div>
+    </Tag>
   );
 }
 
@@ -178,11 +205,17 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
   return (
     <div style={{ display: "flex", gap: 10, padding: withAuthor ? "14px 0" : "11px 0",
       borderTop: `1px solid ${C.hair}` }}>
-      <div style={{ width: 42, flexShrink: 0, textAlign: "right", paddingTop: withAuthor ? 4 : 1 }}>
+      <div style={{ width: 46, flexShrink: 0, textAlign: "right", paddingTop: withAuthor ? 4 : 1 }}>
         <div style={{ fontSize: 12, fontFamily: MONO, color: C.sub, fontWeight: 600 }}>{fmtDate(r.at)}</div>
-        <div style={{ fontSize: 9.5, color: C.dim, fontFamily: MONO }}>
-          {new Date(r.at || 0).getFullYear()}
+        <div style={{ fontSize: 10, color: C.dim, fontFamily: MONO }}>
+          {`${p2(new Date(r.at || 0).getHours())}:${p2(new Date(r.at || 0).getMinutes())}`}
         </div>
+        {/* 年份只在跨年时占一行，同一年里印它纯属噪音 */}
+        {new Date(r.at || 0).getFullYear() !== new Date().getFullYear() && (
+          <div style={{ fontSize: 9, color: C.dim, fontFamily: MONO }}>
+            {new Date(r.at || 0).getFullYear()}
+          </div>
+        )}
       </div>
       <div style={{ width: 1, background: C.line, flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -273,7 +306,7 @@ function RequestPanel({ token, onChanged }) {
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600 }}>{u.displayName}</div>
             <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
-              @{u.username} · {fmtAgo(u.requestedAt)}申请
+              @{u.username} · {fmtStamp(u.requestedAt)}申请
             </div>
           </div>
           <button onClick={() => decide(u, false)} disabled={!!busy}
@@ -319,7 +352,7 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
               {author?.displayName || "未知成员"}
             </div>
             <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
-              {fmtAgo(r.at)}{r.weather ? ` · ${r.weather}` : ""}
+              {fmtStamp(r.at)} · {fmtAgo(r.at)}{r.weather ? ` · ${r.weather}` : ""}
             </div>
           </div>
         </button>
@@ -485,8 +518,8 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     const projIds = [...new Set(mine.map((r) => r.projectId))];
     return (
       <Shell onBack={() => setFocus(null)} title={u?.displayName || "成员"}
-        subtitle={(u?.archivedAt ? `已离组（${fmtAgo(u.archivedAt)}） · ` : "") +
-          `${mine.length} 条记录 · ${projIds.length} 个项目 · 最后 ${fmtAgo(mine[0]?.at)}`}
+        subtitle={(u?.archivedAt ? `已离组（${fmtStamp(u.archivedAt)}） · ` : "") +
+          `${mine.length} 条记录 · ${projIds.length} 个项目 · 最后 ${fmtStamp(mine[0]?.at)}`}
         avatar={u}>
         <Panel>
           <Heatmap records={mine} color={C.green} />
@@ -522,6 +555,73 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     );
   }
 
+  /* ── 详情：谁动了、谁没动 ──
+     光看「2/3」只知道有人没动，不知道是谁。点开就是一张名单。 */
+  if (focus?.type === "active") {
+    const isToday = focus.scope === "today";
+    const inRange = (r) => isToday ? dayKey(r.at || 0) === dayKey(Date.now())
+                                   : (r.at || 0) >= weekAgo;
+    const hit = records.filter(inRange);
+    const countOf = (id) => hit.filter((r) => r.ownerId === id).length;
+    const lastOf = (id) => records.find((r) => r.ownerId === id)?.at
+      || byId[id]?.lastAt || 0;    // records 已按时间倒序
+
+    const live = students.filter((m) => countOf(m.id) > 0)
+      .sort((a, b) => countOf(b.id) - countOf(a.id));
+    const idle = students.filter((m) => countOf(m.id) === 0)
+      .sort((a, b) => lastOf(b.id) - lastOf(a.id));
+
+    const Row = ({ m, count }) => {
+      const last = lastOf(m.id);
+      const days = daysSince(last);
+      return (
+        <button onClick={() => setFocus({ type: "user", id: m.id })} style={{
+          width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 0",
+          border: "none", borderTop: `1px solid ${C.hair}`, background: "none",
+          cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+        }}>
+          <Avatar user={m} size={34} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.ink, overflow: "hidden",
+              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.displayName}</div>
+            <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>@{m.username}</div>
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            {count > 0 ? (
+              <div style={{ fontSize: 15, fontWeight: 700, fontFamily: MONO, color: C.green }}>
+                {count} 条
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, fontWeight: 700, fontFamily: MONO,
+                color: days > 14 ? C.red : days > 7 ? C.amber : C.sub }}>
+                {last ? `已 ${days} 天没记` : "从无记录"}
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: C.sub, fontFamily: MONO }}>
+              {last ? `最后 ${fmtShort(last)}` : "—"}
+            </div>
+          </div>
+        </button>
+      );
+    };
+
+    return (
+      <Shell onBack={() => setFocus(null)} title={isToday ? "今日活跃" : "本周活跃"}
+        subtitle={isToday
+          ? `${fmtStamp(Date.now()).slice(0, -6)} · ${live.length}/${students.length} 人有记录`
+          : `最近 7 天 · ${live.length}/${students.length} 人有记录`}>
+        <Panel title={`有记录 · ${live.length}`}>
+          {live.length === 0 && <Empty text={isToday ? "今天还没有人记录" : "这一周还没有人记录"} />}
+          {live.map((m) => <Row key={m.id} m={m} count={countOf(m.id)} />)}
+        </Panel>
+        <Panel title={`没有记录 · ${idle.length}`}>
+          {idle.length === 0 && <Empty text="全组都动了" />}
+          {idle.map((m) => <Row key={m.id} m={m} count={0} />)}
+        </Panel>
+      </Shell>
+    );
+  }
+
   /* ── 详情：某个项目 ── */
   if (focus?.type === "project") {
     const p = projects.find((x) => x.id === focus.id);
@@ -529,7 +629,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     const people = [...new Set(mine.map((r) => r.ownerId))];
     return (
       <Shell onBack={() => setFocus(null)} title={p?.name || "项目"}
-        subtitle={`${mine.length} 条记录 · ${people.length} 人参与 · 最后 ${fmtAgo(mine[0]?.at)}`}
+        subtitle={`${mine.length} 条记录 · ${people.length} 人参与 · 最后 ${fmtStamp(mine[0]?.at)}`}
         accent={projColor[focus.id]}>
         <Panel>
           <Heatmap records={mine} color={projColor[focus.id] || C.blue} />
@@ -632,8 +732,10 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
           gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
           <Stat label="本周记录" value={thisWeek} accent={thisWeek ? C.green : C.dim} />
           <Stat label="今日活跃" value={`${activeToday}/${students.length}`}
-            accent={activeToday ? C.green : C.dim} />
-          <Stat label="本周活跃" value={`${activeThisWeek}/${students.length}`} />
+            accent={activeToday ? C.green : C.dim}
+            onClick={() => setFocus({ type: "active", scope: "today" })} />
+          <Stat label="本周活跃" value={`${activeThisWeek}/${students.length}`}
+            onClick={() => setFocus({ type: "active", scope: "week" })} />
           <Stat label="项目" value={projects.length} />
           <Stat label="累计记录" value={records.length} />
         </div>
@@ -700,7 +802,10 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
           {students.length === 0 && <Empty text="组里还没有成员记录" />}
           {students.map((m) => {
             const mine = records.filter((r) => r.ownerId === m.id);
-            const stale = mine[0] ? Math.floor((Date.now() - mine[0].at) / DAY) : 999;
+            // 颜色和时间必须取同一个值。以前颜色来自本地记录、文字来自服务端聚合，
+            // 本地同步落后时就会出现绿色的「9 天前」。服务端那份更全，以它为准。
+            const last = m.lastAt || mine[0]?.at || 0;
+            const stale = daysSince(last);
             return (
               <button key={m.id} onClick={() => setFocus({ type: "user", id: m.id })} className="adv-card"
                 style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit",
@@ -720,9 +825,11 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
                   <div><div style={{ fontSize: 15, fontWeight: 700, fontFamily: MONO }}>{m.records}</div>
                     <div style={{ fontSize: 10, color: C.sub }}>记录</div></div>
                   <div style={{ marginLeft: "auto", textAlign: "right" }}>
-                    <div style={{ fontSize: 11.5, fontWeight: 600,
-                      color: stale > 14 ? C.dim : stale > 7 ? C.amber : C.green }}>{fmtAgo(m.lastAt)}</div>
-                    <div style={{ fontSize: 10, color: C.sub }}>最后记录</div>
+                    <div style={{ fontSize: 11.5, fontWeight: 700, fontFamily: MONO,
+                      color: stale > 14 ? C.dim : stale > 7 ? C.amber : C.green }}>
+                      {last ? fmtShort(last) : "—"}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.sub }}>最后记录 · {fmtAgo(last)}</div>
                   </div>
                 </div>
               </button>
@@ -759,7 +866,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
                           <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden",
                             textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.displayName}</div>
                           <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
-                            {fmtAgo(m.archivedAt)}离组 · {m.records} 条记录
+                            {fmtStamp(m.archivedAt)}离组 · {m.records} 条记录
                           </div>
                         </div>
                       </div>
@@ -851,8 +958,10 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
                     )}
                   </div>
                   <div style={{ marginLeft: "auto", textAlign: "right" }}>
-                    <div style={{ fontSize: 11.5, fontWeight: 600, color: C.sub }}>{fmtAgo(mine[0]?.at)}</div>
-                    <div style={{ fontSize: 10, color: C.sub }}>最后更新</div>
+                    <div style={{ fontSize: 11.5, fontWeight: 700, fontFamily: MONO, color: C.sub }}>
+                      {mine[0]?.at ? fmtShort(mine[0].at) : "—"}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.sub }}>最后更新 · {fmtAgo(mine[0]?.at)}</div>
                   </div>
                 </div>
               </button>

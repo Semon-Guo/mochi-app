@@ -2232,6 +2232,8 @@ export const CSS = `
   .adv-grid { display: grid; grid-template-columns: 1fr; gap: 10px; padding-bottom: 20px; }
   @media (min-width: 560px) { .adv-grid { grid-template-columns: repeat(auto-fill, minmax(248px, 1fr)); } }
   .adv-card { transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+  .adv-stat { transition: background .15s ease; }
+  @media (hover: hover) and (pointer: fine) { .adv-stat:hover { background: #F4F0E7; } }
   @media (hover: hover) and (pointer: fine) {
     .adv-card:hover { border-color: #D9D2C4 !important; transform: translateY(-1px);
       box-shadow: 0 6px 18px rgba(120,100,70,.07); }

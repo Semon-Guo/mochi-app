@@ -18,14 +18,18 @@ const C = { ink: "#2C2C2C", sub: "#8C8478", dim: "#B0A99B", line: "#EDE8DE",
             soft: "#FAF8F3", red: "#C02556", amber: "#E8A838" };
 
 
+/* 具体到分钟。「2 小时前」看着舒服，但要回答「这条是几号说的」就得再点开算，
+   所以时间点为主、相对时间为辅。 */
 const fmtWhen = (ts) => {
   if (!ts) return "";
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
   const d = new Date(ts);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+  const p2 = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return `${stamp} 刚刚`;
+  if (s < 3600) return `${stamp} · ${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${stamp} · ${Math.floor(s / 3600)} 小时前`;
+  return stamp;
 };
 
 function MiniAvatar({ name, id, size = 22 }) {
