@@ -43,7 +43,8 @@ function MiniAvatar({ name, id, size = 22 }) {
  */
 /* trailing 挂在「赞 / 回复」那一行的末尾。不这么做的话调用方只能把按钮和
    整个 Thread 并排放，线程一有回复就把它顶到最上面去，看着像是属于第一条回复的。 */
-export function Thread({ thread, meId, canLike = true, onToggleLike, onReply, onDelete, trailing }) {
+export function Thread({ thread, meId, canLike = true, onToggleLike, onReply, onDelete,
+                        trailing, replyLabel = "点评" }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [pop, setPop] = useState(0);      // 变一次就重放一次弹跳动画
@@ -107,7 +108,7 @@ export function Thread({ thread, meId, canLike = true, onToggleLike, onReply, on
           display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 10px",
           borderRadius: 999, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600,
           border: `1px solid ${C.line}`, background: "#FFF", color: C.sub,
-        }}>💬 回复{thread.replies.length ? ` ${thread.replies.length}` : ""}</button>
+        }}>💬 {replyLabel}{thread.replies.length ? ` ${thread.replies.length}` : ""}</button>
         {trailing && <span style={{ marginLeft: "auto", flexShrink: 0 }}>{trailing}</span>}
       </div>
 

@@ -305,9 +305,9 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
       padding: "13px 14px", background: read ? "#FBFAF7" : C.panel,
       borderLeft: `3px solid ${read ? C.line : C.amber}`,
       transition: "border-left-color .38s ease, background .38s ease" }}>
-      {/* 只把内容淡下去，动作那一行保持清楚——不然想撤销还得眯着眼找按钮 */}
-      <div className="read-fade" style={{ opacity: read ? 0.42 : 1,
-        filter: read ? "grayscale(1)" : "none" }}>
+      {/* 淡化只作用在正文和附件上。**人的头像和名字一律不置灰**——把活人的
+          照片和名字变成灰的，在中文语境里是很不吉利的画面。动作那一行也保持
+          清楚，不然想撤销还得眯着眼找按钮。 */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
         <button onClick={() => onOpenUser?.(r.ownerId)} style={{ border: "none", background: "none",
           padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
@@ -330,6 +330,8 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
         )}
       </div>
 
+      <div className="read-fade" style={{ opacity: read ? 0.42 : 1,
+        filter: read ? "grayscale(1)" : "none" }}>
       <div style={{ fontSize: 14, lineHeight: 1.7, color: C.ink, whiteSpace: "pre-wrap",
         wordBreak: "break-word" }}>
         {r.text || <span style={{ color: C.dim }}>（无正文）</span>}
@@ -465,6 +467,10 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
   const weekAgo = Date.now() - 7 * DAY;
   const thisWeek = records.filter((r) => (r.at || 0) >= weekAgo).length;
   const activeThisWeek = new Set(records.filter((r) => (r.at || 0) >= weekAgo).map((r) => r.ownerId)).size;
+  // 今天有没有人动——「本周活跃」看的是这一周的势头，答不了「今天组里静没静」
+  const today = dayKey(Date.now());
+  const activeToday = new Set(records.filter((r) => dayKey(r.at || 0) === today)
+    .map((r) => r.ownerId)).size;
   // 「按成员」只列做科研记录的人：纯管理账号（比如只用来审批、一条记录都没有的
   // 导师或管理员）不该占着列表。inGroup 由服务端算好。
   const inGroup = members.filter((m) => m.inGroup !== false);
@@ -620,9 +626,14 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
       )}
 
       <Panel>
-        <div style={{ display: "flex", gap: 4, marginBottom: 14 }}>
+        {/* 固定五列。用 auto-fit 的话窄屏上会掉成 4+1，最后一格孤零零挂在第二行；
+            minmax(0,1fr) 是为了让格子真能被压窄，而不是被内容撑破 */}
+        <div style={{ display: "grid", gap: 4, marginBottom: 14,
+          gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
           <Stat label="本周记录" value={thisWeek} accent={thisWeek ? C.green : C.dim} />
-          <Stat label="本周活跃" value={`${activeThisWeek}/${students.length}`} hint="有记录的成员" />
+          <Stat label="今日活跃" value={`${activeToday}/${students.length}`}
+            accent={activeToday ? C.green : C.dim} />
+          <Stat label="本周活跃" value={`${activeThisWeek}/${students.length}`} />
           <Stat label="项目" value={projects.length} />
           <Stat label="累计记录" value={records.length} />
         </div>

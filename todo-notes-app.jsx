@@ -1236,11 +1236,12 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, onReply, o
             </div>
           )}
           {r.files?.map(f => <FileChip key={f.id} f={f}/>)}
-          {/* 只有真有人回复或点赞时才出现——每条记录底下都挂一排按钮，
-              自己的记录本就吵了。有人搭话时回复框自然会长出来。
-              也不给自己的记录点赞的按钮，但导师点的赞要看得见。 */}
+          {/* 只有真有人点评或点赞时才出现——每条记录底下都挂一排按钮，
+              自己的记录本就吵了。有人搭话时输入框自然会长出来。
+              也不给自己的记录点赞的按钮，但导师点的赞要看得见。
+              按钮写「回复」不写「点评」：学生是在回导师，不是点评自己。 */}
           {thread && (thread.replies.length > 0 || thread.likes.length > 0) && (
-            <Thread thread={thread} meId={meId} canLike={false}
+            <Thread thread={thread} meId={meId} canLike={false} replyLabel="回复"
               onReply={onReply} onDelete={onDropComment}/>
           )}
         </>

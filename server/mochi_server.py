@@ -547,6 +547,7 @@ def push(user, changes):
     """推送本地改动。只能写自己的；同一条记录以 updatedAt 较大的一方为准（LWW）。"""
     c = conn()
     res = {"applied": 0, "skipped": 0, "rejected": []}
+    notices = []          # 落库之后再发，不能占着写锁做网络 I/O
     with _write_lock:
         try:
             for t in SYNC_TABLES:
@@ -598,15 +599,29 @@ def push(user, changes):
                     # 删除时不能碰这两列：墓碑的 data 是空的，跟着清掉的话学生就
                     # 再也拉不到这条墓碑，取消的赞会永远留在他屏幕上。
                     if t == "comments" and not deleted_at:
-                        rec = c.execute("SELECT owner_id FROM records WHERE id = ?",
+                        rec = c.execute("SELECT owner_id, data FROM records WHERE id = ?",
                                         (str(payload.get("recordId") or ""),)).fetchone()
                         c.execute("UPDATE comments SET record_id = ?, target_owner = ? WHERE id = ?",
                                   (payload.get("recordId"), rec["owner_id"] if rec else None, rid))
+                        # 只在这条评论是**新增**时通知：客户端偶尔会把同一条重推
+                        # （比如推送记账丢了），按 updatedAt 判断的话对方会被
+                        # 同一个赞反复吵醒。
+                        if rec and not cur and rec["owner_id"] != user["id"]:
+                            try:
+                                rec_text = json.loads(rec["data"]).get("text")
+                            except Exception:
+                                rec_text = ""
+                            notices.append((rec["owner_id"], comment_notice(
+                                user, payload.get("kind"), payload.get("text"),
+                                rec_text, payload.get("recordId"))))
                     res["applied"] += 1
             c.commit()
         except Exception:
             c.rollback()
             raise
+    # 推送要等事务提交完再发：发到一半回滚的话，对方会收到一条不存在的点评
+    if notices:
+        threading.Thread(target=deliver, args=(notices,), daemon=True).start()
     res["seq"] = current_seq(c)
     return res
 
@@ -1283,6 +1298,60 @@ def put_reminders(user, items):
     return {"ok": True, "count": len(rows)}
 
 
+def send_to_user(user_id, payload):
+    """推给某个人的所有设备，返回成功发出的条数。
+
+    失效的订阅顺手清掉——留着只会每次都失败，还会把 fail_count 顶到天上。
+    """
+    if not (PUSH_OK and VAPID):
+        return 0
+    now = int(time.time() * 1000)
+    c = conn()
+    sent = 0
+    for sub in c.execute("SELECT * FROM push_subs WHERE user_id = ?", (user_id,)).fetchall():
+        try:
+            webpush.send({"endpoint": sub["endpoint"],
+                          "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
+                         payload, VAPID)
+            with _write_lock:
+                c.execute("UPDATE push_subs SET last_ok = ?, fail_count = 0 WHERE id = ?",
+                          (now, sub["id"]))
+                c.commit()
+            sent += 1
+        except webpush.PushGone:
+            # 设备卸载了 app 或清了数据，订阅永久失效
+            with _write_lock:
+                c.execute("DELETE FROM push_subs WHERE id = ?", (sub["id"],))
+                c.commit()
+            print(f"[push] 订阅已失效，已移除 {sub['id'][:8]}", flush=True)
+        except Exception as e:
+            with _write_lock:
+                c.execute("UPDATE push_subs SET fail_count = fail_count + 1 WHERE id = ?", (sub["id"],))
+                c.execute("DELETE FROM push_subs WHERE fail_count >= 10")
+                c.commit()
+            print(f"[push] 发送失败 {sub['id'][:8]}: {e}", flush=True)
+    return sent
+
+
+def comment_notice(actor, kind, text, rec_text, record_id):
+    """导师点赞/点评之后，学生手机上看到的那条通知。"""
+    who = (actor or {}).get("displayName") or "组里有人"
+    trim = lambda t, n: " ".join(str(t or "").split())[:n]
+    if kind == "like":
+        return {"title": f"👍 {who} 赞了你的记录",
+                "body": trim(rec_text, 40) or "（无正文）", "tag": f"mochi-cm-{record_id}"}
+    return {"title": f"💬 {who} 点评了你的记录",
+            "body": trim(text, 80) or "（空）", "tag": f"mochi-cm-{record_id}"}
+
+
+def deliver(notices):
+    for uid, payload in notices:
+        try:
+            send_to_user(uid, payload)
+        except Exception as e:
+            print(f"[push] 评论通知发送出错: {e}", flush=True)
+
+
 def push_due_reminders():
     """扫描到期提醒并推送。由后台线程每 30 秒调一次。"""
     if not (PUSH_OK and VAPID):
@@ -1303,31 +1372,9 @@ def push_due_reminders():
 
     sent = 0
     for rem in due:
-        subs = c.execute("SELECT * FROM push_subs WHERE user_id = ?", (rem["owner_id"],)).fetchall()
-        payload = {"title": rem["title"], "body": rem["body"], "tag": f"mochi-{rem['id']}",
-                   "todoId": rem["id"]}
-        for sub in subs:
-            try:
-                webpush.send({"endpoint": sub["endpoint"],
-                              "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
-                             payload, VAPID)
-                with _write_lock:
-                    c.execute("UPDATE push_subs SET last_ok = ?, fail_count = 0 WHERE id = ?",
-                              (now, sub["id"]))
-                    c.commit()
-                sent += 1
-            except webpush.PushGone:
-                # 设备卸载了 app 或清了数据，订阅永久失效，留着只会每次都失败
-                with _write_lock:
-                    c.execute("DELETE FROM push_subs WHERE id = ?", (sub["id"],))
-                    c.commit()
-                print(f"[push] 订阅已失效，已移除 {sub['id'][:8]}", flush=True)
-            except Exception as e:
-                with _write_lock:
-                    c.execute("UPDATE push_subs SET fail_count = fail_count + 1 WHERE id = ?", (sub["id"],))
-                    c.execute("DELETE FROM push_subs WHERE fail_count >= 10")
-                    c.commit()
-                print(f"[push] 发送失败 {sub['id'][:8]}: {e}", flush=True)
+        sent += send_to_user(rem["owner_id"],
+                             {"title": rem["title"], "body": rem["body"],
+                              "tag": f"mochi-{rem['id']}", "todoId": rem["id"]})
         with _write_lock:
             c.execute("UPDATE reminders SET fired_at = ? WHERE id = ?", (now, rem["id"]))
             c.commit()
