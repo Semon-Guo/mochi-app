@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import * as Sync from "./src/sync.js";
 import { SyncBar } from "./src/SyncUI.jsx";
 import { AdvisorView } from "./src/AdvisorView.jsx";
-import { putPhoto, getPhoto, delPhoto } from "./src/photos.js";
+import { putPhoto, delPhoto } from "./src/photos.js";
+import { Photo, FullPhoto } from "./src/PhotoView.jsx";
 import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
@@ -964,40 +965,6 @@ function TodoRow({ t, depth, activeIds, timersFrozen, setEditingTodo, setShowAdd
       {expanded && subs}
     </>
   );
-}
-
-/* ── 一张照片 ── */
-function Photo({ id, size = 78, onOpen }) {
-  const [url, setUrl] = useState(null);
-  useEffect(() => {
-    let alive = true, made = null;
-    getPhoto(id).then(b => {
-      if (!alive || !b) return;
-      made = URL.createObjectURL(b);
-      setUrl(made);
-    }).catch(()=>{});
-    return () => { alive = false; if (made) URL.revokeObjectURL(made); };
-  }, [id]);
-  return (
-    <div onClick={url && onOpen ? (e)=>{ e.stopPropagation(); onOpen(id); } : undefined} style={{
-      width:size, height:size, borderRadius:10, flexShrink:0, overflow:"hidden",
-      background:"#F0EDE6", border:"1px solid #E7E2D6",
-      backgroundImage: url ? `url(${url})` : "none", backgroundSize:"cover", backgroundPosition:"center",
-      cursor: url && onOpen ? "pointer" : "default",
-    }}/>
-  );
-}
-
-function FullPhoto({ id }) {
-  const [url, setUrl] = useState(null);
-  useEffect(() => {
-    let alive = true, made = null;
-    getPhoto(id).then(b => { if (!alive || !b) return; made = URL.createObjectURL(b); setUrl(made); }).catch(()=>{});
-    return () => { alive = false; if (made) URL.revokeObjectURL(made); };
-  }, [id]);
-  return url
-    ? <img src={url} alt="" style={{ maxWidth:"100%", maxHeight:"100%", borderRadius:10, objectFit:"contain" }}/>
-    : <span style={{ color:"#888", fontSize:13 }}>载入中…</span>;
 }
 
 /* ── 数据文件：一枚附件 ──
@@ -2041,11 +2008,13 @@ export default function MochiApp() {
     );
   }
 
-  // 导师视图是独立一屏，走在主视图之前
+  // 导师视图是独立一屏，走在主视图之前。
+  // photoUI 必须一起挂上——它是那个全屏看图的浮层，漏了的话导师点缩略图
+  // 只是把 state 改了，屏幕上什么都不会发生。
   if (advisorOpen) {
     return (<>
-      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)}
-        onPhoto={(ids)=>setViewPhoto(ids?.[0] || null)} />
+      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} onPhoto={setViewPhoto} />
+      {photoUI}
       <style>{CSS}</style>
     </>);
   }

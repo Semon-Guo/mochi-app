@@ -194,10 +194,13 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
 
       // 照片走二进制端点，单独一轮。把刚拉回来的记录也算进引用集合，
       // 这样新记录的照片当轮就能下载，不用等下一次同步。
+      // ownerId 在服务器返回的行上是顶层字段，不在 data 里。漏掉它，这些刚拉
+      // 回来的记录就会被当成「我自己的」，导师那台又会去传别人的照片。
       const withIncoming = {
         ...base,
         records: [...(base.records || []),
-                  ...incoming.records.filter((r) => !r.deletedAt).map((r) => ({ ...r.data, id: r.id }))],
+                  ...incoming.records.filter((r) => !r.deletedAt)
+                    .map((r) => ({ ...r.data, id: r.id, ownerId: r.ownerId }))],
       };
       // 必须把「我是谁」传进去：导师/管理员本地存着全组的照片，
       // 不告诉它哪些是自己的，它会把别人的照片一张张往上传。

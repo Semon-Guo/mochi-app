@@ -3,7 +3,8 @@
  * stampChanges 和 mergeIncoming 是整套同步的地基，LWW、墓碑、dirty 判断
  * 出一点偏差就会静默丢数据，所以这里把每条规则都钉住。
  */
-import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, LAB_KINDS, ALL_KINDS } from "./sync.js";
+import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_AFTER,
+         LAB_KINDS, ALL_KINDS } from "./sync.js";
 
 let passed = 0, failed = 0;
 const chk = (name, cond, info = "") => {
@@ -160,18 +161,39 @@ console.log("\n── planPhotoSync ──");
   chk("传过的不重复传", plan.toUpload.length === 0);
 }
 {
+  const now = 1_000_000_000;
   const plan = planPhotoSync({
     records: [{ id: "r1", photos: ["ph1"] }],
-    localIds: new Set(["ph1"]), state: { ph1: { noUp: true } }, myUserId: "me",
+    localIds: new Set(["ph1"]), state: { ph1: { noUp: now - 1000 } }, myUserId: "me", now,
   });
-  chk("标了永久失败就不再重试（死循环的刹车）", plan.toUpload.length === 0);
+  chk("刚失败过的不立刻重试（死循环的刹车）", plan.toUpload.length === 0);
 }
 {
+  const now = 1_000_000_000;
   const plan = planPhotoSync({
     records: [{ id: "r1", ownerId: "x", photos: ["ph1"] }],
-    localIds: new Set(), state: { ph1: { gone: true } }, myUserId: "me",
+    localIds: new Set(), state: { ph1: { gone: now - 1000 } }, myUserId: "me", now,
   });
-  chk("下不到的不重复下", plan.toDownload.length === 0);
+  chk("刚下不到的不立刻重下", plan.toDownload.length === 0);
+}
+// 下面两条钉的是「失败标记不能是永久的」：导师的角色是事后授予的，成为
+// 导师之前拉学生的照片必然 403；学生也可能晚一步才把照片传上来。标死了
+// 那张照片在这台设备上就再也不会出现。
+{
+  const now = 1_000_000_000;
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "x", photos: ["ph1"] }],
+    localIds: new Set(), state: { ph1: { gone: now - PHOTO_RETRY_AFTER - 1 } }, myUserId: "me", now,
+  });
+  chk("过了冷却期要再试一次，失败不是永久的", plan.toDownload.includes("ph1"));
+}
+{
+  const now = 1_000_000_000;
+  const plan = planPhotoSync({
+    records: [{ id: "r1", ownerId: "x", photos: ["ph1"] }],
+    localIds: new Set(), state: { ph1: { gone: true } }, myUserId: "me", now,
+  });
+  chk("老版本存的永久标记升上来后立刻重试", plan.toDownload.includes("ph1"));
 }
 {
   const plan = planPhotoSync({

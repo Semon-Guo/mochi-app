@@ -339,7 +339,16 @@ export function mergeIncoming(data, sync, incoming, myUserId) {
  * 记录，照片下到本地只是为了看；把它们当成自己的往上传，服务端每次都回
  * 403「不能上传别人的照片」，而且永远不会变。
  */
-export function planPhotoSync({ records = [], localIds, state = {}, myUserId }) {
+/** 失败标记的冷却时间。到点后重试一次，别让一次失败变成永久失效。 */
+export const PHOTO_RETRY_AFTER = 30 * 60 * 1000;
+
+/** 失败标记记的是「上次失败的时刻」，冷却期外就该再试一次。
+ *  老版本存的是 true（永久失效），当成「很久以前」处理，升级上来立刻重试。 */
+function coolingDown(mark, now) {
+  return typeof mark === "number" && now - mark < PHOTO_RETRY_AFTER;
+}
+
+export function planPhotoSync({ records = [], localIds, state = {}, myUserId, now = Date.now() }) {
   const referenced = new Set();
   const mine = new Set();
   for (const r of records) {
@@ -353,8 +362,10 @@ export function planPhotoSync({ records = [], localIds, state = {}, myUserId }) 
   }
   return {
     referenced,
-    toUpload: [...mine].filter((id) => localIds.has(id) && !state[id]?.up && !state[id]?.noUp),
-    toDownload: [...referenced].filter((id) => !localIds.has(id) && !state[id]?.gone),
+    toUpload: [...mine].filter((id) =>
+      localIds.has(id) && !state[id]?.up && !coolingDown(state[id]?.noUp, now)),
+    toDownload: [...referenced].filter((id) =>
+      !localIds.has(id) && !coolingDown(state[id]?.gone, now)),
   };
 }
 
@@ -384,7 +395,7 @@ export async function syncPhotos(data, token, sync, myUserId) {
         // 403/404/410 重试多少次结果都一样：照片不是我的，或服务器上那条元数据
         // 已经没了。不记下来就会变成每 2 分钟一次、永不停止的重试——曾经这样
         // 在日志里堆了 424 次，而界面上毫无提示。其它错误（掉线等）留给下一轮。
-        if (/HTTP 40[34]|HTTP 410/.test(e.message)) { state[id] = { ...state[id], noUp: true }; marked++; }
+        if (/HTTP 40[34]|HTTP 410/.test(e.message)) { state[id] = { ...state[id], noUp: Date.now() }; marked++; }
       }
     }
   }
@@ -396,8 +407,11 @@ export async function syncPhotos(data, token, sync, myUserId) {
       state[id] = { ...state[id], up: true };
       downloaded++;
     } catch (e) {
-      // 上传方还没传上来，或者不是自己/导师的照片——记下来别每轮都重试
-      if (/HTTP 404|HTTP 403/.test(e.message)) { state[id] = { ...state[id], gone: true }; marked++; }
+      // 记下失败时刻，冷却期内不再重试。
+      // **不能记成永久失效**：这里的 403/404 多半是暂时的——上传方还没把照片
+      // 传上来，或者本人当时还不是导师（角色是事后授予的，之前拉必然 403）。
+      // 一旦永久标死，那张照片在这台设备上就再也不会出现，界面上只剩一个空框。
+      if (/HTTP 404|HTTP 403/.test(e.message)) { state[id] = { ...state[id], gone: Date.now() }; marked++; }
     }
   }
 

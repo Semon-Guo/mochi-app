@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import * as Sync from "./sync.js";
 import { avatarFallback } from "./avatar.js";
 import { downloadFile, fmtBytes } from "./files.js";
+import { Photo } from "./PhotoView.jsx";
 import { AdminPanel } from "./AdminPanel.jsx";
 
 /* 导师端：按学生或按项目看全组进展。
@@ -163,11 +164,17 @@ function FileLink({ f }) {
   );
 }
 
-/* ── 一条记录 ── */
+/* ── 一条记录 ──
+   两个视图各有侧重，作者那一行是分水岭：
+   「按成员」看的是一个人的时间线，作者是废话，项目标签才是信息；
+   「按项目」看的是同一个项目下谁在推进，所以人要立得住——头像放大、
+   名字加粗，一屏扫下来能立刻分清是谁写的。 */
 function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor = true }) {
+  const withAuthor = showAuthor && author;
   return (
-    <div style={{ display: "flex", gap: 10, padding: "11px 0", borderTop: `1px solid ${C.hair}` }}>
-      <div style={{ width: 42, flexShrink: 0, textAlign: "right", paddingTop: 1 }}>
+    <div style={{ display: "flex", gap: 10, padding: withAuthor ? "14px 0" : "11px 0",
+      borderTop: `1px solid ${C.hair}` }}>
+      <div style={{ width: 42, flexShrink: 0, textAlign: "right", paddingTop: withAuthor ? 4 : 1 }}>
         <div style={{ fontSize: 12, fontFamily: MONO, color: C.sub, fontWeight: 600 }}>{fmtDate(r.at)}</div>
         <div style={{ fontSize: 9.5, color: C.dim, fontFamily: MONO }}>
           {new Date(r.at || 0).getFullYear()}
@@ -175,28 +182,38 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
       </div>
       <div style={{ width: 1, background: C.line, flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
-          {showAuthor && author && (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-              <Avatar user={author} size={16} />
-              <span style={{ fontSize: 11, fontWeight: 600, color: C.ink }}>{author.displayName}</span>
-            </span>
-          )}
-          {projectName && (
-            <span style={{ fontSize: 10, color: projectColor || C.sub, fontWeight: 600,
-              background: `color-mix(in srgb, ${projectColor || C.sub} 12%, transparent)`,
-              padding: "1.5px 7px", borderRadius: 4 }}>{projectName}</span>
-          )}
-          {r.weather && <span style={{ fontSize: 10.5, color: C.dim }}>{r.weather}</span>}
-        </div>
+        {withAuthor ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 9 }}>
+            <Avatar user={author} size={34} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: C.ink, lineHeight: 1.25,
+                letterSpacing: "-0.2px", overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap" }}>{author.displayName}</div>
+              <div style={{ fontSize: 10, color: C.dim, fontFamily: MONO, marginTop: 1 }}>
+                @{author.username}
+              </div>
+            </div>
+            {r.weather && (
+              <span style={{ fontSize: 11, color: C.dim, marginLeft: "auto", flexShrink: 0 }}>{r.weather}</span>
+            )}
+          </div>
+        ) : (projectName || r.weather) && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
+            {projectName && (
+              <span style={{ fontSize: 10, color: projectColor || C.sub, fontWeight: 600,
+                background: `color-mix(in srgb, ${projectColor || C.sub} 12%, transparent)`,
+                padding: "1.5px 7px", borderRadius: 4 }}>{projectName}</span>
+            )}
+            {r.weather && <span style={{ fontSize: 10.5, color: C.dim }}>{r.weather}</span>}
+          </div>
+        )}
         <div style={{ fontSize: 13.5, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
           {r.text || <span style={{ color: C.dim }}>（无正文）</span>}
         </div>
         {r.photos?.length > 0 && (
-          <button onClick={() => onPhoto?.(r.photos)} style={{
-            marginTop: 5, border: "none", background: "none", padding: 0, cursor: "pointer",
-            fontSize: 10.5, color: C.blue, fontFamily: "inherit",
-          }}>📷 {r.photos.length} 张照片</button>
+          <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            {r.photos.map((id) => <Photo key={id} id={id} size={66} onOpen={onPhoto} />)}
+          </div>
         )}
         {r.files?.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap" }}>
