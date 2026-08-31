@@ -9,6 +9,7 @@ import { Thread, indexComments, threadOf, LIKE, REPLY } from "./src/Comments.jsx
 import { NC, uid, migrateLab } from "./src/migrate.js";
 import { bjNow, toBJ, dayKeyOf } from "./src/time.js";
 import { Calendar } from "./src/Calendar.jsx";
+import { Leaderboard } from "./src/Leaderboard.jsx";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -1079,7 +1080,13 @@ function useDataFiles({ files = [], onAdd, onRemove }) {
 }
 
 /* ── 写一条记录：日期是自动的，天气点一下，正文和照片 ── */
-function Compose({ lastWeather, onSave }) {
+const DAILY_CAP = 3;   // 与服务端 MOCHI_MAX_RECORDS_PER_DAY 对齐
+
+/* 记一条。日限额必须在这儿先拦住：服务端也拦，但那是同步的时候——
+   本地已经存下、界面上也显示出来了，等被拒再回滚，看起来就是「写好的记录
+   自己没了」。 */
+function Compose({ lastWeather, onSave, todayCount = 0 }) {
+  const full = todayCount >= DAILY_CAP;
   const [weather, setWeather] = useState(lastWeather || "");
   const [text, setText] = useState("");
   const [photos, setPhotos] = useState([]);
@@ -1112,6 +1119,7 @@ function Compose({ lastWeather, onSave }) {
   };
 
   const commit = () => {
+    if (full) return;
     if (!text.trim() && !photos.length && !files.length) return;
     onSave({ weather, text: text.trim(), photos, files });
     setText(""); setPhotos([]); setFiles([]);
@@ -1135,7 +1143,16 @@ function Compose({ lastWeather, onSave }) {
       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
         <span style={{ fontSize:14, fontWeight:700 }}>{fmtRecDay(Date.now())}</span>
         <span style={{ fontSize:11, color:"#C0B8A8", fontFamily:MONO }}>{fmtBJ(Date.now())}</span>
+        <span style={{ marginLeft:"auto", fontSize:11, fontWeight:700, fontFamily:MONO,
+          color: full ? "#C02556" : "#B0A99B" }}>{todayCount}/{DAILY_CAP}</span>
       </div>
+
+      {full && (
+        <div style={{ fontSize:12, color:"#8A6410", background:"#FFF6E5", border:"1px solid #F0DFB4",
+          borderRadius:10, padding:"9px 11px", marginBottom:11, lineHeight:1.6 }}>
+          今天已经记满 {DAILY_CAP} 条了。明天再记，或者把内容补进上面那几条里。
+        </div>
+      )}
 
       <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:11 }}>
         {WEATHER.map(w => (
@@ -1175,11 +1192,12 @@ function Compose({ lastWeather, onSave }) {
         <button onClick={()=>fileRef.current?.click()} disabled={busy}
           style={{ ...softBtn, opacity: busy ? .5 : 1 }}>📷 {busy ? "处理中…" : "照片"}</button>
         <button onClick={dataUI.open} style={softBtn}>📎 数据</button>
-        <button onClick={commit} style={{
+        <button onClick={commit} disabled={full} style={{
           flex:1.25, padding:"12px 0", borderRadius:13, border:"none", background:"#2C2C2C",
-          color:"#FFF", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
-          opacity: (text.trim() || photos.length || files.length) ? 1 : .4,
-        }}>记下</button>
+          color:"#FFF", fontSize:14, fontWeight:600, cursor: full ? "not-allowed" : "pointer",
+          fontFamily:"inherit",
+          opacity: (!full && (text.trim() || photos.length || files.length)) ? 1 : .4,
+        }}>{full ? "今天记满了" : "记下"}</button>
       </div>
     </div>
   );
@@ -1303,6 +1321,7 @@ export default function MochiApp() {
   const [openProject, setOpenProject] = useState(null);
   const [projForm, setProjForm] = useState(null);   // "new" | project id
   const [viewPhoto, setViewPhoto] = useState(null);
+  const [boardOpen, setBoardOpen] = useState(false);
   const [saveErr, setSaveErr] = useState(null);
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
@@ -1329,6 +1348,7 @@ export default function MochiApp() {
         // 从最上层往下逐层关闭，一次 Esc 只关一层
         if (bgAlert) return;                                  // 这个必须明确选择，不能靠 Esc 糊弄过去
         if (viewPhoto) { setViewPhoto(null); return; }
+        if (boardOpen) { setBoardOpen(false); return; }
         if (remindFor) { setRemindFor(null); return; }
         if (advisorOpen) { setAdvisorOpen(false); return; }
         if (showAdd) { setShowAdd(false); return; }
@@ -1354,7 +1374,7 @@ export default function MochiApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [desktop, bgAlert, viewPhoto, remindFor, advisorOpen, showAdd, addSubParent,
+  }, [desktop, bgAlert, viewPhoto, boardOpen, remindFor, advisorOpen, showAdd, addSubParent,
       editingTodo, projForm, view, openProject, tab]);
 
   // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
@@ -1661,6 +1681,11 @@ export default function MochiApp() {
       comments: (d.comments || []).filter(c => !goneIds.has(c.recordId)) }));
     setOpenProject(null);
   };
+  // 今天我自己记了几条。导师端本地存着全组的记录，所以必须按归属过滤，
+  // 否则别人记满了会把导师自己也挡住。
+  const myTodayRecords = data.records.filter(r =>
+    (!r.ownerId || r.ownerId === me?.id) && dayKeyOf(r.at) === dayKeyOf(Date.now())).length;
+
   const addRecord = (projectId, info) =>
     setData(d => ({ ...d, records: [...d.records, { id:uid(), projectId, at:Date.now(), ...info }] }));
   const saveRecord = (id, patch) =>
@@ -1914,7 +1939,8 @@ export default function MochiApp() {
         </div>
 
         <div style={{ padding:"0 24px" }}>
-          <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}/>
+          <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}
+            todayCount={myTodayRecords}/>
           {recs.map(r => (
             <RecordCard key={r.id} r={r} onSave={saveRecord} onDelete={deleteRecord} onOpenPhoto={setViewPhoto}
               thread={threadOf(cmtIndex, r.id)} meId={me?.id}
@@ -2015,6 +2041,13 @@ export default function MochiApp() {
     );
   }
 
+  if (boardOpen) {
+    return (<>
+      <Leaderboard onClose={()=>setBoardOpen(false)}/>
+      <style>{CSS}</style>
+    </>);
+  }
+
   // 导师视图是独立一屏，走在主视图之前。
   // photoUI 必须一起挂上——它是那个全屏看图的浮层，漏了的话导师点缩略图
   // 只是把 state 改了，屏幕上什么都不会发生。
@@ -2083,6 +2116,20 @@ export default function MochiApp() {
         ):(
           <>
             <SyncBar data={data} applySync={applySync} onOpenAdvisor={()=>setAdvisorOpen(true)} />
+
+            <button onClick={()=>setBoardOpen(true)} style={{
+              width:"100%", display:"flex", alignItems:"center", gap:9, marginBottom:10,
+              padding:"12px 13px", borderRadius:13, cursor:"pointer", fontFamily:"inherit",
+              border:"1px solid #E8E4DA", background:"#FFF", textAlign:"left",
+            }}>
+              <span style={{ fontSize:15 }}>🏆</span>
+              <span style={{ fontSize:14, fontWeight:700, color:"#2C2C2C", flex:1 }}>积分榜</span>
+              <span style={{ fontSize:11.5, fontWeight:700, fontFamily:MONO,
+                color: myTodayRecords >= DAILY_CAP ? "#C02556" : "#B0A99B" }}>
+                今天 {myTodayRecords}/{DAILY_CAP}
+              </span>
+              <span style={{ color:"#C0B8A8", fontSize:15, lineHeight:1 }}>›</span>
+            </button>
             {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
 
             {data.projects.length===0 && projForm!=="new" && (

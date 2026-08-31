@@ -189,7 +189,12 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
     setErr("");
     const base = override || dataRef.current;
     try {
-      const { sync, incoming } = await Sync.syncOnce(base, auth.token);
+      const { sync, incoming, rejected } = await Sync.syncOnce(base, auth.token);
+      // 被拒的改动会在本地回滚（服务器版本为准）。不说一声的话，用户看到的
+      // 就是「刚写好的东西自己没了」。
+      if (rejected?.length) {
+        setErr(rejected[0].why + (rejected.length > 1 ? `（共 ${rejected.length} 处）` : ""));
+      }
       // 用 prev 而不是发起时的 data —— 同步是异步的，这期间用户可能又改了东西
       applySync((prev) => Sync.mergeIncoming(prev, sync, incoming));
 

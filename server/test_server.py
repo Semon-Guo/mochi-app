@@ -70,7 +70,74 @@ def call_h(method, path, token=None, headers=None):
         return e.code, e.read(), dict(e.headers)
 
 
+def test_old_db_upgrade():
+    """老库升级：服务器必须能在「已经有数据、但缺新列」的库上起得来。
+
+    这一项是补的，因为主测试用的永远是新建的空库——CREATE TABLE 里就带着
+    所有列，迁移路径一个字都测不到。records.day 那次就这么漏到了生产：
+    SCHEMA 里的 CREATE INDEX 跑在 ALTER TABLE ADD COLUMN 之前，线上直接
+    起不来，而本地全绿。
+    """
+    import sqlite3
+    tmp = tempfile.mkdtemp(prefix="mochi-oldbd-")
+    port = PORT + 3
+    db = Path(tmp) / "mochi.db"
+    c = sqlite3.connect(db)
+    # 只建当年的表结构：records 没有 day 列
+    c.executescript("""
+      CREATE TABLE seq_counter (id INTEGER PRIMARY KEY CHECK (id = 1), n INTEGER NOT NULL);
+      INSERT INTO seq_counter (id, n) VALUES (1, 5);
+      CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL, display_name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'student', created_at INTEGER NOT NULL);
+      CREATE TABLE records (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+        data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER,
+        seq INTEGER NOT NULL DEFAULT 0);
+    """)
+    c.execute("INSERT INTO users VALUES ('u-old','olduser','x','老用户','student',1)")
+    # UTC 8/30 18:00 = 北京 8/31 02:00：顺带验证归日真的按 +8 算，
+    # 而不是照搬 UTC 日期
+    c.execute("INSERT INTO records VALUES ('r-old','u-old',?,1,NULL,1)",
+              (json.dumps({"at": 1756576800000, "text": "升级前就有的记录"}),))
+    c.commit(); c.close()
+
+    env = {**os.environ, "MOCHI_DATA": tmp, "MOCHI_PORT": str(port), "MOCHI_INVITE_CODE": INVITE}
+    proc = subprocess.Popen([sys.executable, str(HERE / "mochi_server.py")], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        up = False
+        for _ in range(60):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as r:
+                    up = r.status == 200
+                    break
+            except Exception:
+                time.sleep(0.1)
+        chk("老库（缺新列、已有数据）能直接起来", up,
+            "" if up else (proc.stdout.read()[-400:] if proc.poll() is not None else "起不来"))
+        if up:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(records)")}
+            chk("新列补上了", "day" in cols, str(sorted(cols)))
+            day = c.execute("SELECT day FROM records WHERE id='r-old'").fetchone()[0]
+            chk("老数据被回填了归日，且按北京时间算（UTC 是 8/30）", day == "2025-08-31", str(day))
+            idx = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_records_day'")]
+            chk("索引也建上了（顺序是先补列再建索引）", idx == ["idx_records_day"], str(idx))
+            c.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
+    print("\n── 老库升级 ──")
+    test_old_db_upgrade()
+
     tmp = tempfile.mkdtemp(prefix="mochi-test-")
     env = {**os.environ, "MOCHI_DATA": tmp, "MOCHI_PORT": str(PORT),
            "MOCHI_INVITE_CODE": INVITE,
@@ -395,9 +462,15 @@ def main():
         newbie_id = r.get("user", {}).get("id")
         newbie_tok = r.get("token")
 
+        # 改回来：后面的用例还要拿 INVITE 注册。不还原的话它们会莫名其妙 403，
+        # 而报错只会说「邀请码不正确」，很难联想到是这一段改的。
+        # 用独立变量接返回值——r 里还装着上面那次注册的结果，后面要用
+        sv, rv = call("POST", "/api/admin/invite", {"code": INVITE}, token=admin)
+        chk("能改回原来的邀请码", sv == 200 and rv.get("code") == INVITE, rv.get("code"))
+
         print("\n── 离组归档（不删数据）──")
         s, r = call("POST", "/api/register", {"username": "leaver", "password": "leaver-pass-1",
-                                              "displayName": "毕业生", "inviteCode": "brand-new-invite"})
+                                              "displayName": "毕业生", "inviteCode": INVITE})
         leaver_id = r["user"]["id"]
         leaver_tok = r["token"]
         call("POST", "/api/sync", {
@@ -571,6 +644,83 @@ def main():
         s, r = call("GET", "/api/sync?since=0", token=stu2)
         chk("移出名单后学生就拉不到了",
             not any(p["id"] == "shared1" for p in r.get("projects", [])))
+
+        print("\n── 积分与排行榜 ──")
+        DAY = 86400000
+        # 用一个干净的账号：前面的用例已经给 stu1/stu2 攒了记录，
+        # 混在一起就没法断言具体分数了
+        s, r = call("POST", "/api/register", {"username": "pter", "password": "pter-passwd-1",
+                                              "displayName": "积分测试", "inviteCode": INVITE})
+        pter = r.get("token")
+        chk("注册计分用的账号", s == 200)
+
+        # 全部落在「今天」，这样断言不依赖测试是哪天跑的
+        for i in range(3):
+            s, r = call("POST", "/api/sync", {"records": [
+                {"id": f"pt-{i}", "updatedAt": now + 90000 + i,
+                 "data": {"projectId": "p1", "at": now, "text": f"今天第 {i+1} 条"}}]}, token=pter)
+            chk(f"今天第 {i+1} 条记录能上传", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("POST", "/api/sync", {"records": [
+            {"id": "pt-3", "updatedAt": now + 93000,
+             "data": {"projectId": "p1", "at": now, "text": "今天第 4 条"}}]}, token=pter)
+        chk("第 4 条被拒（一天最多 3 条）", s == 200 and not r["applied"] and r["rejected"],
+            str(r.get("rejected")))
+
+        s, r = call("POST", "/api/sync", {"records": [
+            {"id": "pt-old", "updatedAt": now + 94000,
+             "data": {"projectId": "p1", "at": now - 40 * DAY, "text": "很久以前那天"}}]}, token=pter)
+        chk("换一天又能记（日限额是按天算的）", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("POST", "/api/sync", {"records": [
+            {"id": "pt-0", "updatedAt": now + 95000,
+             "data": {"projectId": "p1", "at": now, "text": "改个错别字"}}]}, token=pter)
+        chk("改已有的记录不受日限额影响", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        call("POST", "/api/sync", {"comments": [
+            {"id": "pt-like", "updatedAt": now + 96000,
+             "data": {"recordId": "pt-0", "kind": "like", "at": now}},
+            {"id": "pt-rep", "updatedAt": now + 96001,
+             "data": {"recordId": "pt-0", "kind": "reply", "text": "不错", "at": now}}]}, token=admin)
+        # 自己给自己评一条：不该算分，否则刷分太容易
+        call("POST", "/api/sync", {"comments": [
+            {"id": "pt-self", "updatedAt": now + 96002,
+             "data": {"recordId": "pt-0", "kind": "reply", "text": "自评", "at": now}}]}, token=pter)
+
+        s, r = call("GET", "/api/leaderboard?period=week", token=pter)
+        chk("学生也看得到榜单（看不见别人名次就没意义）", s == 200 and "rows" in r, f"HTTP {s}")
+        me = [x for x in r["rows"] if x["username"] == "pter"]
+        chk("榜上有这个人", len(me) == 1, str([x["username"] for x in r["rows"]]))
+        if me:
+            me = me[0]
+            chk("今天记录计 3 条（第 4 条根本没进来）", me["records"] == 3, str(me["records"]))
+            chk("赞记 1 个", me["likes"] == 1, str(me["likes"]))
+            chk("点评记 1 条，自评不算", me["replies"] == 1, str(me["replies"]))
+            chk("积分 = 3×1 + 1×5 + 1×5 = 13", me["points"] == 13, str(me["points"]))
+            chk("有名次", me["rank"] >= 1, str(me["rank"]))
+
+        chk("导师不进榜（他不靠记录挣分）",
+            not any(x["username"] == "prof" for x in r["rows"]),
+            str([x["username"] for x in r["rows"]]))
+
+        s, ry = call("GET", "/api/leaderboard?period=year", token=pter)
+        chk("年榜按积分占比给激励", s == 200 and any("%" in (x["reward"] or "") for x in ry["rows"]),
+            str([x.get("reward") for x in ry["rows"]]))
+        s, rm = call("GET", "/api/leaderboard?period=month", token=pter)
+        chk("月榜前几名给事假天数",
+            s == 200 and any("事假" in (x["reward"] or "") for x in rm["rows"]),
+            str([x.get("reward") for x in rm["rows"]]))
+        top = [x for x in rm["rows"] if x["rank"] == 1 and x["points"]]
+        chk("周榜第一是事假 + 免值日",
+            not [x for x in r["rows"] if x["rank"] == 1 and x["points"]]
+            or "事假" in [x for x in r["rows"] if x["rank"] == 1][0]["reward"],
+            str([x.get("reward") for x in r["rows"]]))
+
+        s, rl = call("GET", "/api/leaderboard?period=week&offset=-1", token=pter)
+        chk("能翻到上周", s == 200 and rl["label"] != r["label"], f'{rl.get("label")} vs {r.get("label")}')
+        chk("上周这个新账号是 0 分",
+            all(x["points"] == 0 for x in rl["rows"] if x["username"] == "pter"),
+            str([(x["username"], x["points"]) for x in rl["rows"]]))
 
         print("\n── 导师管所有项目的成员，且留痕 ──")
         # 学生自建的项目，导师也要能调成员——组里谁参与哪个课题本来就是导师在管

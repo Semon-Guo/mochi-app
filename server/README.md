@@ -71,7 +71,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（191 项）
+python3 server/test_server.py   # 服务端 API（216 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -95,6 +95,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | GET | `/api/users` | 成员列表（导师 / 管理员） |
 | GET | `/api/overview` | 全组统计聚合（导师 / 管理员） |
 | GET | `/api/project-log?id=<projectId>` | 这个项目的成员管理记录（导师 / 管理员） |
+| GET | `/api/leaderboard?period=week\|month\|year&offset=<0..-60>` | 积分榜，全组可见 |
 | POST | `/api/admin/role` | `{userId, role}` 任命角色（仅管理员） |
 | POST | `/api/admin/remove` | `{userId}` 移除成员及其全部数据（仅管理员） |
 | POST | `/api/admin/reset-password` | `{userId}` → `{tempPassword}`（仅管理员） |
@@ -157,6 +158,34 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | 项目成员 | 组里谁参与哪个课题本来就是导师在管 | 导师能改**任何**项目的 `members`，但服务端只取这一个字段合并（`merge_members`）——项目名、颜色仍归建它的人，导师也删不掉别人的项目。每次改动写进 `audit_log`，`/api/project-log` 供导师互查 |
 | 导师建的项目 | 学生看不到这个项目就没法往里记 | 成员名单存在项目 `data.members` 里跟着同步走；服务端另存一张 `project_members` 倒排表，拉取时走索引 |
 | 别人对我的记录写的回复和赞 | 那条评论的 `owner_id` 是导师，按 owner 过滤学生根本拉不到 | 写入时冗余存一份 `target_owner`（被评论记录的作者），拉取条件是 `owner_id = 我 OR target_owner = 我` |
+
+### 加列要小心：SCHEMA 跑在补列之前
+
+`init_db()` 先 `executescript(SCHEMA)` 再 `ALTER TABLE ADD COLUMN`。老库里表已经
+存在，`CREATE TABLE IF NOT EXISTS` 是空操作——**所以新列的索引绝不能写在 SCHEMA
+里**，那会在列还不存在时执行，`no such column` 直接起不来。补完列再建索引。
+
+`records.day` 那次就是这么上线的：本地全绿（测试用的永远是新建的空库，
+CREATE TABLE 里就带着所有列），线上崩了三分钟。现在
+`test_old_db_upgrade()` 会造一个「老结构 + 已有数据」的库把服务器起一遍，
+这条路径才算有人看着。
+
+### 积分与排行榜
+
+一条实验记录 1 分，导师的每个赞 / 每条点评各 5 分（`PT_RECORD` / `PT_LIKE` /
+`PT_REPLY`）。权重差 5 倍是刻意的：记录是自己写的，导师的认可不是。
+
+- **每天最多 3 条记录**（`MOCHI_MAX_RECORDS_PER_DAY`），服务端在 `push()` 里拦，
+  只拦新增——已有记录的编辑照常，否则改个错别字都会因为「今天满了」被拒。
+  **前端也必须拦**：不然本地已经存下、界面上也显示出来了，等同步被拒再回滚，
+  用户看到的就是「刚写好的记录自己没了」。
+- `records.day` 是为此加的列（北京时间归日）。没有它，每推一条记录都得把那个人
+  的全部记录取出来解析 JSON 数一遍。
+- 只算**导师**给的赞和点评，且自己给自己的不算——否则刷分太容易。
+- 榜单**全组可见**：看不见别人的名次，排行榜就不成其为排行榜。所以只能由服务端
+  聚合，学生本地只有自己的数据。
+- 奖励规则集中在 `WEEK_REWARDS` / `MONTH_REWARDS` / `YEAR_POOL_NOTE`，改这一处、
+  接口和界面一起变。`offset` 只允许 ≤0：能翻旧账，不能预支未来。
 
 ### 被拒的改动要能自愈
 
@@ -262,7 +291,7 @@ extendedKeyUsage 含 serverAuth。
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（84 项）
-python3 server/test_server.py   # 服务端 API（190 项；服务器上多一项 scrypt，共 191）
+python3 server/test_server.py   # 服务端 API（215 项；服务器上多一项 scrypt，共 216）
 ```
 
 ### 推送

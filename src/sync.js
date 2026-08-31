@@ -118,6 +118,8 @@ export const register = (info) =>
 export const fetchMe = (token) => api("/api/me", { token });
 export const fetchUsers = (token) => api("/api/users", { token });
 export const fetchOverview = (token) => api("/api/overview", { token });
+export const fetchLeaderboard = (token, period = "week", offset = 0) =>
+  api(`/api/leaderboard?period=${period}&offset=${offset}`, { token });
 export const fetchProjectLog = (token, id) =>
   api(`/api/project-log?id=${encodeURIComponent(id)}`, { token });
 export const fetchRequests = (token) => api("/api/admin/requests", { token });

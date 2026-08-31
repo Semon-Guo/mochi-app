@@ -32,6 +32,21 @@ const MEMBERS = [
 window.fetch = async (url) => {
   const u = String(url);
   const body = u.includes("/api/overview") ? { members: MEMBERS }
+    : u.includes("/api/leaderboard") ? {
+        period: "week", offset: 0, label: "8/31 — 9/6", totalPoints: 61,
+        rules: { record: 1, like: 5, reply: 5, dailyCap: 3 },
+        rows: [
+          { userId: "u1", username: "semon", displayName: "郭思蒙", rank: 1,
+            records: 3, likes: 3, replies: 2, points: 28, reward: "1 天事假额度 · 免一周值日" },
+          { userId: "u2", username: "wenqian", displayName: "李文倩", rank: 2,
+            records: 3, likes: 2, replies: 1, points: 18, reward: "免一周值日" },
+          { userId: "u4", username: "haoran", displayName: "陈浩然", rank: 3,
+            records: 3, likes: 1, replies: 0, points: 8, reward: "免一周值日" },
+          { userId: "u3", username: "yichi", displayName: "张亦弛", rank: 4,
+            records: 2, likes: 1, replies: 0, points: 7, reward: "" },
+          { userId: "u5", username: "mengqi", displayName: "周梦琪", rank: 5,
+            records: 0, likes: 0, replies: 0, points: 0, reward: "" },
+        ] }
     : u.includes("/api/project-log") ? { entries: [
         { at: Date.now() - 2 * 3600e3, actor: "dr.guo", detail: "双矩法实时公里级三维重建：加入 wenqian" },
         { at: Date.now() - 3 * 86400e3, actor: "prof2", detail: "双矩法实时公里级三维重建：加入 semon；移出 yichi" },

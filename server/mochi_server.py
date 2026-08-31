@@ -30,6 +30,7 @@ import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote as urlquote
 
@@ -59,6 +60,11 @@ except Exception as _e:
     webpush = None
     PUSH_OK = False
     _PUSH_ERR = str(_e)
+
+# 积分：一条记录 1 分，导师的每个赞 / 每条点评各 5 分。
+# 每天最多 3 条记录——防的是「为了刷分把一条拆成十条」。
+MAX_RECORDS_PER_DAY = int(os.environ.get("MOCHI_MAX_RECORDS_PER_DAY") or 3)
+PT_RECORD, PT_LIKE, PT_REPLY = 1, 5, 5
 
 MAX_PHOTO = 8 * 1024 * 1024
 
@@ -134,9 +140,13 @@ CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id, seq);
 
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
+  data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0,
+  day TEXT);
 CREATE INDEX IF NOT EXISTS idx_records_seq ON records(seq);
 CREATE INDEX IF NOT EXISTS idx_records_owner ON records(owner_id, seq);
+/* day 的索引不在这里建：老库里 records 表已经存在，CREATE TABLE IF NOT EXISTS
+   是空操作，day 列还没补上，在这儿建索引会直接 no such column 起不来。
+   见 init_db()——补完列再建。 */
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0);
@@ -231,6 +241,21 @@ def init_db():
     c = sqlite3.connect(DB_PATH)
     c.executescript(SCHEMA)
     # 老库补列——不能靠改 CREATE TABLE，那对已存在的表不生效
+    # 顺序要紧：先补列，再建索引。反过来在老库上会 no such column 直接崩，
+    # 而测试用的永远是新建的空库（CREATE TABLE 里就带 day），抓不到这个。
+    rhave = {r[1] for r in c.execute("PRAGMA table_info(records)")}
+    if "day" not in rhave:
+        c.execute("ALTER TABLE records ADD COLUMN day TEXT")
+        # 老数据补上归日。库很小（几百条），一次性扫完就好
+        for rid, blob in c.execute("SELECT id, data FROM records").fetchall():
+            try:
+                at = json.loads(blob).get("at")
+            except Exception:
+                at = None
+            if at:
+                c.execute("UPDATE records SET day = ? WHERE id = ?", (bj_day(at), rid))
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_day ON records(owner_id, day)")
+
     have = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
                       ("pending_role", "TEXT"), ("requested_at", "INTEGER"),
@@ -239,6 +264,16 @@ def init_db():
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
     c.commit()
     c.close()
+
+
+def bj_day(ts_ms):
+    """时间戳归到北京时间的哪一天。全组按同一时区分天，否则同一条记录在
+    不同人的界面上会落在不同日期，日限额和排行榜也就对不上了。"""
+    try:
+        t = time.gmtime((int(ts_ms) + 8 * 3600 * 1000) / 1000)
+        return time.strftime("%Y-%m-%d", t)
+    except Exception:
+        return None
 
 
 def get_setting(key, default=""):
@@ -638,6 +673,19 @@ def push(user, changes):
                             reject(why, cur)
                             continue
 
+                    # 每天最多 3 条记录。只拦新增：已有记录的编辑照常，
+                    # 否则改个错别字都会因为「今天满了」而被拒。
+                    if t == "records" and not deleted_at and not cur:
+                        day = bj_day(payload.get("at"))
+                        if day:
+                            n = c.execute(
+                                "SELECT COUNT(*) FROM records"
+                                " WHERE owner_id = ? AND day = ? AND deleted_at IS NULL",
+                                (user["id"], day)).fetchone()[0]
+                            if n >= MAX_RECORDS_PER_DAY:
+                                reject(f"一天最多记 {MAX_RECORDS_PER_DAY} 条，这天已经满了")
+                                continue
+
                     if cur:
                         c.execute(f"UPDATE {t} SET data=?, updated_at=?, deleted_at=?, seq=? WHERE id=?",
                                   (data, updated_at, deleted_at, next_seq(c), rid))
@@ -646,6 +694,9 @@ def push(user, changes):
                                   " VALUES (?,?,?,?,?,?)",
                                   (rid, user["id"], data, updated_at, deleted_at, next_seq(c)))
 
+                    if t == "records" and not deleted_at:
+                        c.execute("UPDATE records SET day = ? WHERE id = ?",
+                                  (bj_day(payload.get("at")), rid))
                     # 成员名单跟着项目 data 同步过来，这里同步进倒排索引
                     if t == "projects":
                         reindex_members(c, rid, payload)
@@ -1285,6 +1336,102 @@ def decide_request(user, target_id, approve):
     return {"user": public_user(fresh), "approved": bool(approve)}
 
 
+BJ = timezone(timedelta(hours=8))
+
+# 奖励规则集中放这儿，改这一处、界面和接口一起变
+WEEK_REWARDS = {1: "1 天事假额度 · 免一周值日", 2: "免一周值日", 3: "免一周值日"}
+MONTH_REWARDS = {1: "2 天事假", 2: "1 天事假", 3: "0.5 天事假"}
+YEAR_POOL_NOTE = "年终激励按积分占比分配"
+
+
+def period_range(period, offset=0):
+    """返回 (起, 止, 标题)，都按北京时间算。"""
+    today = datetime.now(BJ).date()
+    if period == "month":
+        m = today.month - 1 + offset
+        y, m = today.year + m // 12, m % 12 + 1
+        start = date(y, m, 1)
+        end = date(y + (m // 12), m % 12 + 1, 1) - timedelta(days=1)
+        return start.isoformat(), end.isoformat(), f"{y} 年 {m} 月"
+    if period == "year":
+        y = today.year + offset
+        return date(y, 1, 1).isoformat(), date(y, 12, 31).isoformat(), f"{y} 年"
+    start = today - timedelta(days=today.weekday()) + timedelta(weeks=offset)
+    end = start + timedelta(days=6)
+    return start.isoformat(), end.isoformat(), f"{start.month}/{start.day} — {end.month}/{end.day}"
+
+
+def leaderboard(user, period="week", offset=0):
+    """积分榜。一条记录 1 分（每天封顶 3 条），导师的每个赞 / 每条点评各 5 分。
+
+    只算导师给的赞和点评：学生之间互相点，分数就没有意义了。
+    """
+    if period not in ("week", "month", "year"):
+        period = "week"
+    offset = max(-60, min(0, int(offset or 0)))     # 只往回看，不预支未来
+    c = conn()
+    lo, hi, label = period_range(period, offset)
+
+    people = {r["id"]: r for r in c.execute("SELECT * FROM users WHERE archived_at IS NULL")}
+    advisors = {uid for uid, r in people.items() if r["role"] in GROUP_READERS}
+    stat = {uid: {"records": 0, "likes": 0, "replies": 0}
+            for uid, r in people.items() if uid not in advisors}
+
+    for r in c.execute(
+            "SELECT owner_id, day, COUNT(*) AS n FROM records"
+            " WHERE deleted_at IS NULL AND day >= ? AND day <= ? GROUP BY owner_id, day",
+            (lo, hi)):
+        if r["owner_id"] in stat:
+            # 再封一次顶：日限额是后加的，之前攒下的老数据可能一天不止 3 条
+            stat[r["owner_id"]]["records"] += min(r["n"], MAX_RECORDS_PER_DAY)
+
+    for r in c.execute("SELECT owner_id, target_owner, data, updated_at FROM comments"
+                       " WHERE deleted_at IS NULL"):
+        tgt = r["target_owner"]
+        if tgt not in stat or r["owner_id"] not in advisors or r["owner_id"] == tgt:
+            continue
+        try:
+            d = json.loads(r["data"]) or {}
+        except Exception:
+            d = {}
+        day = bj_day(d.get("at") or r["updated_at"])
+        if not day or day < lo or day > hi:
+            continue
+        stat[tgt]["likes" if d.get("kind") == "like" else "replies"] += 1
+
+    rows = []
+    for uid, e in stat.items():
+        u = people[uid]
+        rows.append({
+            "userId": uid, "username": u["username"], "displayName": u["display_name"],
+            "avatar": u["avatar"], **e,
+            "points": e["records"] * PT_RECORD + e["likes"] * PT_LIKE + e["replies"] * PT_REPLY,
+        })
+    rows.sort(key=lambda x: (-x["points"], x["displayName"]))
+
+    total = sum(x["points"] for x in rows) or 1
+    rank = 0
+    for i, x in enumerate(rows):
+        # 同分同名次
+        if i == 0 or x["points"] != rows[i - 1]["points"]:
+            rank = i + 1
+        x["rank"] = rank
+        if not x["points"]:
+            x["reward"] = ""
+        elif period == "week":
+            x["reward"] = WEEK_REWARDS.get(rank, "")
+        elif period == "month":
+            x["reward"] = MONTH_REWARDS.get(rank, "")
+        else:
+            x["reward"] = f"年终激励 {round(x['points'] * 100 / total)}%"
+
+    return {"period": period, "offset": offset, "label": label, "from": lo, "to": hi,
+            "rows": rows, "totalPoints": sum(x["points"] for x in rows),
+            "rules": {"record": PT_RECORD, "like": PT_LIKE, "reply": PT_REPLY,
+                      "dailyCap": MAX_RECORDS_PER_DAY,
+                      "week": WEEK_REWARDS, "month": MONTH_REWARDS, "year": YEAR_POOL_NOTE}}
+
+
 def group_overview(user):
     """导师端用的一次性概览：成员、每人的项目/记录数、活跃度。
 
@@ -1721,6 +1868,12 @@ class Handler(BaseHTTPRequestHandler):
 
             if method == "GET" and path == "/api/project-log":
                 return self._json(project_log(self._need_user(), query.get("id", [""])[0]))
+
+            if method == "GET" and path == "/api/leaderboard":
+                # 榜单全组可见——看不见别人的名次，排行榜就没有意义
+                return self._json(leaderboard(
+                    self._need_user(), query.get("period", ["week"])[0],
+                    int(query.get("offset", ["0"])[0] or 0)))
 
             if method == "GET" and path == "/api/overview":
                 return self._json(group_overview(self._need_user()))
