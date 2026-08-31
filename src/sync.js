@@ -262,10 +262,15 @@ export async function syncOnce(data, token) {
     const res = await api("/api/sync", { method: "POST", body: byKind, token });
     pushed = res.applied || 0;
     rejected = res.rejected || [];
-    const bad = new Set(rejected.map(r => r.id));
+    // 被拒的也要标成「推过了」。服务端的拒绝理由全是永久性的——不是你的行、
+    // 只有导师能设、那条记录不存在——留着重试就是每两分钟白发一次，界面上
+    // 还永远挂着「N 条待同步」。
+    if (rejected.length) {
+      console.warn("[sync] 服务端拒绝了这些改动，已回滚成服务器版本：", rejected);
+    }
     for (const kind of KINDS)
       for (const row of byKind[kind] || [])
-        if (!bad.has(row.id)) markClean(sync, row.id, row.updatedAt);
+        markClean(sync, row.id, row.updatedAt);
   }
 
   // 2) 拉服务器改动（可能分页）
@@ -277,6 +282,19 @@ export async function syncOnce(data, token) {
     for (const kind of KINDS) incoming[kind].push(...(res[kind] || []));
     sync.cursor = res.seq ?? sync.cursor;
     if (!res.more || ++guard > 50) break;
+  }
+
+  // 被拒的改动要在本地撤销，光标记干净是不够的：那一行的 seq 没变，后续增量
+  // 拉取永远不会再把它发下来，被拒的本地版本就会留在这台设备上，成为一份
+  // 只有他自己看得见的假数据。服务端拒绝时回传了当前版本（current），把它
+  // 当成一条「拉回来的行」塞进 incoming 即可——服务器上压根没有那一行时
+  // （比如学生擅自新建的），塞一条墓碑把本地那条删掉。
+  const now = Date.now();
+  for (const r of rejected) {
+    if (!incoming[r.table]) continue;
+    incoming[r.table].push(r.current || {
+      id: r.id, ownerId: null, data: null, updatedAt: now, deletedAt: now, seq: 0,
+    });
   }
 
   sync.lastSyncAt = Date.now();

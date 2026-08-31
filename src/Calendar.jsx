@@ -175,11 +175,12 @@ function MilestoneSheet({ initial, day, projects, onSave, onDelete, onClose }) {
 
 /* ── 月视图 ── */
 export function Calendar({ records = [], todos = [], projects = [], milestones = [],
-                           onSaveMilestone, onDeleteMilestone, onOpenProject }) {
+                           onSaveMilestone, onDeleteMilestone, onOpenProject, canEdit = false }) {
   const [mode, setMode] = useState("month");        // month | week
   const [cursor, setCursor] = useState(() => { const d = bjNow(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [picked, setPicked] = useState(() => dayKeyOf(Date.now()));
   const [editing, setEditing] = useState(null);     // {ms} | {day} | null
+  const [showAll, setShowAll] = useState(false);
 
   const byDay = useByDay({ records, todos, milestones });
   const projColor = useMemo(() => {
@@ -213,7 +214,7 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
     return milestones
       .filter((ms) => new Date(ms.at || 0).setHours(0, 0, 0, 0) >= today)
       .sort((a, b) => (a.at || 0) - (b.at || 0))
-      .slice(0, 6);
+      .slice(0, 12);
   }, [milestones]);
 
   // 周模式下这一周的七天，从周一起
@@ -237,6 +238,12 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
       return { y: d.getFullYear(), m: d.getMonth() };
     });
   };
+  const jumpTo = (ts) => {
+    const d = toBJ(ts);
+    setCursor({ y: d.getFullYear(), m: d.getMonth() });
+    setPicked(dayKeyOf(ts));
+    setMode("month");
+  };
   const goToday = () => {
     const d = bjNow();
     setCursor({ y: d.getFullYear(), m: d.getMonth() });
@@ -250,6 +257,71 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
 
   return (
     <div>
+      {/* 重点节点卡片放在最上面：打开日历第一眼要回答的是「接下来有什么、还剩几天」，
+          而不是「这个月的格子长什么样」。倒计时用大号数字，扫一眼就有轻重缓急。 */}
+      {upcoming.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          {(showAll ? upcoming : upcoming.slice(0, 3)).map((ms) => {
+            const k = kindOf(ms.kind);
+            const d = toBJ(ms.at);
+            const days = Math.round((new Date(ms.at).setHours(0, 0, 0, 0)
+              - new Date().setHours(0, 0, 0, 0)) / 86400000);
+            const urg = days <= 1 ? "#C02556" : days <= 3 ? "#D06024" : days <= 7 ? "#B07C14" : C.ink;
+            const p = projects.find((x) => x.id === ms.projectId);
+            const sub = [p?.name, ms.note].filter(Boolean).join(" · ");
+            return (
+              <button key={ms.id}
+                onClick={() => (canEdit ? setEditing({ ms }) : jumpTo(ms.at))}
+                title={canEdit ? "点一下编辑" : "点一下跳到那天"}
+                style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 12,
+                  padding: "13px 15px", marginBottom: 8, borderRadius: 16,
+                  border: `1px solid ${C.line}`, borderLeft: `4px solid ${k.color}`,
+                  background: "#FFF", cursor: "pointer", fontFamily: "inherit",
+                  textAlign: "left", boxShadow: "0 1px 3px rgba(120,100,70,.05)",
+                }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: k.color,
+                      background: `color-mix(in srgb, ${k.color} 11%, transparent)`,
+                      padding: "2px 7px", borderRadius: 5 }}>{k.icon} {k.label}</span>
+                    <span style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
+                      {dayTitle(d)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 15.5, fontWeight: 700, lineHeight: 1.3, color: C.ink,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {ms.title}
+                  </div>
+                  {sub && (
+                    <div style={{ fontSize: 11, color: C.sub, marginTop: 3, lineHeight: 1.5,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
+                  )}
+                </div>
+                {days === 0 ? (
+                  <span style={{ flexShrink: 0, fontSize: 13, fontWeight: 800, color: "#FFF",
+                    background: "#C02556", padding: "7px 12px", borderRadius: 999 }}>就是今天</span>
+                ) : (
+                  <div style={{ textAlign: "center", flexShrink: 0, minWidth: 44 }}>
+                    <div style={{ fontSize: 9.5, color: C.dim, letterSpacing: "1.5px" }}>还有</div>
+                    <div style={{ fontSize: 27, fontWeight: 800, fontFamily: MONO,
+                      lineHeight: 1.05, color: urg, letterSpacing: "-1px" }}>{days}</div>
+                    <div style={{ fontSize: 9.5, color: C.dim }}>天</div>
+                  </div>
+                )}
+              </button>
+            );
+          })}
+          {upcoming.length > 3 && (
+            <button onClick={() => setShowAll((v) => !v)} style={{
+              width: "100%", padding: "7px 0", borderRadius: 10, cursor: "pointer",
+              border: "none", background: "transparent", color: C.dim,
+              fontSize: 12, fontWeight: 600, fontFamily: "inherit",
+            }}>{showAll ? "收起" : `还有 ${upcoming.length - 3} 个重点 ▾`}</button>
+          )}
+        </div>
+      )}
+
       {/* 顶栏：月份 + 今天 + 月/周切换 */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
         <button onClick={() => step(-1)} style={navBtn} title="上一页">‹</button>
@@ -309,9 +381,11 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
                   {e.miles.map((ms) => {
                     const k = kindOf(ms.kind);
                     return (
-                      <button key={ms.id} onClick={() => setEditing({ ms })} style={{
+                      <button key={ms.id} onClick={canEdit ? () => setEditing({ ms }) : undefined}
+                        style={{
                         display: "flex", alignItems: "center", gap: 6, width: "100%",
-                        padding: "5px 9px", marginBottom: 5, borderRadius: 8, cursor: "pointer",
+                        padding: "5px 9px", marginBottom: 5, borderRadius: 8,
+                        cursor: canEdit ? "pointer" : "default",
                         border: `1px solid ${C.line}`, borderLeft: `3px solid ${k.color}`,
                         background: "#FFF", fontFamily: "inherit", textAlign: "left",
                       }}>
@@ -437,20 +511,24 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
               {picked === todayKey && (
                 <span style={{ fontSize: 10.5, fontWeight: 700, color: "#5A9E4B" }}>今天</span>
               )}
-              <button onClick={() => setEditing({ day: selDate.getTime() })} style={{
-                marginLeft: "auto", padding: "5px 11px", borderRadius: 999, cursor: "pointer",
-                border: `1px dashed ${C.dim}`, background: "transparent", color: C.sub,
-                fontSize: 11.5, fontWeight: 600, fontFamily: "inherit",
-              }}>＋ 重点节点</button>
+              {canEdit && (
+                <button onClick={() => setEditing({ day: selDate.getTime() })} style={{
+                  marginLeft: "auto", padding: "5px 11px", borderRadius: 999, cursor: "pointer",
+                  border: `1px dashed ${C.dim}`, background: "transparent", color: C.sub,
+                  fontSize: 11.5, fontWeight: 600, fontFamily: "inherit",
+                }}>＋ 重点节点</button>
+              )}
             </div>
 
             {sel.miles.map((ms) => {
               const k = kindOf(ms.kind);
               const p = projects.find((x) => x.id === ms.projectId);
               return (
-                <button key={ms.id} onClick={() => setEditing({ ms })} style={{
+                <button key={ms.id} onClick={canEdit ? () => setEditing({ ms }) : undefined}
+                  style={{
                   width: "100%", display: "flex", alignItems: "flex-start", gap: 9,
-                  padding: "9px 10px", marginBottom: 7, borderRadius: 10, cursor: "pointer",
+                  padding: "9px 10px", marginBottom: 7, borderRadius: 10,
+                  cursor: canEdit ? "pointer" : "default",
                   border: `1px solid ${C.line}`, borderLeft: `3px solid ${k.color}`,
                   background: "#FFF", fontFamily: "inherit", textAlign: "left",
                 }}>
@@ -526,42 +604,6 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
           </div>
 
           {/* 本月的重点节点，不用一天天点过去找 */}
-          {upcoming.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: C.dim, letterSpacing: "0.6px",
-                margin: "0 0 8px 2px" }}>接下来 · {upcoming.length}</div>
-              {upcoming.map((ms) => {
-                const k = kindOf(ms.kind);
-                const d = toBJ(ms.at);
-                const days = Math.round((new Date(ms.at).setHours(0, 0, 0, 0)
-                  - new Date().setHours(0, 0, 0, 0)) / 86400000);
-                return (
-                  <button key={ms.id} onClick={() => {
-                      const d = toBJ(ms.at);
-                      setCursor({ y: d.getFullYear(), m: d.getMonth() });
-                      setPicked(dayKeyOf(ms.at));
-                    }}
-                    style={{ width: "100%", display: "flex", alignItems: "center", gap: 9,
-                      padding: "8px 10px", marginBottom: 6, borderRadius: 10, cursor: "pointer",
-                      border: `1px solid ${C.line}`, background: C.panel, fontFamily: "inherit",
-                      textAlign: "left" }}>
-                    <span style={{ fontSize: 11.5, fontWeight: 700, fontFamily: MONO,
-                      color: k.color, width: 38, flexShrink: 0 }}>
-                      {d.getMonth() + 1}/{d.getDate()}
-                    </span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600,
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {ms.title}
-                    </span>
-                    <span style={{ fontSize: 10.5, color: days < 0 ? C.dim : days <= 3 ? "#C02556" : C.sub,
-                      fontWeight: 700, flexShrink: 0 }}>
-                      {days === 0 ? "就是今天" : days > 0 ? `还有 ${days} 天` : `${-days} 天前`}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
         </>
       )}
 

@@ -40,8 +40,8 @@ const base = () => ({ todos: [], notes: [], projects: [], records: [] });
 async function syncDevice(dev, data, token) {
   asDevice(dev);
   Sync.setServer(BASE);   // 每台设备各自存服务器地址，新设备要先配
-  const { sync, incoming, pushed, pulled } = await Sync.syncOnce(data, token);
-  return { data: Sync.mergeIncoming(data, sync, incoming), pushed, pulled };
+  const { sync, incoming, pushed, pulled, rejected } = await Sync.syncOnce(data, token);
+  return { data: Sync.mergeIncoming(data, sync, incoming), pushed, pulled, rejected };
 }
 
 const tmp = mkdtempSync(join(tmpdir(), "mochi-e2e-"));
@@ -450,6 +450,45 @@ try {
       !(dGrpA2.comments || []).some((c) => c.id === "cm2"),
       JSON.stringify((dGrpA2.comments || []).map((c) => c.id)));
   chk("回复不受取消赞影响", (dGrpA2.comments || []).some((c) => c.id === "cm1"));
+
+  console.log("\n── 重点节点：老师定，全组共享 ──");
+  asDevice("P"); Sync.setServer(BASE);
+  dP3 = Sync.stampChanges(dP3, { ...dP3, milestones: [
+    { id: "ms1", at: 1780000000000, title: "Optica 投稿截止", kind: "deadline" }] }, 100000);
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+  chk("导师能建重点节点", res.pushed >= 1, `pushed=${res.pushed}`);
+
+  let dMsA = base();
+  res = await syncDevice("A", dMsA, a.token); dMsA = res.data;
+  let dMsB = base();
+  res = await syncDevice("B", dMsB, b.token); dMsB = res.data;
+  chk("学生 A 看得到（全组共享，不看归属）",
+      (dMsA.milestones || []).some((m) => m.id === "ms1"));
+  chk("学生 B 也看得到", (dMsB.milestones || []).some((m) => m.id === "ms1"));
+
+  // 学生改一下，服务端会拒。这里真正要钉的是「被拒之后不能一直重试」——
+  // 那会变成每两分钟白发一次，界面上还永远挂着「N 条待同步」。
+  dMsA = Sync.stampChanges(dMsA, { ...dMsA,
+    milestones: dMsA.milestones.map((m) => m.id === "ms1" ? { ...m, title: "学生改的" } : m) }, 101000);
+  chk("改完本地有 1 条待同步", Sync.pendingCount(dMsA) === 1, String(Sync.pendingCount(dMsA)));
+  res = await syncDevice("A", dMsA, a.token); dMsA = res.data;
+  chk("推上去被拒", res.rejected?.length === 1, JSON.stringify(res.rejected));
+  chk("被拒之后不再挂着待同步（否则每 2 分钟白发一次，界面永远显示待同步）",
+      Sync.pendingCount(dMsA) === 0, String(Sync.pendingCount(dMsA)));
+
+  res = await syncDevice("A", dMsA, a.token); dMsA = res.data;
+  chk("下一轮用服务器那份盖回来——「你无权改它」就该是这个结果",
+      dMsA.milestones.find((m) => m.id === "ms1")?.title === "Optica 投稿截止",
+      dMsA.milestones.find((m) => m.id === "ms1")?.title);
+
+  dMsA = Sync.stampChanges(dMsA, { ...dMsA, milestones: [...dMsA.milestones,
+    { id: "ms-own", at: 1780000000000, title: "学生自己加的", kind: "other" }] }, 102000);
+  res = await syncDevice("A", dMsA, a.token); dMsA = res.data;
+  chk("学生自己建不了", res.rejected?.some((r) => r.id === "ms-own"), JSON.stringify(res.rejected));
+  chk("这条也不会一直重试", Sync.pendingCount(res.data) === 0, String(Sync.pendingCount(res.data)));
+  chk("而且本地那条被清掉了——留着就是一份只有他自己看得见的假数据",
+      !(res.data.milestones || []).some((m) => m.id === "ms-own"),
+      JSON.stringify((res.data.milestones || []).map((m) => m.id)));
 
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {

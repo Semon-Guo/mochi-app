@@ -572,27 +572,37 @@ def main():
         chk("移出名单后学生就拉不到了",
             not any(p["id"] == "shared1" for p in r.get("projects", [])))
 
-        print("\n── 重点节点 ──")
+        print("\n── 重点节点：老师定，全组共享 ──")
+        s, r = call("POST", "/api/sync", {"milestones": [
+            {"id": "ms-stu", "updatedAt": now + 70000,
+             "data": {"at": now + 86400000, "title": "学生自己加的", "kind": "other"}}]}, token=stu1)
+        chk("学生建不了重点节点", s == 200 and not r["applied"] and r["rejected"], str(r))
+
         s, r = call("POST", "/api/sync", {"milestones": [
             {"id": "ms1", "updatedAt": now + 70000,
              "data": {"at": now + 4 * 86400000, "title": "Optica 投稿截止",
-                      "kind": "deadline", "projectId": "p1"}}]}, token=stu1)
-        chk("学生能建重点节点", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+                      "kind": "deadline", "projectId": "p1"}}]}, token=admin)
+        chk("导师能建重点节点", s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
-        s, r = call("GET", "/api/sync?since=0", token=stu1)
-        mine = [m for m in r.get("milestones", []) if m["id"] == "ms1"]
-        chk("自己拉得回来", len(mine) == 1 and mine[0]["data"]["title"] == "Optica 投稿截止")
-
-        s, r = call("GET", "/api/sync?since=0", token=admin)
-        chk("导师看得到全组的重点节点（组里的关键日期是共同信息）",
-            any(m["id"] == "ms1" for m in r.get("milestones", [])))
-
-        s, r = call("GET", "/api/sync?since=0", token=stu2)
-        chk("别的学生看不到", not any(m["id"] == "ms1" for m in r.get("milestones", [])))
+        for who, name in ((stu1, "学生甲"), (stu2, "学生乙"), (admin, "管理员")):
+            s, r = call("GET", "/api/sync?since=0", token=who)
+            chk(f"{name}都看得到（组里的日程是共同信息）",
+                any(m["id"] == "ms1" for m in r.get("milestones", [])))
 
         s, r = call("POST", "/api/sync", {"milestones": [
-            {"id": "ms1", "updatedAt": now + 71000, "data": {"title": "改成别人的"}}]}, token=stu2)
-        chk("改不了别人的重点节点", s == 200 and r["rejected"], str(r))
+            {"id": "ms1", "updatedAt": now + 71000, "data": {"title": "学生改一下试试"}}]}, token=stu2)
+        chk("学生改不了", s == 200 and not r["applied"] and r["rejected"], str(r.get("rejected")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        got = [m for m in r.get("milestones", []) if m["id"] == "ms1"][0]
+        chk("学生那边的内容没被改动", got["data"]["title"] == "Optica 投稿截止", got["data"]["title"])
+
+        s, r = call("POST", "/api/sync", {"milestones": [
+            {"id": "ms1", "updatedAt": now + 72000,
+             "data": {"at": now + 5 * 86400000, "title": "Optica 投稿截止（延期）",
+                      "kind": "deadline"}}]}, token=admin)
+        chk("导师能改（换了导师之后，前一任定的日程不该冻在那儿）",
+            s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
         print("\n── 导师回复与点赞 ──")
         s, r = call("POST", "/api/sync", {"comments": [

@@ -1620,14 +1620,17 @@ export default function MochiApp() {
   ] }));
   const dropComment = (c) => setData(d => ({ ...d, comments: (d.comments || []).filter(x => x.id !== c.id) }));
 
-  // 重点节点（日历上的投稿截止、组会、答辩这些）
-  const saveMilestone = (ms) => setData(d => {
+  // 重点节点是组里的共同日程（投稿截止、组会、答辩），只有导师能定，所有人都看得到。
+  // 界面上已经不给学生编辑入口，这里再挡一道：真让他改出去，服务端会永久拒绝，
+  // 而被拒的改动如果一直重试，就是每两分钟白发一次外加界面上永远的「待同步」。
+  const canEditMilestones = Sync.canReadGroup(Sync.getAuth()?.user);
+  const saveMilestone = (ms) => canEditMilestones && setData(d => {
     const list = d.milestones || [];
     return ms.id
       ? { ...d, milestones: list.map(x => x.id === ms.id ? { ...x, ...ms } : x) }
       : { ...d, milestones: [...list, { ...ms, id: uid() }] };
   });
-  const deleteMilestone = (ms) =>
+  const deleteMilestone = (ms) => canEditMilestones &&
     setData(d => ({ ...d, milestones: (d.milestones || []).filter(x => x.id !== ms.id) }));
 
   // 导师在导师端建的组级项目：归他所有，成员名单跟着项目数据一起同步，
@@ -2060,7 +2063,8 @@ export default function MochiApp() {
           <Calendar records={data.records} todos={data.todos} projects={data.projects}
             milestones={data.milestones || []}
             onSaveMilestone={saveMilestone} onDeleteMilestone={deleteMilestone}
-            onOpenProject={(pid)=>{ if(pid){ setTab("lab"); setOpenProject(pid); } }}/>
+            onOpenProject={(pid)=>{ if(pid){ setTab("lab"); setOpenProject(pid); } }}
+            canEdit={canEditMilestones}/>
         ):tab==="todo"?(
           <>
             {showAdd && !addSubParent && <TaskForm onSave={info=>addTodo(info)} onCancel={()=>setShowAdd(false)} />}

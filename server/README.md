@@ -71,7 +71,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（175 项）
+python3 server/test_server.py   # 服务端 API（178 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -152,10 +152,23 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 
 | 例外 | 为什么 | 怎么实现 |
 |---|---|---|
+| 重点节点 | 组里的日程（投稿截止、组会、答辩）是共同信息 | 在 `GROUP_SHARED` 里：**谁都读得到，只有导师写得了**（`GROUP_WRITABLE_BY`）。`owner_id` 只记「谁定的」，不影响谁看得到；换了导师之后前一任定的日程也改得动 |
 | 导师建的项目 | 学生看不到这个项目就没法往里记 | 成员名单存在项目 `data.members` 里跟着同步走；服务端另存一张 `project_members` 倒排表，拉取时走索引 |
 | 别人对我的记录写的回复和赞 | 那条评论的 `owner_id` 是导师，按 owner 过滤学生根本拉不到 | 写入时冗余存一份 `target_owner`（被评论记录的作者），拉取条件是 `owner_id = 我 OR target_owner = 我` |
 
-两个坑：
+### 被拒的改动要能自愈
+
+`push()` 拒绝一行时会把服务器上的**当前版本**一起回传（`current`）。这不是锦上添花：
+
+- 不回传的话客户端没法自愈。那一行的 `seq` 并没有变，后续增量拉取永远不会
+  再把它发下来，被拒的本地改动就留在那台设备上，成为一份**只有他自己看得见
+  的假数据**。
+- 客户端拿到 `current` 后当成一条「拉回来的行」并进本地；服务器上压根没有那
+  一行时（学生擅自新建的），塞一条墓碑把本地那条删掉。
+- 被拒的行同时标成「推过了」。拒绝理由全是永久性的，留着重试就是每两分钟
+  白发一次，界面上还永远挂着「N 条待同步」。
+
+三个坑：
 
 - **评论的墓碑不能清 `target_owner`**。取消赞是删除，删除时 `data` 是空的，
   跟着把 `target_owner` 清掉的话学生就拉不到这条墓碑，那个赞会永远留在他屏幕上。
@@ -242,8 +255,8 @@ extendedKeyUsage 含 serverAuth。
 
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
-node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（74 项）
-python3 server/test_server.py   # 服务端 API（174 项；服务器上多一项 scrypt，共 175）
+node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（84 项）
+python3 server/test_server.py   # 服务端 API（177 项；服务器上多一项 scrypt，共 178）
 ```
 
 ### 推送

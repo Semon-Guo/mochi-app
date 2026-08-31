@@ -79,12 +79,17 @@ SYNC_TABLES = ("projects", "records", "photos", "comments", "milestones", "todos
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
 ADVISOR_VISIBLE = ("projects", "records", "photos", "comments", "milestones")
+# 重点节点是**组里的共同日程**（投稿截止、组会、答辩），跟「谁记的」无关：
+# 所有人都读得到，但只有导师和管理员写得了。学生各自能建的话，日历上就会
+# 冒出一堆只有本人看得见的私人条目，那就不是组日程了。
+GROUP_SHARED = ("milestones",)
 
 # 三种角色。admin 是 advisor 的超集：除了能看全组记录，还能审批导师申请。
 # 用导师码注册只是「申请」，在管理员点头之前一律按学生对待——否则导师码
 # 一旦外泄，拿到的人立刻就能读全组记录。
 ROLES = ("student", "advisor", "admin")
 GROUP_READERS = ("advisor", "admin")
+GROUP_WRITABLE_BY = GROUP_READERS      # 谁能写 GROUP_SHARED 里的表
 
 
 def can_read_group(user):
@@ -180,8 +185,8 @@ CREATE INDEX IF NOT EXISTS idx_comments_seq ON comments(seq);
 CREATE INDEX IF NOT EXISTS idx_comments_owner ON comments(owner_id, seq);
 CREATE INDEX IF NOT EXISTS idx_comments_target ON comments(target_owner, seq);
 
-/* 日历上的重点节点：投稿截止、组会、开题、答辩这些。跟记录一样按人归属、
-   导师可见全组——组里的关键日期本来就该是共同信息。 */
+/* 日历上的重点节点：投稿截止、组会、开题、答辩这些。全组共享：谁都读得到，
+   只有导师写得了。owner_id 记的是「谁定的」，不影响谁看得到。 */
 CREATE TABLE IF NOT EXISTS milestones (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
@@ -534,6 +539,9 @@ def pull(user, since):
                 "SELECT * FROM projects WHERE (owner_id = ?"
                 " OR id IN (SELECT project_id FROM project_members WHERE user_id = ?))"
                 " AND seq > ? ORDER BY seq LIMIT ?", (uid, uid, since, PAGE)).fetchall()
+        elif t in GROUP_SHARED:
+            rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?",
+                             (since, PAGE)).fetchall()
         elif t == "comments":
             rows = c.execute(
                 "SELECT * FROM comments WHERE (owner_id = ? OR target_owner = ?)"
@@ -552,7 +560,12 @@ def pull(user, since):
 
 
 def push(user, changes):
-    """推送本地改动。只能写自己的；同一条记录以 updatedAt 较大的一方为准（LWW）。"""
+    """推送本地改动。只能写自己的；同一条记录以 updatedAt 较大的一方为准（LWW）。
+
+    拒绝时把服务器上的当前版本一起回传（current）。不回传的话客户端没法自愈：
+    那一行的 seq 并没有变，后续增量拉取永远不会再把它发下来，被拒的本地改动
+    就这么留在那台设备上，成了一份只有他自己看得见的假数据。
+    """
     c = conn()
     res = {"applied": 0, "skipped": 0, "rejected": []}
     notices = []          # 落库之后再发，不能占着写锁做网络 I/O
@@ -567,17 +580,28 @@ def push(user, changes):
                     if not isinstance(rid, str) or not rid:
                         res["rejected"].append({"table": t, "id": rid, "why": "缺少 id"})
                         continue
+
+                    def reject(why, cur=None):
+                        out = {"table": t, "id": rid, "why": why}
+                        if cur is not None:
+                            out["current"] = shape(t, cur)
+                        res["rejected"].append(out)
                     try:
                         updated_at = int(row.get("updatedAt") or 0)
                     except (TypeError, ValueError):
                         updated_at = 0
                     if not updated_at:
-                        res["rejected"].append({"table": t, "id": rid, "why": "缺少 updatedAt"})
+                        reject("缺少 updatedAt")
                         continue
 
                     cur = c.execute(f"SELECT * FROM {t} WHERE id = ?", (rid,)).fetchone()
-                    if cur and cur["owner_id"] != user["id"]:
-                        res["rejected"].append({"table": t, "id": rid, "why": "不能修改别人的记录"})
+                    if t in GROUP_SHARED and user["role"] not in GROUP_WRITABLE_BY:
+                        reject("只有导师能设置重点节点", cur)
+                        continue
+                    # 组共享的东西谁定的都能改：换了导师之后，前一个导师定的
+                    # 组会日程不该就此冻在那儿没人动得了
+                    if cur and cur["owner_id"] != user["id"] and t not in GROUP_SHARED:
+                        reject("不能修改别人的记录", cur)
                         continue
                     if cur and updated_at <= cur["updated_at"]:
                         res["skipped"] += 1
@@ -589,7 +613,7 @@ def push(user, changes):
                     if t == "comments" and not deleted_at:
                         why = comment_target_error(c, user, payload)
                         if why:
-                            res["rejected"].append({"table": t, "id": rid, "why": why})
+                            reject(why, cur)
                             continue
 
                     if cur:
