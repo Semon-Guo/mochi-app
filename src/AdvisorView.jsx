@@ -335,6 +335,40 @@ function RequestPanel({ token, onChanged }) {
 }
 
 /* ── 导师端主界面 ── */
+/* ── 某个项目的成员管理记录 ──
+   导师之间互相能看见对方动过什么。组里不止一个导师时，「谁把人挪进挪出的」
+   不该只能靠问。 */
+function ProjectLog({ projectId, nonce }) {
+  const [rows, setRows] = useState([]);
+  useEffect(() => {
+    const auth = Sync.getAuth();
+    if (!auth) return;
+    let alive = true;
+    Sync.fetchProjectLog(auth.token, projectId)
+      .then((r) => { if (alive) setRows(r.entries || []); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [projectId, nonce]);
+
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.hair}` }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: C.dim, letterSpacing: "0.4px",
+        marginBottom: 7 }}>管理记录</div>
+      {rows.slice(0, 8).map((e, i) => (
+        <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", fontSize: 11.5,
+          color: C.sub, lineHeight: 1.6 }}>
+          <span style={{ fontFamily: MONO, color: C.dim, flexShrink: 0 }}>{fmtShort(e.at)}</span>
+          <span style={{ fontWeight: 700, color: C.ink, flexShrink: 0 }}>{e.actor}</span>
+          <span style={{ minWidth: 0, wordBreak: "break-word" }}>
+            {e.detail.includes("：") ? e.detail.split("：").slice(1).join("：") : e.detail}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ── 主页那一条「新记录」 ──
    导师打开 app 想知道的第一件事是「谁又干活了」，所以内容直接铺开：头像、
    正文、缩略图、附件一次看全，赞和回复就地能点，不用点进去再点回来。 */
@@ -506,12 +540,16 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
   };
   const reply = (r, text) => { actions.addComment?.(r.id, REPLY, text); markSeen([r.id]); };
 
-  // 只有项目的拥有者能改名单——服务端本来就只接受本人的写入
+  // 导师能调**任何**项目的成员——组里谁参与哪个课题本来就是导师在管。
+  // 服务端只接受 members 这一个字段的改动，项目名和颜色仍归建它的人。
   const ownsProject = (p) => p && (!p.ownerId || p.ownerId === meId);
+  const [logNonce, setLogNonce] = useState(0);
   const toggleMember = (p, uid) => {
     const cur = p.members || [];
     actions.setProjectMembers?.(p.id,
       cur.includes(uid) ? cur.filter((x) => x !== uid) : [...cur, uid]);
+    // 记录是服务端在同步时写的，本地没法立刻知道，隔一会儿再去取一次
+    setTimeout(() => setLogNonce((n) => n + 1), 2500);
   };
   const rowProps = (r) => ({
     thread: threadOf(cmtIndex, r.id), meId,
@@ -656,10 +694,15 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
         <Panel>
           <Heatmap records={mine} color={projColor[focus.id] || C.blue} />
         </Panel>
-        {ownsProject(p) ? (
-          <Panel title="项目成员">
+        <Panel title="项目成员">
             <div style={{ fontSize: 11.5, color: C.sub, lineHeight: 1.6, marginBottom: 10 }}>
               勾中的人才看得到这个项目，也才能往里记。移出后他已经写下的记录不受影响。
+              {!ownsProject(p) && (
+                <span style={{ display: "block", color: C.dim, marginTop: 3 }}>
+                  这是 {byId[p?.ownerId]?.displayName || "成员"} 建的项目，你能调成员，
+                  改不了项目名。每次调整都会记进下面的管理记录。
+                </span>
+              )}
             </div>
             {students.length === 0 && <div style={{ fontSize: 12.5, color: C.dim }}>组里还没有成员</div>}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -687,34 +730,8 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
                 );
               })}
             </div>
+            <ProjectLog projectId={p?.id} nonce={logNonce} />
           </Panel>
-        ) : (
-          <Panel title="项目成员">
-            <div style={{ fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
-              这是 {byId[p?.ownerId]?.displayName || "成员"} 自己建的项目，名单由他自己管。
-            </div>
-          </Panel>
-        )}
-        {!ownsProject(p) && people.length > 0 && (
-          <Panel title="有记录的成员">
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {people.map((uid) => {
-                const n = mine.filter((r) => r.ownerId === uid).length;
-                return (
-                  <button key={uid} onClick={() => setFocus({ type: "user", id: uid })} style={{
-                    display: "flex", alignItems: "center", gap: 7, cursor: "pointer",
-                    border: `1px solid ${C.line}`, borderRadius: 999, padding: "4px 11px 4px 4px",
-                    background: "#FFF", fontFamily: "inherit",
-                  }}>
-                    <Avatar user={byId[uid]} size={22} />
-                    <span style={{ fontSize: 12, fontWeight: 600 }}>{byId[uid]?.displayName || "未知"}</span>
-                    <span style={{ fontSize: 11, fontFamily: MONO, color: C.dim }}>{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </Panel>
-        )}
         <Panel title={`全部记录 · ${mine.length}`}>
           {mine.length === 0 && <Empty text="这个项目还没有记录" />}
           {mine.map((r) => (

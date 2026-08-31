@@ -572,6 +572,54 @@ def main():
         chk("移出名单后学生就拉不到了",
             not any(p["id"] == "shared1" for p in r.get("projects", [])))
 
+        print("\n── 导师管所有项目的成员，且留痕 ──")
+        # 学生自建的项目，导师也要能调成员——组里谁参与哪个课题本来就是导师在管
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "own1", "updatedAt": now + 80000,
+             "data": {"name": "学生自建课题", "color": "#5B7FC7"}}]}, token=stu1)
+        chk("学生建了个自己的项目", s == 200 and r["applied"] == 1)
+
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "own1", "updatedAt": now + 81000,
+             "data": {"name": "被导师改掉的名字", "members": [stu2_id]}}]}, token=admin)
+        chk("导师能改别人项目的成员", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        got = [p for p in r.get("projects", []) if p["id"] == "own1"][0]
+        chk("只换了成员名单", got["data"].get("members") == [stu2_id], str(got["data"].get("members")))
+        chk("项目名没被覆盖（导师那份可能是旧的，整推会把新名字盖回去）",
+            got["data"]["name"] == "学生自建课题", got["data"]["name"])
+        chk("颜色这些也原样保留", got["data"].get("color") == "#5B7FC7", str(got["data"].get("color")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("被加进来的学生拉得到这个项目",
+            any(p["id"] == "own1" for p in r.get("projects", [])))
+
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "own1", "updatedAt": now + 82000, "deletedAt": now + 82000}]}, token=admin)
+        chk("但导师删不掉别人的项目", s == 200 and not r["applied"] and r["rejected"], str(r))
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        still = [p for p in r.get("projects", []) if p["id"] == "own1"]
+        chk("项目还在，成员也没被清空",
+            still and still[0]["data"] and still[0]["data"].get("members") == [stu2_id])
+
+        s, r = call("GET", "/api/project-log?id=own1", token=admin)
+        chk("留下了管理记录", s == 200 and len(r.get("entries", [])) == 1, str(r))
+        if r.get("entries"):
+            e = r["entries"][0]
+            chk("记录里有是谁动的", e["actor"] == "prof", e["actor"])
+            chk("记录里有动了谁", "加入 stu2" in e["detail"], e["detail"])
+
+        s, r = call("GET", "/api/project-log?id=own1", token=stu1)
+        chk("学生看不到管理记录", s == 403, f"HTTP {s}")
+
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "own1", "updatedAt": now + 83000, "data": {"name": "学生自建课题", "members": []}}]},
+            token=admin)
+        s, r = call("GET", "/api/project-log?id=own1", token=admin)
+        chk("移出也记一笔", len(r.get("entries", [])) == 2 and "移出 stu2" in r["entries"][0]["detail"],
+            str(r.get("entries", [{}])[0].get("detail")))
+
         print("\n── 重点节点：老师定，全组共享 ──")
         s, r = call("POST", "/api/sync", {"milestones": [
             {"id": "ms-stu", "updatedAt": now + 70000,

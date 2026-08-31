@@ -71,7 +71,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（178 项）
+python3 server/test_server.py   # 服务端 API（191 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -94,6 +94,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | GET | `/api/me` | 当前用户 |
 | GET | `/api/users` | 成员列表（导师 / 管理员） |
 | GET | `/api/overview` | 全组统计聚合（导师 / 管理员） |
+| GET | `/api/project-log?id=<projectId>` | 这个项目的成员管理记录（导师 / 管理员） |
 | POST | `/api/admin/role` | `{userId, role}` 任命角色（仅管理员） |
 | POST | `/api/admin/remove` | `{userId}` 移除成员及其全部数据（仅管理员） |
 | POST | `/api/admin/reset-password` | `{userId}` → `{tempPassword}`（仅管理员） |
@@ -153,6 +154,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | 例外 | 为什么 | 怎么实现 |
 |---|---|---|
 | 重点节点 | 组里的日程（投稿截止、组会、答辩）是共同信息 | 在 `GROUP_SHARED` 里：**谁都读得到，只有导师写得了**（`GROUP_WRITABLE_BY`）。`owner_id` 只记「谁定的」，不影响谁看得到；换了导师之后前一任定的日程也改得动 |
+| 项目成员 | 组里谁参与哪个课题本来就是导师在管 | 导师能改**任何**项目的 `members`，但服务端只取这一个字段合并（`merge_members`）——项目名、颜色仍归建它的人，导师也删不掉别人的项目。每次改动写进 `audit_log`，`/api/project-log` 供导师互查 |
 | 导师建的项目 | 学生看不到这个项目就没法往里记 | 成员名单存在项目 `data.members` 里跟着同步走；服务端另存一张 `project_members` 倒排表，拉取时走索引 |
 | 别人对我的记录写的回复和赞 | 那条评论的 `owner_id` 是导师，按 owner 过滤学生根本拉不到 | 写入时冗余存一份 `target_owner`（被评论记录的作者），拉取条件是 `owner_id = 我 OR target_owner = 我` |
 
@@ -168,7 +170,11 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 - 被拒的行同时标成「推过了」。拒绝理由全是永久性的，留着重试就是每两分钟
   白发一次，界面上还永远挂着「N 条待同步」。
 
-三个坑：
+**`audit()` 不能在事务里调**：它自己要拿 `_write_lock`，而那是个不可重入锁，
+在 `push()` 里调用会当场死锁（改项目成员时踩过一次）。事务里要留痕就先攒着，
+提交完再写——真回滚了也不会留下一条其实没发生的记录。
+
+四个坑：
 
 - **评论的墓碑不能清 `target_owner`**。取消赞是删除，删除时 `data` 是空的，
   跟着把 `target_owner` 清掉的话学生就拉不到这条墓碑，那个赞会永远留在他屏幕上。
@@ -256,7 +262,7 @@ extendedKeyUsage 含 serverAuth。
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（84 项）
-python3 server/test_server.py   # 服务端 API（177 项；服务器上多一项 scrypt，共 178）
+python3 server/test_server.py   # 服务端 API（190 项；服务器上多一项 scrypt，共 191）
 ```
 
 ### 推送

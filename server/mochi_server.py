@@ -260,7 +260,12 @@ def set_setting(key, value):
 
 
 def audit(actor, action, target=None, detail=None):
-    """管理操作一律留痕。出了事要能回答「谁在什么时候动了什么」。"""
+    """管理操作一律留痕。出了事要能回答「谁在什么时候动了什么」。
+
+    **它自己要拿 _write_lock，所以绝不能在已经持锁的事务里调用**——那是个
+    不可重入锁，会当场死锁（push() 里改项目成员时踩过一次）。事务里要留痕
+    就先攒着，提交完再写：真回滚了也不会留下一条其实没发生的记录。
+    """
     try:
         c = conn()
         with _write_lock:
@@ -569,6 +574,7 @@ def push(user, changes):
     c = conn()
     res = {"applied": 0, "skipped": 0, "rejected": []}
     notices = []          # 落库之后再发，不能占着写锁做网络 I/O
+    audits = []           # 同理：audit() 会去抢同一把写锁，攒到提交后再写
     with _write_lock:
         try:
             for t in SYNC_TABLES:
@@ -600,9 +606,6 @@ def push(user, changes):
                         continue
                     # 组共享的东西谁定的都能改：换了导师之后，前一个导师定的
                     # 组会日程不该就此冻在那儿没人动得了
-                    if cur and cur["owner_id"] != user["id"] and t not in GROUP_SHARED:
-                        reject("不能修改别人的记录", cur)
-                        continue
                     if cur and updated_at <= cur["updated_at"]:
                         res["skipped"] += 1
                         continue
@@ -610,6 +613,25 @@ def push(user, changes):
                     deleted_at = int(row["deletedAt"]) if row.get("deletedAt") else None
                     payload = {} if deleted_at else (row.get("data") or {})
                     data = json.dumps(payload, ensure_ascii=False)
+
+                    # 这一段必须放在 deleted_at / payload / data 算完之后：它要用到它们
+                    if cur and cur["owner_id"] != user["id"] and t not in GROUP_SHARED:
+                        # 导师可以调整**任何**项目的成员名单——组里谁参与哪个课题
+                        # 本来就是导师在管。但只准动 members：项目名、颜色这些
+                        # 仍然是建它那个人的。
+                        #
+                        # 只取 members 而不是整份覆盖，还挡掉一个必然会踩的坑：
+                        # 导师端推的是他本地那份项目对象，要是学生刚改过名字而
+                        # 他还没同步到，整推就会把新名字盖回旧的。
+                        # deleted_at 一并挡掉：删除推上来时 payload 是空的，
+                        # 走合并的话会把成员清光、名字也丢掉，而项目还留着
+                        if t == "projects" and can_read_group(user) and not deleted_at:
+                            payload = merge_members(c, cur, payload, user, audits)
+                            data = json.dumps(payload, ensure_ascii=False)
+                        else:
+                            reject("不能修改别人的记录", cur)
+                            continue
+
                     if t == "comments" and not deleted_at:
                         why = comment_target_error(c, user, payload)
                         if why:
@@ -651,11 +673,49 @@ def push(user, changes):
         except Exception:
             c.rollback()
             raise
+    for a in audits:
+        audit(*a)
     # 推送要等事务提交完再发：发到一半回滚的话，对方会收到一条不存在的点评
     if notices:
         threading.Thread(target=deliver, args=(notices,), daemon=True).start()
     res["seq"] = current_seq(c)
     return res
+
+
+def merge_members(c, cur, payload, user, audits):
+    """导师改别人项目的成员名单：以库里那份为底，只换 members。
+
+    留痕不在这里写：调用方还握着写锁，audit() 会去抢同一把锁。攒进 audits，
+    提交之后再落。
+    """
+    try:
+        base = json.loads(cur["data"]) or {}
+    except Exception:
+        base = {}
+    old = [m for m in (base.get("members") or []) if isinstance(m, str)]
+    new = [m for m in (payload.get("members") or []) if isinstance(m, str)]
+    if set(old) != set(new):
+        names = {r["id"]: r["username"] for r in c.execute("SELECT id, username FROM users")}
+        added = [names.get(x, x[:8]) for x in new if x not in old]
+        removed = [names.get(x, x[:8]) for x in old if x not in new]
+        detail = "；".join(filter(None, [
+            ("加入 " + "、".join(added)) if added else "",
+            ("移出 " + "、".join(removed)) if removed else "",
+        ]))
+        # target 存项目 id，好按项目把这些记录捞出来给导师看
+        audits.append((user["username"], "改项目成员", cur["id"],
+                       f'{base.get("name") or "未命名项目"}：{detail}'))
+    return {**base, "members": new}
+
+
+def project_log(user, project_id, limit=30):
+    """某个项目的成员管理记录。导师之间互相能看见对方动过什么。"""
+    if not can_read_group(user):
+        raise HttpError(403, "只有导师能查看")
+    rows = conn().execute(
+        "SELECT * FROM audit_log WHERE action = '改项目成员' AND target = ?"
+        " ORDER BY at DESC LIMIT ?", (str(project_id or ""), max(1, min(int(limit), 100)))).fetchall()
+    return {"entries": [{"at": r["at"], "actor": r["actor"], "detail": r["detail"]} for r in rows]}
 
 
 def reindex_members(c, project_id, data):
@@ -1658,6 +1718,9 @@ class Handler(BaseHTTPRequestHandler):
                 b = self._json_body()
                 return self._json(decide_request(self._need_user(), b.get("userId"),
                                                  bool(b.get("approve"))))
+
+            if method == "GET" and path == "/api/project-log":
+                return self._json(project_log(self._need_user(), query.get("id", [""])[0]))
 
             if method == "GET" and path == "/api/overview":
                 return self._json(group_overview(self._need_user()))

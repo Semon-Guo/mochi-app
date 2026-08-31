@@ -29,9 +29,16 @@ const MEMBERS = [
   { id: "prof", ...PROF, inGroup: false, projects: 0, records: 0, lastAt: 0 },
 ];
 
-window.fetch = async (url) => new Response(
-  JSON.stringify(String(url).includes("/api/overview") ? { members: MEMBERS } : {}),
-  { headers: { "content-type": "application/json" } });
+window.fetch = async (url) => {
+  const u = String(url);
+  const body = u.includes("/api/overview") ? { members: MEMBERS }
+    : u.includes("/api/project-log") ? { entries: [
+        { at: Date.now() - 2 * 3600e3, actor: "dr.guo", detail: "双矩法实时公里级三维重建：加入 wenqian" },
+        { at: Date.now() - 3 * 86400e3, actor: "prof2", detail: "双矩法实时公里级三维重建：加入 semon；移出 yichi" },
+      ] }
+    : {};
+  return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+};
 
 const H = 3600e3, D = 86400e3;
 const MOCK_TODOS = [
