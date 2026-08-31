@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import * as Sync from "./sync.js";
 import { avatarFallback } from "./avatar.js";
+import { downloadFile, fmtBytes } from "./files.js";
 import { AdminPanel } from "./AdminPanel.jsx";
 
 /* 导师端：按学生或按项目看全组进展。
@@ -133,6 +134,35 @@ function Stat({ label, value, hint, accent }) {
   );
 }
 
+/* ── 记录里的数据文件：点一下从服务器现拉 ──
+   不预下载，也不显示缩略——导师一屏能刷过几十条记录，没道理让浏览器替他
+   把组里所有人的数据集都拖下来。 */
+function FileLink({ f }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const open = async () => {
+    setErr(""); setBusy(true);
+    try { await downloadFile(f, Sync.getAuth()?.token); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <button onClick={open} disabled={busy} title={f.name} style={{
+      display: "inline-flex", alignItems: "center", gap: 5, maxWidth: "100%",
+      marginTop: 5, marginRight: 6, padding: "3px 8px", borderRadius: 7,
+      border: `1px solid ${C.line}`, background: C.panel, cursor: "pointer",
+      fontFamily: "inherit", fontSize: 10.5, color: err ? C.red : C.ink,
+    }}>
+      <span>📎</span>
+      <span style={{ maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis",
+        whiteSpace: "nowrap" }}>{err || f.name}</span>
+      <span style={{ fontFamily: MONO, color: C.dim }}>
+        {busy ? "…" : fmtBytes(f.size)}
+      </span>
+    </button>
+  );
+}
+
 /* ── 一条记录 ── */
 function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor = true }) {
   return (
@@ -167,6 +197,11 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
             marginTop: 5, border: "none", background: "none", padding: 0, cursor: "pointer",
             fontSize: 10.5, color: C.blue, fontFamily: "inherit",
           }}>📷 {r.photos.length} 张照片</button>
+        )}
+        {r.files?.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap" }}>
+            {r.files.map((f) => <FileLink key={f.id} f={f} />)}
+          </div>
         )}
       </div>
     </div>

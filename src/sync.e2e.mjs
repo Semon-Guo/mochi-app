@@ -301,6 +301,79 @@ try {
   chk("也能拉到 A 的待办（原来会因游标不重置而漏掉）",
       (gotA.todos || []).some((t) => t.id === "dt1"), `todos=${(gotA.todos || []).length}`);
 
+  console.log("\n── 数据文件：切片上传 ──");
+  // 这段验的是「几百 MB」那条路真的走得通：切片、续传、字节不串位。
+  // 服务端测试只验接口，这里验的是前端那个循环。
+  const Files = await import("./files.js");
+  const mkBytes = (n, seed) => {
+    const b = new Uint8Array(n);
+    for (let i = 0; i < n; i++) b[i] = (i * 31 + seed) % 251;
+    return b;
+  };
+  const same = (x, y) => Buffer.compare(Buffer.from(x), Buffer.from(y)) === 0;
+
+  asDevice("A"); Sync.setServer(BASE);
+  const bytes = mkBytes(9 * 1024 * 1024, 7);          // 跨 3 个分块（前端切 4MB）
+  const file = new File([bytes], "recon_014.mat", { type: "application/octet-stream" });
+  const seen = [];
+  const meta = await Files.uploadFile(file, "f-e2e", {
+    token: a.token, onProgress: (p) => seen.push(p) });
+  chk("大文件传完并返回元数据", meta.id === "f-e2e" && meta.size === bytes.length && meta.name === "recon_014.mat",
+      JSON.stringify(meta));
+  chk("过程中报了多次进度（说明真的切了片）", seen.length >= 3, `${seen.length} 次`);
+  chk("进度最终到 100%", seen[seen.length - 1] === 1, String(seen[seen.length - 1]));
+
+  const tk = await fetch(`${BASE}/api/file/f-e2e/ticket`,
+    { method: "POST", headers: { Authorization: `Bearer ${a.token}` } }).then((r) => r.json());
+  const back = new Uint8Array(await fetch(BASE + tk.url).then((r) => r.arrayBuffer()));
+  chk("下回来的字节和原文件逐字节一致", same(back, bytes), `${back.length} / ${bytes.length}`);
+
+  console.log("\n── 数据文件：断了能接着传 ──");
+  const bytes2 = mkBytes(9 * 1024 * 1024, 3);
+  const file2 = new File([bytes2], "stack.tif", { type: "image/tiff" });
+  const ctrl = new AbortController();
+  let cut = false;
+  try {
+    await Files.uploadFile(file2, "f-res", {
+      token: a.token, signal: ctrl.signal,
+      onProgress: (p) => { if (!cut && p > 0 && p < 1) { cut = true; ctrl.abort(); } },
+    });
+    chk("传到一半被取消", false, "居然传完了");
+  } catch (e) {
+    chk("传到一半被取消", e.name === "AbortError", e.name);
+  }
+
+  const again = [];
+  const meta2 = await Files.uploadFile(file2, "f-res", {
+    token: a.token, onProgress: (p) => again.push(p) });
+  chk("续传是从断点开始的，不是从 0 重来", again[0] > 0 && again[0] < 1, String(again[0]));
+  chk("续传后大小对得上", meta2.size === bytes2.length, String(meta2.size));
+  const tk2 = await fetch(`${BASE}/api/file/f-res/ticket`,
+    { method: "POST", headers: { Authorization: `Bearer ${a.token}` } }).then((r) => r.json());
+  const back2 = new Uint8Array(await fetch(BASE + tk2.url).then((r) => r.arrayBuffer()));
+  chk("续传拼出来的文件没有串位", same(back2, bytes2), `${back2.length} / ${bytes2.length}`);
+
+  console.log("\n── 数据文件：元数据随记录同步，导师取得到 ──");
+  dA = Sync.stampChanges(dA, { ...dA, records: [...dA.records,
+    { id: "r-data", projectId: "p1", at: 2000, weather: "", text: "第三轮扫描", photos: [], files: [meta] }],
+  }, 70000);
+  res = await syncDevice("A", dA, a.token);
+  dA = res.data;
+
+  let dProf = base();
+  res = await syncDevice("P", dProf, prof.token);
+  dProf = res.data;
+  const rd = (dProf.records || []).find((r) => r.id === "r-data");
+  chk("导师那边的记录带着文件名和大小", rd?.files?.[0]?.name === "recon_014.mat"
+      && rd?.files?.[0]?.size === bytes.length, JSON.stringify(rd?.files));
+
+  const profTk = await fetch(`${BASE}/api/file/f-e2e/ticket`,
+    { method: "POST", headers: { Authorization: `Bearer ${prof.token}` } });
+  chk("导师能换到下载票", profTk.ok, `HTTP ${profTk.status}`);
+  const bobTk = await fetch(`${BASE}/api/file/f-e2e/ticket`,
+    { method: "POST", headers: { Authorization: `Bearer ${b.token}` } });
+  chk("组里其他学生换不到", bobTk.status === 404, `HTTP ${bobTk.status}`);
+
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {
   proc.kill();

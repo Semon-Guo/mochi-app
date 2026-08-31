@@ -56,11 +56,28 @@ def call(method, path, body=None, token=None, raw=None, ctype="application/json"
             return e.code, payload
 
 
+def call_h(method, path, token=None, headers=None):
+    """需要看响应头（Range、Content-Disposition）时用这个，返回 (status, body, headers)。"""
+    req = urllib.request.Request(BASE + path, method=method)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="mochi-test-")
     env = {**os.environ, "MOCHI_DATA": tmp, "MOCHI_PORT": str(PORT),
            "MOCHI_INVITE_CODE": INVITE,
-           "MOCHI_ORIGINS": "https://semon-guo.github.io,http://localhost:5173"}
+           "MOCHI_ORIGINS": "https://semon-guo.github.io,http://localhost:5173",
+           # 数据文件的上限调到 MB 级，配额一超就报——不然验一次要真搬几个 G；
+           # 宽限期归零，让孤儿回收在同一次运行里就能观察到
+           "MOCHI_MAX_FILE_MB": "2", "MOCHI_USER_QUOTA_MB": "3", "MOCHI_ORPHAN_GRACE_H": "0"}
     proc = subprocess.Popen([sys.executable, str(HERE / "mochi_server.py")], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
@@ -513,6 +530,112 @@ def main():
             f"n={len(names)}")
         s, r = call("GET", "/api/users", token=stu1)
         chk("学生不能列出成员", s == 403, f"HTTP {s}")
+
+        print("\n── 数据文件：分块上传 ──")
+        DATA = b"idx,psnr,ssim\n" + b"".join(
+            f"{i},{28 + i % 7}.{i % 100:02d},0.9{i % 10}\n".encode() for i in range(3000))
+        half = len(DATA) // 2
+
+        s, r = call("POST", "/api/file/f1?offset=0", raw=DATA, token=stu1, ctype="text/csv")
+        chk("没登记就直接传被拒", s == 409, f"HTTP {s}")
+
+        s, r = call("POST", "/api/file/f1/init",
+                    {"name": "psnr_sweep.csv", "size": len(DATA), "mime": "text/csv"}, token=stu1)
+        chk("登记后拿到续传点 0", s == 200 and r.get("received") == 0 and r.get("done") is False, str(r))
+
+        s, r = call("POST", "/api/file/f1?offset=0", raw=DATA[:half], token=stu1, ctype="text/csv")
+        chk("收下第一块", s == 200 and r.get("received") == half and not r.get("done"), str(r))
+
+        s, r = call("POST", "/api/file/f1?offset=0", raw=DATA[half:], token=stu1, ctype="text/csv")
+        chk("偏移对不上时拒收并报出真实进度", s == 409 and str(half) in r.get("error", ""),
+            f"HTTP {s} {r.get('error')}")
+
+        s, r = call("POST", "/api/file/f1/init",
+                    {"name": "psnr_sweep.csv", "size": len(DATA), "mime": "text/csv"}, token=stu1)
+        chk("断线后重新登记，续传点就是已收到的字节数", s == 200 and r.get("received") == half, str(r))
+
+        s, r = call("POST", f"/api/file/f1?offset={half}", raw=DATA[half:], token=stu1, ctype="text/csv")
+        chk("补齐后标记完成", s == 200 and r.get("done") and r.get("received") == len(DATA), str(r))
+
+        s, r = call("POST", "/api/file/f1/init",
+                    {"name": "psnr_sweep.csv", "size": len(DATA), "mime": "text/csv"}, token=stu1)
+        chk("重复挑同一个文件直接复用，不重传", s == 200 and r.get("done") is True, str(r))
+
+        s, r = call("POST", "/api/file/short/init", {"name": "t.bin", "size": 10}, token=stu1)
+        s, r = call("POST", "/api/file/short?offset=0", raw=b"0" * 40, token=stu1)
+        chk("写超出登记大小被拒（不然能拿它撑爆磁盘）", s == 400, f"HTTP {s}")
+        call("POST", "/api/file/short/drop", token=stu1)
+
+        print("\n── 数据文件：下载与权限 ──")
+        s, r = call("GET", "/api/file/f1", token=stu1)
+        chk("本人能下载，内容逐字节一致", s == 200 and r == DATA, f"HTTP {s}")
+
+        s, r = call("GET", "/api/file/f1", token=admin)
+        chk("组内可读者（导师/管理员）能下载学生的数据文件", s == 200 and r == DATA, f"HTTP {s}")
+
+        s, r = call("GET", "/api/file/f1", token=stu2)
+        chk("其他学生下不到", s == 404, f"HTTP {s}")
+
+        s, r = call("POST", "/api/file/f1/init", {"name": "偷.csv", "size": 10}, token=stu2)
+        chk("其他学生不能占用同一个编号", s == 403, f"HTTP {s}")
+
+        s, r = call("POST", "/api/file/f1/drop", token=stu2)
+        chk("其他学生不能删别人的文件", s == 403, f"HTTP {s}")
+
+        s, r = call("POST", "/api/file/f1/ticket", token=stu1)
+        url = r.get("url", "")
+        chk("能换到下载票", s == 200 and url.startswith("/api/file/f1?ticket="), url[:40])
+
+        st, body, h = call_h("GET", url)
+        chk("凭票免 Authorization 直接下载", st == 200 and body == DATA, f"HTTP {st}")
+        chk("响应带上原始文件名", "psnr_sweep.csv" in h.get("Content-Disposition", ""),
+            h.get("Content-Disposition"))
+
+        st, body, h = call_h("GET", url, headers={"Range": "bytes=10-19"})
+        chk("支持 Range，大文件下载能续", st == 206 and body == DATA[10:20]
+            and h.get("Content-Range") == f"bytes 10-19/{len(DATA)}", f"HTTP {st}")
+
+        st, _, _ = call_h("GET", "/api/file/f1?ticket=bogus-ticket")
+        chk("伪造的票下不到", st == 401, f"HTTP {st}")
+
+        print("\n── 数据文件：上限与配额 ──")
+        s, r = call("POST", "/api/file/big/init", {"name": "stack.tif", "size": 3 * 1024 * 1024},
+                    token=stu1)
+        chk("超过单文件上限被拒", s == 413, f"HTTP {s}")
+
+        s, r = call("POST", "/api/file/q1/init", {"name": "a.mat", "size": 2 * 1024 * 1024}, token=stu1)
+        chk("配额内的登记通过", s == 200, f"HTTP {s}")
+        s, r = call("POST", "/api/file/q2/init", {"name": "b.mat", "size": 2 * 1024 * 1024}, token=stu1)
+        chk("再传就超配额，提前拒掉而不是传完才发现", s == 507, f"HTTP {s}")
+        call("POST", "/api/file/q1/drop", token=stu1)
+        s, r = call("POST", "/api/file/q2/init", {"name": "b.mat", "size": 2 * 1024 * 1024}, token=stu1)
+        chk("腾出空间后又能传", s == 200, f"HTTP {s}")
+        call("POST", "/api/file/q2/drop", token=stu1)
+
+        print("\n── 数据文件：孤儿回收 ──")
+        call("POST", "/api/sync", {"records": [
+            {"id": "r-data", "updatedAt": now + 40000, "data": {
+                "projectId": "p1", "at": now + 40000, "text": "第三轮扫描，附原始曲线",
+                "files": [{"id": "f1", "name": "psnr_sweep.csv", "size": len(DATA), "mime": "text/csv"}]}}]},
+            token=stu1)
+        call("POST", "/api/file/orphan/init", {"name": "tmp.npy", "size": len(DATA)}, token=stu1)
+        call("POST", "/api/file/orphan?offset=0", raw=DATA, token=stu1)
+        s, r = call("GET", "/api/file/orphan", token=stu1)
+        chk("没被引用的文件此刻还在", s == 200, f"HTTP {s}")
+
+        s, r = call("POST", "/api/admin/gc", token=stu1)
+        chk("学生不能触发清理", s == 403, f"HTTP {s}")
+
+        s, r = call("POST", "/api/admin/gc", token=admin)
+        chk("清理掉没有任何记录引用的数据文件", s == 200 and r.get("removed") >= 1, str(r))
+        s, r = call("GET", "/api/file/orphan", token=stu1)
+        chk("孤儿文件已消失", s == 404, f"HTTP {s}")
+        s, r = call("GET", "/api/file/f1", token=stu1)
+        chk("被记录引用的文件不受影响", s == 200 and r == DATA, f"HTTP {s}")
+
+        s, r = call("GET", "/api/admin/status", token=admin)
+        chk("状态页报出数据文件占用", s == 200 and r.get("fileBytes", 0) >= len(DATA),
+            str(r.get("fileBytes")))
 
         # 放在最后：限速按 IP 计数，而测试里所有请求都来自 127.0.0.1，
         # 一旦锁定就会把后面每个需要登录的用例都连坐掉

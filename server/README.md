@@ -54,7 +54,7 @@
 |---|---|
 | 机器 | `wang@172.29.249.177` |
 | 代码 | `~/mochi/server/` |
-| 数据 | `~/mochi-data/`（`mochi.db` + `photos/`，权限 700/600） |
+| 数据 | `~/mochi-data/`（`mochi.db` + `photos/` + `files/`，权限 700/600） |
 | 配置 | `~/mochi/server.env`（权限 600）；邀请码存在数据库里，界面可改 |
 | 日志 | `~/mochi/server.log` |
 | 备份 | `~/mochi/backups/`，每天 3:30 自动备份，保留 14 份 |
@@ -108,6 +108,43 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[]}` |
 | POST | `/api/photo/<id>` | 上传照片二进制（元数据须先经 `/api/sync` 建好） |
 | GET | `/api/photo/<id>` | 下载照片（本人或导师） |
+| POST | `/api/file/<id>/init` | 登记数据文件 `{name, size, mime}` → `{received}` 续传点 |
+| POST | `/api/file/<id>?offset=N` | 追加一个分块，传满即完成 |
+| GET | `/api/file/<id>` | 下载数据文件，支持 `Range`（本人或导师） |
+| POST | `/api/file/<id>/ticket` | 换一张 5 分钟有效的下载票 → `{url}` |
+| POST | `/api/file/<id>/drop` | 删掉自己的一个数据文件 |
+| POST | `/api/admin/gc` | 立刻回收无人引用的数据文件（仅管理员） |
+
+### 数据文件（原始测量结果）
+
+照片和数据文件走的是两条完全不同的路，**别把它们并成一条**：
+
+| | 照片 | 数据文件 |
+|---|---|---|
+| 体量 | 压到长边 1600 的 JPEG，几百 KB | 原始数据，几百 MB |
+| 本地 | 存 IndexedDB，每台设备都有一份 | **不存**，只在记录里留文件名和大小 |
+| 上传 | 由同步循环顺带推上去，可离线 | 选中即分块直传，**必须在线** |
+| 取用 | 自动下到每台设备 | 点一下才现拉 |
+
+几百 MB 的东西不能按照片那套来：本地库会被撑爆，手机上直接崩，而且没人希望
+自己的手机后台默默拉下组里所有人的数据集。代价是上传必须在线——这是有意的，
+攒在本地「回头再传」对几百 MB 只会变成「以为传上去了其实没有」。
+
+- 上传全程流式落盘，服务端不把请求体读进内存；断了重新 `init` 就从断点续传
+- 文件名、大小这些元数据跟着记录正文一起同步（`record.data.files[]`），
+  `files` 表只回答「这坨字节归谁、传完了没有」，因此**不在 `SYNC_TABLES` 里**
+- 下载不走 `Authorization`：`<a href>` 带不上请求头，而几百 MB 必须交给浏览器
+  自己去拉（能续传、能进下载列表、不占页面内存），所以先换一张短期下载票，
+  长期 token 不进 URL、不进访问日志
+- 上传是选完文件就发生的，而引用它的记录可能永远没保存。所以有一个 6 小时一轮的
+  回收：超过宽限期仍没被任何记录引用的文件一律删掉，否则每次中途放弃都在磁盘上
+  留下几百 MB
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `MOCHI_MAX_FILE_MB` | 512 | 单个数据文件上限 |
+| `MOCHI_USER_QUOTA_MB` | 10240 | 每人数据文件总量上限 |
+| `MOCHI_ORPHAN_GRACE_H` | 24 | 多久没被记录引用就回收 |
 
 ### 同步模型
 
@@ -166,6 +203,7 @@ extendedKeyUsage 含 serverAuth。
 |---|---|
 | `src/sync.js` | 同步引擎：打戳、墓碑、LWW 合并、推拉、照片 |
 | `src/photos.js` | 照片的 IndexedDB 存取（主应用和同步引擎共用） |
+| `src/files.js` | 数据文件的分块上传 / 续传 / 凭票下载 |
 | `src/SyncUI.jsx` | 同步状态条、登录/注册表单、导师视图 |
 
 **关键设计**：业务代码里那 23 处 `setData` 一处都没改。`todo-notes-app.jsx`
@@ -178,9 +216,9 @@ extendedKeyUsage 含 serverAuth。
 ### 测试
 
 ```bash
-node src/sync.test.mjs      # 同步引擎纯逻辑（19 项）
-node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（20 项）
-python3 server/test_server.py   # 服务端 API（36 项）
+node src/sync.test.mjs      # 同步引擎纯逻辑（21 项）
+node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（61 项）
+python3 server/test_server.py   # 服务端 API（152 项）
 ```
 
 `sync.e2e.mjs` 会自己起一个临时服务实例，不碰正式数据。它覆盖了多设备双向同步、

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Mochi 实验记录同步服务。
 
-只同步实验记录（projects / records / photos），个人待办和计时数据留在设备本地。
+只同步实验记录（projects / records / photos / 数据文件），个人待办和计时数据
+留在设备本地。
 学生读写自己的，导师只读全组的。
 
 纯标准库实现——这台服务器访问 GitHub releases 不稳定，任何需要下载运行时或
@@ -14,6 +15,9 @@
     MOCHI_PORT         监听端口，默认 3000
     MOCHI_INVITE_CODE  注册邀请码，为空则允许任意注册
     MOCHI_ORIGINS      允许的前端来源，逗号分隔
+    MOCHI_MAX_FILE_MB  单个数据文件上限，默认 512
+    MOCHI_USER_QUOTA_MB 每人数据文件总量上限，默认 10240
+    MOCHI_ORPHAN_GRACE_H 数据文件多久没被记录引用就回收，默认 24 小时
 """
 import hashlib
 import hmac
@@ -27,10 +31,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote as urlquote
 
 DATA_DIR = Path(os.environ.get("MOCHI_DATA") or Path.home() / "mochi-data")
 PHOTO_DIR = DATA_DIR / "photos"
+FILE_DIR = DATA_DIR / "files"
 DB_PATH = DATA_DIR / "mochi.db"
 PORT = int(os.environ.get("MOCHI_PORT") or 3000)
 # 环境变量里的邀请码只作为初始值，之后以数据库里的为准——
@@ -56,6 +61,18 @@ except Exception as _e:
     _PUSH_ERR = str(_e)
 
 MAX_PHOTO = 8 * 1024 * 1024
+
+# 数据文件跟照片是两码事：照片是压好的缩略证据，几百 KB，随记录同步到每台
+# 设备；数据文件是原始测量结果，动辄几百 MB，只在服务器上放一份，谁要谁下。
+# 所以它走分块上传（前端切片、断了能续），全程流式落盘，不进内存。
+MAX_FILE = int(os.environ.get("MOCHI_MAX_FILE_MB") or 512) * 1024 * 1024
+MAX_CHUNK = 8 * 1024 * 1024          # 前端切 4MB，留一倍余量
+USER_QUOTA = int(os.environ.get("MOCHI_USER_QUOTA_MB") or 10240) * 1024 * 1024
+IO_CHUNK = 1 << 16
+# 上传是选完文件就发生的，而引用它的记录可能永远没被保存（写到一半关掉了）。
+# 没有这段宽限期后的回收，每一次中途放弃都在磁盘上留下几百 MB。
+ORPHAN_GRACE = int(os.environ.get("MOCHI_ORPHAN_GRACE_H") or 24) * 3600 * 1000
+TICKET_TTL = 5 * 60 * 1000
 SESSION_TTL = 90 * 24 * 3600
 SYNC_TABLES = ("projects", "records", "photos", "todos")
 # 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
@@ -78,7 +95,14 @@ def is_admin(user):
     return user and user.get("role") == "admin"
 PAGE = 500
 
-PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+# 这是台多用户机器。main() 里的 umask 管不到这两行——它们在模块导入时就执行了，
+# 新建的目录会拿到 775，组里其他账号能列目录。所以权限在这儿显式钉死。
+for _d in (PHOTO_DIR, FILE_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+    try:
+        _d.chmod(0o700)
+    except OSError:
+        pass
 
 # ─────────────────────────── 数据库 ───────────────────────────
 
@@ -144,6 +168,15 @@ CREATE TABLE IF NOT EXISTS photos (
   updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_photos_seq ON photos(seq);
 CREATE INDEX IF NOT EXISTS idx_photos_owner ON photos(owner_id, seq);
+
+/* 数据文件不进 SYNC_TABLES：文件名、大小这些元数据是跟着记录正文一起同步的
+   （record.data.files[]），这张表只负责回答「这坨字节归谁、传完了没有」。 */
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size INTEGER NOT NULL DEFAULT 0, uploaded INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
 """
 
 _local = threading.local()
@@ -543,6 +576,216 @@ def claim_photo(user, pid, mime, size):
     return row
 
 
+# ─────────────────────────── 数据文件 ───────────────────────────
+#
+# 上传分三步：init 报文件名和大小拿到续传点 → 按块 POST 二进制 → 传满即完成。
+# 中断了重来一次 init 就能从断点接着传，不用把几百 MB 重传一遍。
+#
+# 下载不走 Authorization：几百 MB 的东西必须让浏览器自己去拉（能续传、能进
+# 下载列表、不占页面内存），而 <a href> 是带不上请求头的。所以先换一张五分钟
+# 有效的下载票，token 本身不进 URL、不进访问日志。
+
+_file_locks = {}
+_file_locks_guard = threading.Lock()
+
+
+def file_lock(fid):
+    """同一个文件的写入必须串行——两个块同时 append 会把内容交错写坏。"""
+    with _file_locks_guard:
+        lk = _file_locks.get(fid)
+        if lk is None:
+            lk = _file_locks[fid] = threading.Lock()
+        return lk
+
+
+def _part(fid):
+    return FILE_DIR / (fid + ".part")
+
+
+def user_file_bytes(c, owner_id, exclude=None):
+    rows = c.execute("SELECT id, size FROM files WHERE owner_id = ?", (owner_id,)).fetchall()
+    return sum(r["size"] for r in rows if r["id"] != exclude)
+
+
+def file_init(user, fid, body):
+    """登记一个待上传的文件，返回已经收到多少字节（续传点）。"""
+    name = str(body.get("name") or "").strip()[:180]
+    mime = str(body.get("mime") or "").strip()[:80] or "application/octet-stream"
+    try:
+        size = int(body.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if not name:
+        raise HttpError(400, "缺少文件名")
+    if size <= 0:
+        raise HttpError(400, "这个文件是空的")
+    if size > MAX_FILE:
+        raise HttpError(413, f"单个文件不能超过 {MAX_FILE // 1024 // 1024} MB")
+
+    c = conn()
+    now = int(time.time() * 1000)
+    row = c.execute("SELECT * FROM files WHERE id = ?", (fid,)).fetchone()
+    if row and row["owner_id"] != user["id"]:
+        raise HttpError(403, "这个编号已经属于别人")
+
+    final = FILE_DIR / fid
+    if row and row["uploaded"] and row["size"] == size and final.exists():
+        return {"ok": True, "received": size, "done": True}     # 同一个文件重复挑选，直接复用
+
+    used = user_file_bytes(c, user["id"], exclude=fid)
+    if used + size > USER_QUOTA:
+        raise HttpError(507, f"你的数据文件已占用 {used // 1024 // 1024} MB，"
+                             f"再传这个会超出 {USER_QUOTA // 1024 // 1024} MB 的配额")
+
+    with file_lock(fid):
+        # 没有登记行却有碎片，说明是上一轮回收没删干净的残骸——新文件绝不能接着它写
+        if not row:
+            _part(fid).unlink(missing_ok=True)
+        # 大小对不上说明换了一个文件却复用了编号，之前的碎片一律作废
+        if row and row["size"] != size:
+            _part(fid).unlink(missing_ok=True)
+            final.unlink(missing_ok=True)
+        received = _part(fid).stat().st_size if _part(fid).exists() else 0
+        if received > size:
+            _part(fid).unlink(missing_ok=True)
+            received = 0
+        with _write_lock:
+            c.execute("INSERT INTO files (id, owner_id, name, mime, size, uploaded, created_at, updated_at)"
+                      " VALUES (?,?,?,?,?,0,?,?)"
+                      " ON CONFLICT(id) DO UPDATE SET name=excluded.name, mime=excluded.mime,"
+                      " size=excluded.size, uploaded=0, updated_at=excluded.updated_at",
+                      (fid, user["id"], name, mime, size, now, now))
+            c.commit()
+    return {"ok": True, "received": received, "done": False}
+
+
+def file_owned(user, fid):
+    row = conn().execute("SELECT * FROM files WHERE id = ?", (fid,)).fetchone()
+    if not row:
+        raise HttpError(409, "请先登记文件信息")
+    if row["owner_id"] != user["id"]:
+        raise HttpError(403, "不能上传别人的文件")
+    return row
+
+
+def file_finish(fid, size):
+    _part(fid).replace(FILE_DIR / fid)
+    c = conn()
+    with _write_lock:
+        c.execute("UPDATE files SET uploaded = 1, size = ?, updated_at = ? WHERE id = ?",
+                  (size, int(time.time() * 1000), fid))
+        c.commit()
+    with _file_locks_guard:
+        _file_locks.pop(fid, None)
+
+
+def readable_file(user, fid):
+    """自己的能看；导师和管理员能看全组的——跟记录本身的可见范围一致。"""
+    row = conn().execute("SELECT * FROM files WHERE id = ?", (fid,)).fetchone()
+    if not row or not row["uploaded"]:
+        return None
+    if row["owner_id"] != user["id"] and not can_read_group(user):
+        return None
+    return row
+
+
+def file_drop(user, fid):
+    """删掉自己的一个数据文件。用户在保存记录前撤掉附件时调用。"""
+    c = conn()
+    row = c.execute("SELECT * FROM files WHERE id = ?", (fid,)).fetchone()
+    if not row:
+        return {"ok": True, "removed": 0}
+    if row["owner_id"] != user["id"]:
+        raise HttpError(403, "不能删除别人的文件")
+    with _write_lock:
+        c.execute("DELETE FROM files WHERE id = ?", (fid,))
+        c.commit()
+    for f in (FILE_DIR / fid, _part(fid)):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+    with _file_locks_guard:
+        _file_locks.pop(fid, None)
+    return {"ok": True, "removed": 1}
+
+
+_tickets = {}                    # token -> (file_id, expires_at)
+_tickets_guard = threading.Lock()
+
+
+def file_ticket(user, fid):
+    if not readable_file(user, fid):
+        raise HttpError(404, "文件不存在或无权访问")
+    tok = secrets.token_urlsafe(16)
+    now = int(time.time() * 1000)
+    with _tickets_guard:
+        for k, (_, exp) in list(_tickets.items()):
+            if exp < now:
+                del _tickets[k]
+        _tickets[tok] = (fid, now + TICKET_TTL)
+    return {"url": f"/api/file/{fid}?ticket={tok}", "expiresAt": now + TICKET_TTL}
+
+
+def ticket_ok(fid, tok):
+    if not tok:
+        return False
+    with _tickets_guard:
+        got = _tickets.get(tok)
+    return bool(got and got[0] == fid and got[1] >= int(time.time() * 1000))
+
+
+def referenced_file_ids(c):
+    ids = set()
+    for r in c.execute("SELECT data FROM records WHERE deleted_at IS NULL"):
+        try:
+            d = json.loads(r["data"])
+        except Exception:
+            continue
+        for f in (d.get("files") or []) if isinstance(d, dict) else []:
+            if isinstance(f, dict) and isinstance(f.get("id"), str):
+                ids.add(f["id"])
+    return ids
+
+
+def gc_orphan_files(grace=ORPHAN_GRACE):
+    """回收没有任何记录引用的数据文件：传了一半放弃的、以及记录被删后剩下的。
+
+    宽限期是为了保护「刚传完、记录还没同步上来」的那几分钟。
+    """
+    c = conn()
+    keep = referenced_file_ids(c)
+    cutoff = int(time.time() * 1000) - grace
+    rows = c.execute("SELECT id, size FROM files WHERE created_at < ?", (cutoff,)).fetchall()
+    gone = [r for r in rows if r["id"] not in keep]
+    if not gone:
+        return {"removed": 0, "freedBytes": 0}
+    freed = 0
+    with _write_lock:
+        for r in gone:
+            c.execute("DELETE FROM files WHERE id = ?", (r["id"],))
+        c.commit()
+    for r in gone:
+        for f in (FILE_DIR / r["id"], _part(r["id"])):
+            try:
+                if f.exists():
+                    freed += f.stat().st_size
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+    print(f"[gc] 清理孤儿数据文件 {len(gone)} 个，释放 {freed / 1048576:.1f} MB", flush=True)
+    return {"removed": len(gone), "freedBytes": freed}
+
+
+def gc_loop():
+    while True:
+        time.sleep(6 * 3600)
+        try:
+            gc_orphan_files()
+        except Exception as e:
+            print(f"[gc] 清理出错: {e}", flush=True)
+
+
 MAX_AVATAR = 96 * 1024   # 前端压到 192px JPEG，正常 10-20KB；留足余量
 
 def set_avatar(user, data_url):
@@ -671,6 +914,8 @@ def admin_delete_user(user, target_id):
               for t in SYNC_TABLES}
     photo_ids = [r["id"] for r in
                  c.execute("SELECT id FROM photos WHERE owner_id = ?", (row["id"],)).fetchall()]
+    file_ids = [r["id"] for r in
+                c.execute("SELECT id FROM files WHERE owner_id = ?", (row["id"],)).fetchall()]
     with _write_lock:
         c.execute("DELETE FROM users WHERE id = ?", (row["id"],))   # 外键级联删掉其余
         c.commit()
@@ -679,8 +924,15 @@ def admin_delete_user(user, target_id):
             (PHOTO_DIR / pid).unlink(missing_ok=True)
         except Exception:
             pass
+    for fid in file_ids:
+        for f in (FILE_DIR / fid, _part(fid)):
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
     audit(user["username"], "彻底删除账号", row["username"],
-          " ".join(f"{k}={v}" for k, v in counts.items()) + f" 照片文件={len(photo_ids)}")
+          " ".join(f"{k}={v}" for k, v in counts.items())
+          + f" 照片文件={len(photo_ids)} 数据文件={len(file_ids)}")
     return {"ok": True, "removed": counts}
 
 
@@ -748,13 +1000,19 @@ def admin_status(user):
     except Exception:
         disk = None
 
-    photo_bytes = 0
-    try:
-        for f in PHOTO_DIR.iterdir():
-            if f.is_file():
-                photo_bytes += f.stat().st_size
-    except Exception:
-        pass
+    def dir_bytes(d):
+        total = 0
+        try:
+            for f in d.iterdir():
+                if f.is_file():
+                    total += f.stat().st_size
+        except Exception:
+            pass
+        return total
+
+    photo_bytes = dir_bytes(PHOTO_DIR)
+    file_bytes = dir_bytes(FILE_DIR)
+    counts["files"] = c.execute("SELECT COUNT(*) FROM files WHERE uploaded = 1").fetchone()[0]
 
     backups = []
     try:
@@ -765,7 +1023,8 @@ def admin_status(user):
         pass
 
     return {
-        "counts": counts, "disk": disk, "photoBytes": photo_bytes,
+        "counts": counts, "disk": disk, "photoBytes": photo_bytes, "fileBytes": file_bytes,
+        "maxFileBytes": MAX_FILE, "userQuotaBytes": USER_QUOTA,
         "dbBytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
         "backups": backups, "push": bool(PUSH_OK and VAPID),
         "inviteSet": bool(get_setting("invite_code", INVITE_CODE_ENV)),
@@ -1015,6 +1274,8 @@ def readable_photo(user, pid):
 # ─────────────────────────── HTTP ───────────────────────────
 
 PHOTO_RE = re.compile(r"^/api/photo/([A-Za-z0-9_-]{1,64})$")
+FILE_RE = re.compile(r"^/api/file/([A-Za-z0-9_-]{1,64})$")
+FILE_ACT_RE = re.compile(r"^/api/file/([A-Za-z0-9_-]{1,64})/(init|ticket|drop)$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1022,7 +1283,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "mochi-sync"
 
     def log_message(self, fmt, *args):
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.address_string()} {fmt % args}", flush=True)
+        # 下载票是短期凭证，但没有任何理由把它写进日志文件
+        line = re.sub(r"ticket=[A-Za-z0-9_-]+", "ticket=…", fmt % args)
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.address_string()} {line}", flush=True)
 
     # -- 工具 --
     def _cors(self):
@@ -1054,6 +1317,71 @@ class Handler(BaseHTTPRequestHandler):
             raise HttpError(413, "请求体过大")
         self._body_read = True
         return self.rfile.read(n) if n else b""
+
+    def _stream_to(self, path, cap):
+        """把请求体边读边写到磁盘。
+
+        几百 MB 的数据文件不能像 _body() 那样整个读进内存——这台服务器上
+        同时来两个人就把内存吃光了。
+        """
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0:
+            raise HttpError(400, "空的分块")
+        if n > MAX_CHUNK:
+            raise HttpError(413, f"单个分块不能超过 {MAX_CHUNK // 1024 // 1024} MB")
+        if n > cap:
+            raise HttpError(400, "写入超出了登记的文件大小")
+        self._body_read = True
+        left = n
+        with open(path, "ab") as f:
+            while left > 0:
+                buf = self.rfile.read(min(left, IO_CHUNK))
+                if not buf:
+                    raise HttpError(400, "连接中断，这一块没收全")
+                f.write(buf)
+                left -= len(buf)
+        return n
+
+    def _send_file(self, path, ctype, filename, extra=None):
+        """流式下发，支持 Range——大文件断了能接着下，不用从头再来。"""
+        size = path.stat().st_size
+        start, end, status = 0, size - 1, 200
+        m = re.match(r"bytes=(\d*)-(\d*)\s*$", self.headers.get("Range") or "")
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = int(m.group(2)) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            end = min(end, size - 1)
+            if start >= size or end < start:
+                return self._send(416, b"", "text/plain", {"Content-Range": f"bytes */{size}"})
+            status = 206
+
+        quoted = urlquote(filename.encode("utf-8"), safe="")
+        head = {"Accept-Ranges": "bytes",
+                "Content-Disposition": f"attachment; filename=\"{quoted}\"; filename*=UTF-8''{quoted}",
+                **(extra or {})}
+        if status == 206:
+            head["Content-Range"] = f"bytes {start}-{end}/{size}"
+
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(end - start + 1))
+        for k, v in {**self._cors(), **head}.items():
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        left = end - start + 1
+        with open(path, "rb") as f:
+            f.seek(start)
+            while left > 0:
+                buf = f.read(min(left, IO_CHUNK))
+                if not buf:
+                    break
+                self.wfile.write(buf)
+                left -= len(buf)
 
     def _drain(self):
         """把没读的请求体丢掉。
@@ -1152,6 +1480,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(admin_invite(self._need_user(), self._json_body().get("code", "")))
             if method == "GET" and path == "/api/admin/status":
                 return self._json(admin_status(self._need_user()))
+            if method == "POST" and path == "/api/admin/gc":
+                u = self._need_user()
+                if not is_admin(u):
+                    raise HttpError(403, "只有管理员能清理")
+                return self._json(gc_orphan_files())
             if method == "GET" and path == "/api/admin/audit":
                 return self._json(admin_audit(self._need_user()))
             if method == "POST" and path == "/api/password":
@@ -1230,6 +1563,53 @@ class Handler(BaseHTTPRequestHandler):
                     raise HttpError(404, "照片尚未上传")
                 return self._send(200, f.read_bytes(), row["mime"],
                                   {"Cache-Control": "private, max-age=31536000, immutable"})
+
+            m = FILE_ACT_RE.match(path)
+            if m and method == "POST":
+                fid, act = m.group(1), m.group(2)
+                user = self._need_user()
+                if act == "init":
+                    return self._json(file_init(user, fid, self._json_body()))
+                if act == "ticket":
+                    return self._json(file_ticket(user, fid))
+                return self._json(file_drop(user, fid))
+
+            m = FILE_RE.match(path)
+            if m:
+                fid = m.group(1)
+                if method == "POST":
+                    row = file_owned(self._need_user(), fid)
+                    try:
+                        offset = int(query.get("offset", ["-1"])[0])
+                    except ValueError:
+                        offset = -1
+                    with file_lock(fid):
+                        part = _part(fid)
+                        have = part.stat().st_size if part.exists() else 0
+                        # 偏移对不上就把实际进度回给前端，让它从那里接着传，
+                        # 而不是让两边各写各的把文件写花
+                        if offset != have:
+                            raise HttpError(409, f"分块偏移不对，服务器已收到 {have} 字节")
+                        got = self._stream_to(part, row["size"] - have)
+                        have += got
+                        done = have >= row["size"]
+                    if done:
+                        file_finish(fid, have)
+                    return self._json({"received": have, "done": done})
+
+                # 下载：带票的走浏览器直连（没有 Authorization 头），否则要登录
+                tok = query.get("ticket", [""])[0]
+                if ticket_ok(fid, tok):
+                    row = conn().execute("SELECT * FROM files WHERE id = ?", (fid,)).fetchone()
+                else:
+                    row = readable_file(self._need_user(), fid)
+                if not row or not row["uploaded"]:
+                    raise HttpError(404, "文件不存在或无权访问")
+                f = FILE_DIR / fid
+                if not f.exists():
+                    raise HttpError(404, "文件尚未上传完")
+                return self._send_file(f, row["mime"], row["name"] or fid,
+                                       {"Cache-Control": "private, max-age=3600"})
 
             raise HttpError(404, "没有这个接口")
         except HttpError as e:
@@ -1385,6 +1765,8 @@ def main():
         print(f"推送已启用，VAPID 公钥: {VAPID['public'][:24]}…")
     else:
         print(f"⚠️  推送未启用（{'缺少 cryptography' if not PUSH_OK else 'VAPID 密钥不可用'}），同步功能不受影响")
+
+    threading.Thread(target=gc_loop, daemon=True).start()
 
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     srv.daemon_threads = True

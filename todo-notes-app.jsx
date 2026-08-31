@@ -3,6 +3,7 @@ import * as Sync from "./src/sync.js";
 import { SyncBar } from "./src/SyncUI.jsx";
 import { AdvisorView } from "./src/AdvisorView.jsx";
 import { putPhoto, getPhoto, delPhoto } from "./src/photos.js";
+import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -999,11 +1000,148 @@ function FullPhoto({ id }) {
     : <span style={{ color:"#888", fontSize:13 }}>载入中…</span>;
 }
 
+/* ── 数据文件：一枚附件 ──
+   照片是直接铺出来看的，数据文件不是——几百 MB 的 .mat 没法预览，也不该
+   自动下到每台设备上。这里只显示文件名和大小，点一下才真的去拉。 */
+function FileChip({ f, onRemove }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const open = async () => {
+    setErr(""); setBusy(true);
+    try { await downloadFile(f, Sync.getAuth()?.token); }
+    catch (e) { setErr(/HTTP 401|请先登录/.test(e.message) ? "要先登录才能下载" : e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{
+      display:"flex", alignItems:"center", gap:9, padding:"8px 10px", marginTop:6,
+      background:"#FAF8F3", border:"1px solid #EDE8DE", borderRadius:10,
+    }}>
+      <span style={{ fontSize:13, opacity:.75 }}>📎</span>
+      <button onClick={open} disabled={busy} title={f.name} style={{
+        flex:1, minWidth:0, textAlign:"left", border:"none", background:"none", padding:0,
+        cursor:"pointer", fontFamily:"inherit", fontSize:12.5, fontWeight:600, color:"#3A3630",
+        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+      }}>{f.name}</button>
+      <span style={{ fontSize:11, color:"#B0A99B", fontFamily:MONO, flexShrink:0 }}>
+        {busy ? "取链接…" : fmtBytes(f.size)}
+      </span>
+      {onRemove
+        ? <button onClick={()=>onRemove(f.id)} style={{ ...S.ib, padding:2, color:"#C5BEB0" }}>✕</button>
+        : <button onClick={open} disabled={busy} style={{ ...S.ib, padding:2, color:"#8C8478" }}>↓</button>}
+      {err && <span style={{ fontSize:11, color:"#C02556" }}>{err}</span>}
+    </div>
+  );
+}
+
+/* ── 挑数据文件：选中即传 ──
+   不做「先存本地、回头再传」：几百 MB 的东西攒在设备上只会变成「以为传上去了
+   其实没有」，那比当场说清楚糟得多。所以没登录、连不上就直接说，别装成功。
+
+   做成钩子而不是组件：附件列表要待在正文下面，触发按钮却要摆进底部那排跟
+   「加照片」并肩——两块 JSX 不相邻，组件交不出来。 */
+function useDataFiles({ files = [], onAdd, onRemove }) {
+  const [ups, setUps] = useState([]);        // [{ key, id, name, size, pct, err }]
+  const [err, setErr] = useState("");
+  const ref = useRef(null);
+  const live = useRef(new Set());
+
+  // 离开这一页时把没传完的掐掉——留着也没人看进度了，服务器那边的碎片会被回收
+  useEffect(() => () => { live.current.forEach(c => { try { c.abort(); } catch {} }); }, []);
+
+  const open = () => {
+    if (!Sync.getAuth()?.token) {
+      setErr("要先登录才能上传数据文件——数据是直接传到组里服务器上的，不在本机存副本");
+      return;
+    }
+    setErr("");
+    ref.current?.click();
+  };
+
+  const pick = async (e) => {
+    const picked = [...(e.target.files || [])];
+    e.target.value = "";
+    if (!picked.length) return;
+    const token = Sync.getAuth()?.token;
+    if (!token) { setErr("登录已失效，请重新登录后再传"); return; }
+
+    for (const file of picked) {
+      const id = uid();
+      const ctrl = new AbortController();
+      live.current.add(ctrl);
+      setUps(u => [...u, { key:id, id, name:file.name, size:file.size, pct:0, ctrl }]);
+      try {
+        const meta = await uploadFile(file, id, {
+          token, signal: ctrl.signal,
+          onProgress: (pct) => setUps(u => u.map(x => x.key === id ? { ...x, pct } : x)),
+        });
+        onAdd(meta);
+        setUps(u => u.filter(x => x.key !== id));
+      } catch (ex) {
+        if (ex?.name === "AbortError") {
+          setUps(u => u.filter(x => x.key !== id));
+          dropFile(id, token);
+        } else {
+          setUps(u => u.map(x => x.key === id ? { ...x, err: ex?.message || "上传失败" } : x));
+        }
+      } finally { live.current.delete(ctrl); }
+    }
+  };
+
+  const list = (
+    <>
+      {files.map(f => <FileChip key={f.id} f={f} onRemove={onRemove}/>)}
+
+      {ups.map(u => (
+        <div key={u.key} style={{
+          padding:"8px 10px", marginTop:6, background:"#FAF8F3",
+          border:"1px solid #EDE8DE", borderRadius:10,
+        }}>
+          <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+            <span style={{ fontSize:13, opacity:.75 }}>📎</span>
+            <span style={{ flex:1, minWidth:0, fontSize:12.5, fontWeight:600, color:"#3A3630",
+              overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{u.name}</span>
+            <span style={{ fontSize:11, color:"#B0A99B", fontFamily:MONO, flexShrink:0 }}>
+              {u.err ? fmtBytes(u.size) : `${Math.round(u.pct * 100)}%`}
+            </span>
+            <button onClick={()=>{ try { u.ctrl.abort(); } catch {} }}
+              style={{ ...S.ib, padding:2, color:"#C5BEB0" }}>✕</button>
+          </div>
+          {u.err
+            ? <div style={{ fontSize:11, color:"#C02556", marginTop:5 }}>{u.err}</div>
+            : <div style={{ height:3, marginTop:6, background:"#EDE8DE", borderRadius:2, overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${u.pct * 100}%`, background:"#2C2C2C",
+                  borderRadius:2, transition:"width .2s" }}/>
+              </div>}
+        </div>
+      ))}
+
+      {err && <div style={{ fontSize:11.5, color:"#C02556", marginTop:8, lineHeight:1.6 }}>{err}</div>}
+
+      <input ref={ref} type="file" multiple onChange={pick} style={{ display:"none" }}/>
+    </>
+  );
+
+  /* 记录卡片的编辑区里没有底部那排按钮，就地给一条虚线的 */
+  const inlineButton = (
+    <button onClick={open} style={{
+      marginTop:8, width:"100%", padding:"9px 0", borderRadius:11,
+      border:"1px dashed #DCD6C9", background:"none", color:"#8C8478",
+      fontSize:12.5, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+    }}>📎 加数据文件</button>
+  );
+
+  return { list, open, inlineButton };
+}
+
 /* ── 写一条记录：日期是自动的，天气点一下，正文和照片 ── */
 function Compose({ lastWeather, onSave }) {
   const [weather, setWeather] = useState(lastWeather || "");
   const [text, setText] = useState("");
   const [photos, setPhotos] = useState([]);
+  const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const fileRef = useRef(null);
@@ -1032,9 +1170,22 @@ function Compose({ lastWeather, onSave }) {
   };
 
   const commit = () => {
-    if (!text.trim() && !photos.length) return;
-    onSave({ weather, text: text.trim(), photos });
-    setText(""); setPhotos([]);
+    if (!text.trim() && !photos.length && !files.length) return;
+    onSave({ weather, text: text.trim(), photos, files });
+    setText(""); setPhotos([]); setFiles([]);
+  };
+
+  // 还没被任何记录引用，撤掉就该立刻从服务器上消失
+  const dropData = (id) => {
+    setFiles(f => f.filter(x => x.id !== id));
+    dropFile(id, Sync.getAuth()?.token);
+  };
+
+  const dataUI = useDataFiles({ files, onAdd: m => setFiles(f => [...f, m]), onRemove: dropData });
+  const softBtn = {
+    flex:1, padding:"12px 0", borderRadius:13, border:"2px solid #E8E4DA", background:"#FFF",
+    color:"#8C8478", fontSize:13.5, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
+    display:"flex", alignItems:"center", justifyContent:"center", gap:6,
   };
 
   return (
@@ -1073,19 +1224,19 @@ function Compose({ lastWeather, onSave }) {
         </div>
       )}
 
+      {dataUI.list}
+
       {err && <div style={{ fontSize:11.5, color:"#C02556", marginTop:8 }}>{err}</div>}
 
       <input ref={fileRef} type="file" accept="image/*" multiple onChange={pick} style={{ display:"none" }}/>
-      <div style={{ display:"flex", gap:9, marginTop:12 }}>
-        <button onClick={()=>fileRef.current?.click()} disabled={busy} style={{
-          flex:1, padding:"12px 0", borderRadius:13, border:"2px solid #E8E4DA", background:"#FFF",
-          color:"#8C8478", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
-          display:"flex", alignItems:"center", justifyContent:"center", gap:7, opacity: busy ? .5 : 1,
-        }}>📷 {busy ? "处理中…" : "加照片"}</button>
+      <div style={{ display:"flex", gap:8, marginTop:12 }}>
+        <button onClick={()=>fileRef.current?.click()} disabled={busy}
+          style={{ ...softBtn, opacity: busy ? .5 : 1 }}>📷 {busy ? "处理中…" : "照片"}</button>
+        <button onClick={dataUI.open} style={softBtn}>📎 数据</button>
         <button onClick={commit} style={{
-          flex:1, padding:"12px 0", borderRadius:13, border:"none", background:"#2C2C2C",
+          flex:1.25, padding:"12px 0", borderRadius:13, border:"none", background:"#2C2C2C",
           color:"#FFF", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit",
-          opacity: (text.trim() || photos.length) ? 1 : .4,
+          opacity: (text.trim() || photos.length || files.length) ? 1 : .4,
         }}>记下</button>
       </div>
     </div>
@@ -1097,6 +1248,10 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(r.text);
   const [weather, setWeather] = useState(r.weather || "");
+  // 数据往往比记录晚到——分析跑完了才有结果文件，所以已存在的记录也得能补挂
+  const [files, setFiles] = useState(r.files || []);
+  const dataUI = useDataFiles({ files, onAdd: m => setFiles(f => [...f, m]),
+    onRemove: id => setFiles(f => f.filter(x => x.id !== id)) });
 
   return (
     <div style={{ background:"#FFF", border:"1px solid #EDE8DE", borderRadius:14, padding:"13px 14px", marginBottom:10 }}>
@@ -1122,9 +1277,11 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto }) {
           </div>
           <textarea value={text} onChange={e=>setText(e.target.value)} rows={4}
             style={{ ...S.inp, resize:"vertical", fontSize:14, lineHeight:1.65 }}/>
+          {dataUI.list}
+          {dataUI.inlineButton}
           <div style={{ display:"flex", gap:7, marginTop:9 }}>
-            <button onClick={()=>{ onSave(r.id, { text: text.trim(), weather }); setEditing(false); }} style={S.miniD}>保存</button>
-            <button onClick={()=>{ setText(r.text); setWeather(r.weather||""); setEditing(false); }} style={S.mini}>取消</button>
+            <button onClick={()=>{ onSave(r.id, { text: text.trim(), weather, files }); setEditing(false); }} style={S.miniD}>保存</button>
+            <button onClick={()=>{ setText(r.text); setWeather(r.weather||""); setFiles(r.files||[]); setEditing(false); }} style={S.mini}>取消</button>
             <button onClick={()=>onDelete(r)} style={{ ...S.mini, marginLeft:"auto", color:"#C02556" }}>删除</button>
           </div>
         </>
@@ -1136,6 +1293,7 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto }) {
               {r.photos.map(id => <Photo key={id} id={id} size={78} onOpen={onOpenPhoto}/>)}
             </div>
           )}
+          {r.files?.map(f => <FileChip key={f.id} f={f}/>)}
         </>
       )}
     </div>
@@ -1513,7 +1671,11 @@ export default function MochiApp() {
   };
   const deleteProject = (id) => {
     const gone = data.records.filter(r => r.projectId === id);
-    gone.forEach(r => (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{})));
+    const token = Sync.getAuth()?.token;
+    gone.forEach(r => {
+      (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
+      (r.files || []).forEach(f => dropFile(f.id, token));
+    });
     setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id), records: d.records.filter(r=>r.projectId!==id) }));
     setOpenProject(null);
   };
@@ -1523,6 +1685,7 @@ export default function MochiApp() {
     setData(d => ({ ...d, records: d.records.map(r => r.id === id ? { ...r, ...patch } : r) }));
   const deleteRecord = (r) => {
     (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
+    (r.files || []).forEach(f => dropFile(f.id, Sync.getAuth()?.token));
     setData(d => ({ ...d, records: d.records.filter(x => x.id !== r.id) }));
   };
 
