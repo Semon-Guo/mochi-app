@@ -32,3 +32,22 @@ export function persistSeen(userId, seen, existingIds = []) {
   const alive = new Set(existingIds);
   writeAll({ ...readAll(), [userId]: [...seen].filter((id) => alive.has(id)) });
 }
+
+/** 只读地看一眼已读集合，没初始化过就返回 null。
+ *  跟 loadSeen 分开是因为 loadSeen 首次调用会写盘（把旧记录标成已读），
+ *  而「同步条上显示几条未读」这种地方不该有副作用。 */
+export function peekSeen(userId) {
+  if (!userId) return null;
+  const got = readAll()[userId];
+  return Array.isArray(got) ? new Set(got) : null;
+}
+
+/** 只看最近两周：万一已读状态丢了，也不至于被历史上的几百条糊一脸 */
+export const FRESH_WINDOW = 14 * 86400000;
+
+/** 「新记录」的判定。导师端和同步条上的未读数都走这里，免得两处各算各的走偏。 */
+export function freshRecords(records, seen, meId, now = Date.now()) {
+  if (!seen) return [];
+  return (records || []).filter((r) =>
+    r.ownerId !== meId && !seen.has(r.id) && (r.at || 0) >= now - FRESH_WINDOW);
+}

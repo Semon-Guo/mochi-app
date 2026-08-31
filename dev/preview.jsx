@@ -81,8 +81,11 @@ const params = new URLSearchParams(location.search);
 
 /* ?app=1 → 渲染学生端的真实 MochiApp（种好 localStorage 再挂载） */
 if (params.get("app")) {
-  const STU = { id: "u1", displayName: "郭思蒙", username: "semon", role: "student" };
-  localStorage.setItem("mochi_auth", JSON.stringify({ token: "x", user: STU }));
+  // ?app=prof 用导师身份看主界面（比如同步条上那个「查看全组记录」入口）
+  const WHO = params.get("app") === "prof"
+    ? PROF
+    : { id: "u1", displayName: "郭思蒙", username: "semon", role: "student" };
+  localStorage.setItem("mochi_auth", JSON.stringify({ token: "x", user: WHO }));
   localStorage.setItem("mochi_v3", JSON.stringify({
     todos: [], notes: [], projects: data.projects, records: data.records, comments: data.comments,
   }));

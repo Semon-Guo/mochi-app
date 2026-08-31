@@ -4,7 +4,7 @@ import { avatarFallback } from "./avatar.js";
 import { downloadFile, fmtBytes } from "./files.js";
 import { Photo } from "./PhotoView.jsx";
 import { Thread, indexComments, threadOf, LIKE, REPLY } from "./Comments.jsx";
-import { loadSeen, persistSeen } from "./seen.js";
+import { loadSeen, persistSeen, freshRecords, FRESH_WINDOW } from "./seen.js";
 import { AdminPanel } from "./AdminPanel.jsx";
 
 /* 导师端：按学生或按项目看全组进展。
@@ -397,7 +397,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
   // 打开永远是「没有新记录」，看着像坏了；一条不标又会被课题组历史上的
   // 几百条糊一脸。留最近两周，正好是「最近新增的」那个量。
   const [seen, setSeen] = useState(() => loadSeen(auth?.user?.id,
-    records.filter((r) => (r.at || 0) < Date.now() - 14 * DAY).map((r) => r.id)));
+    records.filter((r) => (r.at || 0) < Date.now() - FRESH_WINDOW).map((r) => r.id)));
   const markSeen = (ids) => setSeen((prev) => {
     const next = new Set(prev);
     ids.forEach((i) => next.add(i));
@@ -405,9 +405,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     return next;
   });
 
-  // 只看最近两周的：万一某天已读状态丢了，也不至于被历史上的几百条糊一脸
-  const fresh = records.filter((r) => r.ownerId !== meId && !seen.has(r.id)
-    && (r.at || 0) >= Date.now() - 14 * DAY);
+  const fresh = freshRecords(records, seen, meId);
 
   // 点赞和回复都算「看过了」——都动手互动了，再让他手动点一下已读是多余的
   const toggleLike = (r) => {

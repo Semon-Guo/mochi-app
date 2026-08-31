@@ -7,6 +7,7 @@ import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_A
          LAB_KINDS, ALL_KINDS } from "./sync.js";
 import { indexComments, threadOf, myLike } from "./comments.js";
 import { migrateLab } from "./migrate.js";
+import { freshRecords, FRESH_WINDOW } from "./seen.js";
 
 let passed = 0, failed = 0;
 const chk = (name, cond, info = "") => {
@@ -149,6 +150,23 @@ console.log("\n── migrateLab：每次启动都跑，不能悄悄少留字段
       entries: [{ id: "en1", at: 200, text: "标定完成" }] }], records: [] });
   chk("旧的实验层内容一条不丢", out.records.length === 2 && out.records[1].text === "标定完成");
   chk("实验层被清空", out.experiments.length === 0);
+}
+
+console.log("\n── 未读判定（导师端和同步条上的角标共用）──");
+{
+  const now = 1_000_000_000_000;
+  const rs = [
+    { id: "a", ownerId: "u1", at: now - 3600e3 },
+    { id: "b", ownerId: "u1", at: now - 3600e3 },
+    { id: "c", ownerId: "prof", at: now - 3600e3 },              // 自己写的
+    { id: "d", ownerId: "u1", at: now - FRESH_WINDOW - 1 },       // 太老
+  ];
+  const fresh = freshRecords(rs, new Set(["a"]), "prof", now);
+  chk("看过的不再算新", !fresh.some((r) => r.id === "a"));
+  chk("没看过的算新", fresh.some((r) => r.id === "b"));
+  chk("自己写的不算新记录", !fresh.some((r) => r.id === "c"));
+  chk("窗口外的老记录不算（已读状态丢了也不会刷屏）", !fresh.some((r) => r.id === "d"));
+  chk("已读集合还没初始化时一条都不算", freshRecords(rs, null, "prof", now).length === 0);
 }
 
 console.log("\n── 评论索引 ──");

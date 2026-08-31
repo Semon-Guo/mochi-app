@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import * as Sync from "./sync.js";
 import { Avatar } from "./AdvisorView.jsx";
 import { fileToAvatar } from "./avatar.js";
+import { loadSeen, peekSeen, freshRecords, FRESH_WINDOW } from "./seen.js";
 
 const C = {
   bg: "#FDFBF7", ink: "#2C2C2C", dim: "#999", faint: "#C0B8A8",
@@ -258,6 +259,25 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
     return () => { clearInterval(iv); document.removeEventListener("visibilitychange", wake); };
   }, [auth?.token, syncTodos]);
 
+  // 导师每次进来都是奔着看记录去的，这个入口不能藏在展开面板里。
+  //
+  // 已读状态由这里负责初始化，而不是等导师端首次打开：不然没点进去就永远
+  // 不显示角标，而角标正是让人想点进去的东西。渲染期间不写盘，放在 effect 里。
+  useEffect(() => {
+    if (!auth || !Sync.canReadGroup(auth.user)) return;
+    if (peekSeen(auth.user.id)) return;
+    loadSeen(auth.user.id, (dataRef.current?.records || [])
+      .filter((r) => (r.at || 0) < Date.now() - FRESH_WINDOW).map((r) => r.id));
+    setTick((n) => n + 1);
+  }, [auth?.user?.id, auth?.user?.role]);
+
+  // 未读数用 peekSeen（只读）——显示条数才让这个按钮有意义，
+  // 否则摆在外面也只是多一行字。
+  const groupUnread = useMemo(() => {
+    if (!auth || !Sync.canReadGroup(auth.user)) return 0;
+    return freshRecords(data?.records, peekSeen(auth.user.id), auth.user.id).length;
+  }, [data?.records, auth?.user?.id, tick]);
+
   const status = !auth ? "登录后可与课题组同步"
     : busy ? "同步中…"
     : pending ? `${pending} 条待同步`
@@ -265,6 +285,22 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   const dot = !auth ? C.faint : busy ? C.amber : pending ? C.amber : C.green;
 
   return (
+    <>
+    {auth && Sync.canReadGroup(auth.user) && (
+      <button onClick={onOpenAdvisor} style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 9, marginBottom: 10,
+        padding: "12px 13px", borderRadius: 13, cursor: "pointer", fontFamily: "inherit",
+        border: `1px solid ${C.edge}`, background: "#FFF", textAlign: "left",
+      }}>
+        <span style={{ fontSize: 15 }}>🔬</span>
+        <span style={{ fontSize: 14, fontWeight: 700, color: C.ink, flex: 1 }}>查看全组记录</span>
+        {groupUnread > 0 && (
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: "#FFF", background: C.amber,
+            borderRadius: 999, padding: "2px 9px" }}>{groupUnread} 条新</span>
+        )}
+        <span style={{ color: C.faint, fontSize: 15, lineHeight: 1 }}>›</span>
+      </button>
+    )}
     <div style={{ marginBottom: 10, border: `1px solid ${C.line}`, borderRadius: 13, background: "#FFF", overflow: "hidden" }}>
       <div onClick={() => setOpen((v) => !v)} style={{
         display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", cursor: "pointer",
@@ -310,12 +346,6 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                   </span>
                 </span>
               </label>
-              {Sync.canReadGroup(auth.user) && (
-                <button onClick={() => { setOpen(false); onOpenAdvisor(); }}
-                  style={{ ...btn("#FFF", C.ink, { width: "100%", border: `2px solid ${C.edge}`, marginTop: 6 }) }}>
-                  查看全组记录
-                </button>
-              )}
               {/* 推送：app 关着也能收到提醒，代价是任务标题要上传 */}
               <div style={{ padding: "10px 11px", borderRadius: 12, border: `1px solid ${C.line}`,
                 background: "#FCFAF6", marginTop: 8 }}>
@@ -401,6 +431,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
         </div>
       )}
     </div>
+    </>
   );
 }
 
