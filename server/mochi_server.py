@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mochi 实验记录同步服务。
 
-只同步实验记录（projects / records / photos / 数据文件），个人待办和计时数据
-留在设备本地。
+只同步实验记录（projects / records / photos / comments / milestones / 数据文件），
+个人待办和计时数据留在设备本地。
 学生读写自己的，导师只读全组的。
 
 纯标准库实现——这台服务器访问 GitHub releases 不稳定，任何需要下载运行时或
@@ -74,11 +74,11 @@ IO_CHUNK = 1 << 16
 ORPHAN_GRACE = int(os.environ.get("MOCHI_ORPHAN_GRACE_H") or 24) * 3600 * 1000
 TICKET_TTL = 5 * 60 * 1000
 SESSION_TTL = 90 * 24 * 3600
-SYNC_TABLES = ("projects", "records", "photos", "comments", "todos")
+SYNC_TABLES = ("projects", "records", "photos", "comments", "milestones", "todos")
 # 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
-ADVISOR_VISIBLE = ("projects", "records", "photos", "comments")
+ADVISOR_VISIBLE = ("projects", "records", "photos", "comments", "milestones")
 
 # 三种角色。admin 是 advisor 的超集：除了能看全组记录，还能审批导师申请。
 # 用导师码注册只是「申请」，在管理员点头之前一律按学生对待——否则导师码
@@ -179,6 +179,14 @@ CREATE TABLE IF NOT EXISTS comments (
 CREATE INDEX IF NOT EXISTS idx_comments_seq ON comments(seq);
 CREATE INDEX IF NOT EXISTS idx_comments_owner ON comments(owner_id, seq);
 CREATE INDEX IF NOT EXISTS idx_comments_target ON comments(target_owner, seq);
+
+/* 日历上的重点节点：投稿截止、组会、开题、答辩这些。跟记录一样按人归属、
+   导师可见全组——组里的关键日期本来就该是共同信息。 */
+CREATE TABLE IF NOT EXISTS milestones (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_ms_seq ON milestones(seq);
+CREATE INDEX IF NOT EXISTS idx_ms_owner ON milestones(owner_id, seq);
 
 /* 项目成员的倒排索引。成员名单本身存在项目 data 里跟着同步走，这张表只是
    为了让「拉取我参与的项目」能走索引，而不是每次去解析每行 JSON。 */

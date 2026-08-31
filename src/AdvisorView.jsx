@@ -5,6 +5,7 @@ import { downloadFile, fmtBytes } from "./files.js";
 import { Photo } from "./PhotoView.jsx";
 import { Thread, indexComments, threadOf, LIKE, REPLY } from "./Comments.jsx";
 import { loadSeen, persistSeen, freshRecords, FRESH_WINDOW } from "./seen.js";
+import { MS_KINDS } from "./Calendar.jsx";
 import { AdminPanel } from "./AdminPanel.jsx";
 
 /* 导师端：按学生或按项目看全组进展。
@@ -460,6 +461,16 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
 
   const fresh = freshRecords(records, seen, meId);
 
+  // 全组接下来的重点节点。同步过来了却不显示的话，那份数据就是死的——
+  // 而「谁的截止快到了」正是导师最该一眼看到的东西。
+  const upcomingMs = useMemo(() => {
+    const today = new Date().setHours(0, 0, 0, 0);
+    return (data.milestones || [])
+      .filter((m) => new Date(m.at || 0).setHours(0, 0, 0, 0) >= today)
+      .sort((a, b) => (a.at || 0) - (b.at || 0))
+      .slice(0, 5);
+  }, [data.milestones]);
+
   // 标记已读不能让这一条当场从眼前消失——刚点完手还在那儿，列表却已经
   // 跳了一格，很容易点错下一条。所以进入这个页签时钉一份快照：这一轮看到的
   // 记录一直留在原位，读过的变灰，等下次再进来才真的清掉。
@@ -741,6 +752,37 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
         </div>
         <Heatmap records={records} />
       </Panel>
+
+      {upcomingMs.length > 0 && (
+        <Panel title="全组接下来的重点">
+          {upcomingMs.map((m) => {
+            const k = MS_KINDS.find((x) => x.key === m.kind) || MS_KINDS[2];
+            const who = byId[m.ownerId];
+            const days = Math.round((new Date(m.at).setHours(0, 0, 0, 0)
+              - new Date().setHours(0, 0, 0, 0)) / DAY);
+            const d = new Date(m.at);
+            return (
+              <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9,
+                padding: "8px 0", borderTop: `1px solid ${C.hair}` }}>
+                <span style={{ fontSize: 11.5, fontWeight: 700, fontFamily: MONO,
+                  color: k.color, width: 38, flexShrink: 0 }}>
+                  {d.getMonth() + 1}/{d.getDate()}
+                </span>
+                <span style={{ fontSize: 12 }}>{k.icon}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {m.title}
+                </span>
+                {who && <Avatar user={who} size={20} />}
+                <span style={{ fontSize: 10.5, fontWeight: 700, flexShrink: 0,
+                  color: days <= 3 ? C.red : C.sub }}>
+                  {days === 0 ? "就是今天" : `还有 ${days} 天`}
+                </span>
+              </div>
+            );
+          })}
+        </Panel>
+      )}
 
       <div style={{ display: "flex", gap: 6, padding: "0 0 10px" }}>
         {[["feed", `新记录${fresh.length ? ` ${fresh.length}` : ""}`],

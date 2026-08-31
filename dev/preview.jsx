@@ -34,6 +34,16 @@ window.fetch = async (url) => new Response(
   { headers: { "content-type": "application/json" } });
 
 const H = 3600e3, D = 86400e3;
+const MOCK_TODOS = [
+  { id: "t1", text: "跑 FPM 重建", done: true, importance: "main",
+    doneTs: Date.now() - 3 * H, actualDuration: 7200, timeline: [] },
+  { id: "t2", text: "整理标定数据", done: true, importance: "side",
+    doneTs: Date.now() - 1 * D, actualDuration: 3300, timeline: [] },
+  { id: "t3", text: "读 Zheng 2013", done: true, importance: "casual",
+    doneTs: Date.now() - 2 * D, actualDuration: 5400, timeline: [] },
+  { id: "t4", text: "写投稿正文", done: false, importance: "main",
+    remind: { at: Date.now() + 2 * D } },
+];
 const data = {
   projects: [
     { id: "p1", name: "编码孔径成像", color: "#5B7FC7", ownerId: "u1" },
@@ -52,6 +62,16 @@ const data = {
       text: "标定板拍糊了，明天重来。", photos: [], files: [] },
     { id: "r4", ownerId: "u1", projectId: "p2", at: Date.now() - 3 * D,
       text: "光场重建第一版跑通，但边缘有明显振铃。", photos: ["ph4"], files: [] },
+  ],
+  milestones: [
+    { id: "m1", ownerId: "u1", at: Date.now() + 4 * D, title: "Optica 投稿截止", kind: "deadline",
+      projectId: "p1", note: "正文 + 补充材料一起交" },
+    { id: "m2", ownerId: "u1", at: Date.now() + 1 * D, title: "组会汇报：光场重建进展",
+      kind: "meeting", projectId: "p2" },
+    { id: "m3", ownerId: "u1", at: Date.now() - 6 * D, title: "中期检查通过",
+      kind: "milestone", projectId: "p1" },
+    { id: "m4", ownerId: "u1", at: Date.now() + 11 * D, title: "设备年检", kind: "other" },
+    { id: "m5", ownerId: "u2", at: Date.now() + 2 * D, title: "开题报告初稿", kind: "milestone" },
   ],
   comments: [
     { id: "c1", ownerId: "prof", recordId: "r4", kind: "reply", byName: "郭老师",
@@ -110,7 +130,8 @@ if (params.get("app")) {
     : { id: "u1", displayName: "郭思蒙", username: "semon", role: "student" };
   localStorage.setItem("mochi_auth", JSON.stringify({ token: "x", user: WHO }));
   localStorage.setItem("mochi_v3", JSON.stringify({
-    todos: [], notes: [], projects: data.projects, records: data.records, comments: data.comments,
+    todos: MOCK_TODOS, notes: [], projects: data.projects, records: data.records,
+    comments: data.comments, milestones: data.milestones,
   }));
   Promise.all([fakePhoto("ph1", 210), fakePhoto("ph2", 30), fakePhoto("ph3", 140), fakePhoto("ph4", 280)])
     .then(() => {
@@ -121,7 +142,7 @@ if (params.get("app")) {
         if (el) el.click();
       };
       setTimeout(() => {
-        click("button", "记录");
+        click("button", params.get("tab") || "记录");
         setTimeout(() => {
           const open = params.get("open");
           if (open) click(".pcard", open);

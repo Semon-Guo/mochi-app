@@ -7,6 +7,8 @@ import { Photo, FullPhoto } from "./src/PhotoView.jsx";
 import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
 import { Thread, indexComments, threadOf, LIKE, REPLY } from "./src/Comments.jsx";
 import { NC, uid, migrateLab } from "./src/migrate.js";
+import { bjNow, toBJ, dayKeyOf } from "./src/time.js";
+import { Calendar } from "./src/Calendar.jsx";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -51,7 +53,7 @@ function clearTimerSession(...todoIds) {
   if (!Object.keys(map).length) { try { localStorage.removeItem(BG_TS_SK); } catch {} }
 }
 function loadAll() {
-  let data = { todos: [], notes: [], projects: [], records: [], comments: [] };
+  let data = { todos: [], notes: [], projects: [], records: [], comments: [], milestones: [] };
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
   const keptSync = data._sync || null;
   data = migrateLab({
@@ -62,6 +64,7 @@ function loadAll() {
     experiments: data.experiments || [],
     records: data.records || [],
     comments: data.comments || [],
+    milestones: data.milestones || [],
   });
   if (keptSync) data._sync = keptSync;
   // Every live session keeps counting while the app is closed — fold the time back in,
@@ -84,8 +87,6 @@ function save(d) {
 }
 
 // Beijing time helpers
-function bjNow() { return new Date(Date.now() + (8 * 3600000) + (new Date().getTimezoneOffset() * 60000)); }
-function toBJ(ts) { return new Date(ts + (8 * 3600000) + (new Date().getTimezoneOffset() * 60000)); }
 function fmtBJ(ts) { const d = toBJ(ts); return `${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`; }
 function fmtBJFull(ts) { const d = toBJ(ts); return `${d.getMonth()+1}/${d.getDate()} ${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}:${d.getSeconds().toString().padStart(2,"0")}`; }
 function fmtDay(ts) { const d = toBJ(ts); const t = bjNow(); const y = new Date(t); y.setDate(y.getDate()-1); if (d.toDateString()===t.toDateString()) return "今天"; if (d.toDateString()===y.toDateString()) return "昨天"; return `${d.getMonth()+1}月${d.getDate()}日`; }
@@ -143,7 +144,6 @@ function shrinkImage(file, max = 1600, q = 0.75) {
   });
 }
 
-function dayKeyOf(ts) { return toBJ(ts).toDateString(); }
 function fmtRecDay(ts) {
   const d = toBJ(ts);
   const w = ["周日","周一","周二","周三","周四","周五","周六"][d.getDay()];
@@ -1350,6 +1350,7 @@ export default function MochiApp() {
         else setProjForm("new");
       } else if (e.key === "1") { setView("main"); setTab("todo"); }
       else if (e.key === "2") { setView("main"); setTab("lab"); }
+      else if (e.key === "3") { setView("main"); setTab("cal"); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1619,6 +1620,16 @@ export default function MochiApp() {
   ] }));
   const dropComment = (c) => setData(d => ({ ...d, comments: (d.comments || []).filter(x => x.id !== c.id) }));
 
+  // 重点节点（日历上的投稿截止、组会、答辩这些）
+  const saveMilestone = (ms) => setData(d => {
+    const list = d.milestones || [];
+    return ms.id
+      ? { ...d, milestones: list.map(x => x.id === ms.id ? { ...x, ...ms } : x) }
+      : { ...d, milestones: [...list, { ...ms, id: uid() }] };
+  });
+  const deleteMilestone = (ms) =>
+    setData(d => ({ ...d, milestones: (d.milestones || []).filter(x => x.id !== ms.id) }));
+
   // 导师在导师端建的组级项目：归他所有，成员名单跟着项目数据一起同步，
   // 学生端靠这份名单才拉得到这个项目。
   const createGroupProject = (name) => setData(d => ({ ...d, projects: [
@@ -1659,6 +1670,12 @@ export default function MochiApp() {
       // 记录没了，挂在它下面的回复和赞也该走——留着就是服务器上一堆孤儿
       comments: (d.comments || []).filter(c => c.recordId !== r.id) }));
   };
+
+  // 日历页签的角标：一周内要到的重点节点。过期的不算，那已经是历史了
+  const soonCount = (data.milestones || []).filter(m => {
+    const d = Math.round((new Date(m.at || 0).setHours(0,0,0,0) - new Date().setHours(0,0,0,0)) / 86400000);
+    return d >= 0 && d <= 7;
+  }).length;
 
   const pending = data.todos.filter(t => !t.done && !t.parentId);
   const allPending = data.todos.filter(t => !t.done);
@@ -2024,20 +2041,27 @@ export default function MochiApp() {
 
       {/* Tabs */}
       <div style={{ display:"flex",gap:6,padding:"16px var(--app-pad) 8px",alignItems:"center" }}>
-        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length,"1"],["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length,"2"]].map(([k,l,ic,c,key])=>(
+        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length,"1"],
+          ["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length,"2"],
+          ["cal","日历",<Ic.Cal s={17} key="c"/>,soonCount,"3"]].map(([k,l,ic,c,key])=>(
           <button key={k} onClick={()=>{setTab(k);setShowAdd(false);setEditingTodo(null);setAddSubParent(null);setProjForm(null);}}
             style={{...S.tab,...(tab===k?S.tabA:{})}}>{ic}<span>{l}</span>{c>0&&<span style={S.bdg}>{c}</span>}
             <span className="kbd-hint">{key}</span></button>
         ))}
         {done.length>0&&(
           <button onClick={()=>setView("done")} style={{...S.tab,marginLeft:"auto",gap:5,padding:"10px 14px"}}>
-            <Ic.Cal s={15}/><span style={{fontSize:13}}>{done.length}</span>
+            <Ic.Check s={15}/><span style={{fontSize:13}}>{done.length}</span>
           </button>
         )}
       </div>
 
       <div style={{ padding:"12px var(--app-pad)" }}>
-        {tab==="todo"?(
+        {tab==="cal"?(
+          <Calendar records={data.records} todos={data.todos} projects={data.projects}
+            milestones={data.milestones || []}
+            onSaveMilestone={saveMilestone} onDeleteMilestone={deleteMilestone}
+            onOpenProject={(pid)=>{ if(pid){ setTab("lab"); setOpenProject(pid); } }}/>
+        ):tab==="todo"?(
           <>
             {showAdd && !addSubParent && <TaskForm onSave={info=>addTodo(info)} onCancel={()=>setShowAdd(false)} />}
 
@@ -2086,12 +2110,16 @@ export default function MochiApp() {
         )}
       </div>
 
-      <button onClick={()=>{
-        if (tab==="todo") { setShowAdd(true); setEditingTodo(null); setAddSubParent(null); }
-        else setProjForm("new");
-      }} style={S.fab} title="新建（N）">
-        <Ic.Plus s={26}/>
-      </button>
+      {/* 日历页不放悬浮加号：它自带「＋重点节点」，而那个按钮绑着「选中的是哪一天」，
+          悬浮的加号答不了「加到哪天」 */}
+      {tab!=="cal" && (
+        <button onClick={()=>{
+          if (tab==="todo") { setShowAdd(true); setEditingTodo(null); setAddSubParent(null); }
+          else setProjForm("new");
+        }} style={S.fab} title="新建（N）">
+          <Ic.Plus s={26}/>
+        </button>
+      )}
 
       {/* Celebration overlay */}
       {celebration && (
@@ -2352,7 +2380,9 @@ export const CSS = `
 
 const S = {
   ctn:{fontFamily:"'Outfit','Noto Serif SC',sans-serif",background:"#FDFBF7",minHeight:"100vh",maxWidth:"var(--app-w)",margin:"0 auto",position:"relative",paddingBottom:100,color:"#2C2C2C",overflowX:"hidden"},
-  tab:{display:"flex",alignItems:"center",gap:6,padding:"10px 18px",borderRadius:24,border:"none",background:"#F0EDE6",color:"#888",fontSize:15,fontWeight:500,cursor:"pointer",transition:"all .25s",fontFamily:"inherit"},
+  /* 三个页签 + 完成记录那个小按钮要在 430px 里排下，所以 nowrap 必须有：
+     不加的话「待办」会被压成竖排两行 */
+  tab:{display:"flex",alignItems:"center",gap:5,padding:"9px 13px",borderRadius:24,border:"none",background:"#F0EDE6",color:"#888",fontSize:14.5,fontWeight:500,cursor:"pointer",transition:"all .25s",fontFamily:"inherit",whiteSpace:"nowrap",flexShrink:0},
   tabA:{background:"#2C2C2C",color:"#FFF"},
   bdg:{background:"#E8A838",color:"#FFF",fontSize:11,fontWeight:600,borderRadius:10,padding:"1px 7px",marginLeft:2},
   ib:{background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",padding:6,borderRadius:10,color:"#555"},

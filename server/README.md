@@ -71,7 +71,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（170 项）
+python3 server/test_server.py   # 服务端 API（175 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -104,8 +104,8 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | POST | `/api/password` | `{oldPassword, newPassword}` 本人改密码 |
 | POST | `/api/avatar` | 设置头像（data URL，≤96KB） |
 | POST | `/api/profile` | 改显示名 |
-| GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, comments, seq, more}` |
-| POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[], comments:[]}` |
+| GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, comments, milestones, seq, more}` |
+| POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[], comments:[], milestones:[]}` |
 | POST | `/api/photo/<id>` | 上传照片二进制（元数据须先经 `/api/sync` 建好） |
 | GET | `/api/photo/<id>` | 下载照片（本人或导师） |
 | POST | `/api/file/<id>/init` | 登记数据文件 `{name, size, mime}` → `{received}` 续传点 |
@@ -227,6 +227,8 @@ extendedKeyUsage 含 serverAuth。
 | `src/photos.js` / `src/PhotoView.jsx` | 照片的存取 / 显示组件（主应用和导师端共用） |
 | `src/comments.js` / `src/Comments.jsx` | 回复与点赞的纯逻辑 / UI |
 | `src/seen.js` | 导师端「哪些记录还没看」，只存本机 |
+| `src/Calendar.jsx` | 日历：月视图 / 周日程 / 重点节点编辑 |
+| `src/time.js` | 北京时间原语（全组按同一时区归日） |
 | `src/SyncUI.jsx` | 同步状态条、登录/注册表单、导师视图 |
 
 **关键设计**：业务代码里那 23 处 `setData` 一处都没改。`todo-notes-app.jsx`
@@ -241,7 +243,7 @@ extendedKeyUsage 含 serverAuth。
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（74 项）
-python3 server/test_server.py   # 服务端 API（169 项；服务器上多一项 scrypt，共 170）
+python3 server/test_server.py   # 服务端 API（174 项；服务器上多一项 scrypt，共 175）
 ```
 
 ### 推送

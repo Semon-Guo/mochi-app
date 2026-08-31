@@ -572,6 +572,28 @@ def main():
         chk("移出名单后学生就拉不到了",
             not any(p["id"] == "shared1" for p in r.get("projects", [])))
 
+        print("\n── 重点节点 ──")
+        s, r = call("POST", "/api/sync", {"milestones": [
+            {"id": "ms1", "updatedAt": now + 70000,
+             "data": {"at": now + 4 * 86400000, "title": "Optica 投稿截止",
+                      "kind": "deadline", "projectId": "p1"}}]}, token=stu1)
+        chk("学生能建重点节点", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        mine = [m for m in r.get("milestones", []) if m["id"] == "ms1"]
+        chk("自己拉得回来", len(mine) == 1 and mine[0]["data"]["title"] == "Optica 投稿截止")
+
+        s, r = call("GET", "/api/sync?since=0", token=admin)
+        chk("导师看得到全组的重点节点（组里的关键日期是共同信息）",
+            any(m["id"] == "ms1" for m in r.get("milestones", [])))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("别的学生看不到", not any(m["id"] == "ms1" for m in r.get("milestones", [])))
+
+        s, r = call("POST", "/api/sync", {"milestones": [
+            {"id": "ms1", "updatedAt": now + 71000, "data": {"title": "改成别人的"}}]}, token=stu2)
+        chk("改不了别人的重点节点", s == 200 and r["rejected"], str(r))
+
         print("\n── 导师回复与点赞 ──")
         s, r = call("POST", "/api/sync", {"comments": [
             {"id": "cm1", "updatedAt": now + 60000,
