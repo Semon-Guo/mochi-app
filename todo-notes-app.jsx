@@ -5,6 +5,7 @@ import { AdvisorView } from "./src/AdvisorView.jsx";
 import { putPhoto, delPhoto } from "./src/photos.js";
 import { Photo, FullPhoto } from "./src/PhotoView.jsx";
 import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
+import { Thread, indexComments, threadOf, LIKE, REPLY } from "./src/Comments.jsx";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -49,15 +50,17 @@ function clearTimerSession(...todoIds) {
   if (!Object.keys(map).length) { try { localStorage.removeItem(BG_TS_SK); } catch {} }
 }
 function loadAll() {
-  let data = { todos: [], notes: [], projects: [], records: [] };
+  let data = { todos: [], notes: [], projects: [], records: [], comments: [] };
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
   const keptSync = data._sync || null;
   data = migrateLab({
     todos: (data.todos || []).map(migrateTodo),
+    // 散记功能已下线，但数据原样留着——删掉界面不该顺手把人写过的东西烧了
     notes: data.notes || [],
     projects: data.projects || [],
     experiments: data.experiments || [],
     records: data.records || [],
+    comments: data.comments || [],
   });
   if (keptSync) data._sync = keptSync;
   // Every live session keeps counting while the app is closed — fold the time back in,
@@ -1211,7 +1214,7 @@ function Compose({ lastWeather, onSave }) {
 }
 
 /* ── 已经记下的一条 ── */
-function RecordCard({ r, onSave, onDelete, onOpenPhoto }) {
+function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, onReply, onDropComment }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(r.text);
   const [weather, setWeather] = useState(r.weather || "");
@@ -1261,6 +1264,13 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto }) {
             </div>
           )}
           {r.files?.map(f => <FileChip key={f.id} f={f}/>)}
+          {/* 只有真有人回复或点赞时才出现——每条记录底下都挂一排按钮，
+              自己的记录本就吵了。有人搭话时回复框自然会长出来。
+              也不给自己的记录点赞的按钮，但导师点的赞要看得见。 */}
+          {thread && (thread.replies.length > 0 || thread.likes.length > 0) && (
+            <Thread thread={thread} meId={meId} canLike={false}
+              onReply={onReply} onDelete={onDropComment}/>
+          )}
         </>
       )}
     </div>
@@ -1300,7 +1310,6 @@ export default function MochiApp() {
   const applySync = useCallback((fn) => _setData(fn), []);
   const [advisorOpen, setAdvisorOpen] = useState(false);
   const [tab, setTab] = useState("todo");
-  const [editingNote, setEditingNote] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addSubParent, setAddSubParent] = useState(null);
   const [editingTodo, setEditingTodo] = useState(null);
@@ -1325,7 +1334,6 @@ export default function MochiApp() {
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
   const dragYRef = useRef(0);
-  const ntRef = useRef(null);
   const todosRef = useRef(initState.data.todos);
   const activeRef = useRef(new Set(initState.activeTodoIds));
   const firedRef = useRef(new Set());
@@ -1429,7 +1437,6 @@ export default function MochiApp() {
       window.removeEventListener("focus", wake);
     };
   }, []);
-  useEffect(() => { if (editingNote && ntRef.current) ntRef.current.focus(); }, [editingNote]);
 
   useEffect(() => {
     if (!dragFrom) return;
@@ -1629,6 +1636,24 @@ export default function MochiApp() {
     setTimeout(() => setCanceledTimer(false), 3000);
   };
 
+  // 导师的回复和点赞。作者名字要跟着一起存——对面拿不到成员名单，
+  // 不存的话他只会看到一串 user id。
+  const me = Sync.getAuth()?.user;
+  const cmtIndex = useMemo(() => indexComments(data.comments), [data.comments]);
+  const addComment = (recordId, kind, text) => setData(d => ({ ...d, comments: [
+    ...(d.comments || []),
+    { id: uid(), recordId, kind, text: text || "", byName: me?.displayName || "", at: Date.now() },
+  ] }));
+  const dropComment = (c) => setData(d => ({ ...d, comments: (d.comments || []).filter(x => x.id !== c.id) }));
+
+  // 导师在导师端建的组级项目：归他所有，成员名单跟着项目数据一起同步，
+  // 学生端靠这份名单才拉得到这个项目。
+  const createGroupProject = (name) => setData(d => ({ ...d, projects: [
+    { id:uid(), name, startedAt:Date.now(), color:NC[d.projects.length % NC.length], members:[] },
+    ...d.projects] }));
+  const setProjectMembers = (id, members) => setData(d => ({ ...d,
+    projects: d.projects.map(p => p.id === id ? { ...p, members } : p) }));
+
   // 记录本
   const saveProject = (info) => {
     setData(d => projForm === "new"
@@ -1639,11 +1664,14 @@ export default function MochiApp() {
   const deleteProject = (id) => {
     const gone = data.records.filter(r => r.projectId === id);
     const token = Sync.getAuth()?.token;
+    const goneIds = new Set(gone.map(r => r.id));
     gone.forEach(r => {
       (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
       (r.files || []).forEach(f => dropFile(f.id, token));
     });
-    setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id), records: d.records.filter(r=>r.projectId!==id) }));
+    setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id),
+      records: d.records.filter(r=>r.projectId!==id),
+      comments: (d.comments || []).filter(c => !goneIds.has(c.recordId)) }));
     setOpenProject(null);
   };
   const addRecord = (projectId, info) =>
@@ -1653,13 +1681,11 @@ export default function MochiApp() {
   const deleteRecord = (r) => {
     (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
     (r.files || []).forEach(f => dropFile(f.id, Sync.getAuth()?.token));
-    setData(d => ({ ...d, records: d.records.filter(x => x.id !== r.id) }));
+    setData(d => ({ ...d,
+      records: d.records.filter(x => x.id !== r.id),
+      // 记录没了，挂在它下面的回复和赞也该走——留着就是服务器上一堆孤儿
+      comments: (d.comments || []).filter(c => c.recordId !== r.id) }));
   };
-
-  // Notes
-  const createNote = () => { const c=NC[Math.floor(Math.random()*NC.length)]; const n={id:uid(),title:"",body:"",ts:Date.now(),color:c}; setData(d=>({...d,notes:[n,...d.notes]})); setEditingNote(n.id); };
-  const updateNote = (id,f,v) => { setData(d=>({...d,notes:d.notes.map(n=>n.id===id?{...n,[f]:v,ts:Date.now()}:n)})); };
-  const deleteNote = (id) => { setData(d=>({...d,notes:d.notes.filter(n=>n.id!==id)})); setEditingNote(null); };
 
   const pending = data.todos.filter(t => !t.done && !t.parentId);
   const allPending = data.todos.filter(t => !t.done);
@@ -1881,8 +1907,15 @@ export default function MochiApp() {
           <div style={{ display:"flex", alignItems:"center", gap:8 }}>
             <button style={S.ib} onClick={()=>setOpenProject(null)}><Ic.Back/></button>
             <span style={{ fontSize:20, fontWeight:700, flex:1, lineHeight:1.3 }}>{pr.name}</span>
-            <button style={S.ib} onClick={()=>setProjForm(pr.id)}><Ic.Edit s={17}/></button>
-            <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteProject(pr.id)}><Ic.Trash s={16}/></button>
+            {/* 导师建的组级项目改不了也删不了——服务端本来就拒，界面上再给入口
+                只会让本地删掉、推上去被拒、下一轮又拉回来，还会留下永远推不动的脏改动 */}
+            {(!pr.ownerId || pr.ownerId === me?.id) ? (<>
+              <button style={S.ib} onClick={()=>setProjForm(pr.id)}><Ic.Edit s={17}/></button>
+              <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteProject(pr.id)}><Ic.Trash s={16}/></button>
+            </>) : (
+              <span style={{ fontSize:10.5, fontWeight:700, color:"#5B7FC7", background:"#EEF2FB",
+                padding:"3px 8px", borderRadius:6 }}>组级项目</span>
+            )}
           </div>
           <div style={{ fontSize:11, color:"#B0A99B", paddingLeft:34, marginBottom:16 }}>{recs.length} 条记录</div>
         </div>
@@ -1890,7 +1923,9 @@ export default function MochiApp() {
         <div style={{ padding:"0 24px" }}>
           <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}/>
           {recs.map(r => (
-            <RecordCard key={r.id} r={r} onSave={saveRecord} onDelete={deleteRecord} onOpenPhoto={setViewPhoto}/>
+            <RecordCard key={r.id} r={r} onSave={saveRecord} onDelete={deleteRecord} onOpenPhoto={setViewPhoto}
+              thread={threadOf(cmtIndex, r.id)} meId={me?.id}
+              onReply={(text)=>addComment(r.id, REPLY, text)} onDropComment={dropComment}/>
           ))}
           {recs.length === 0 && (
             <div style={{ padding:"20px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>还没有记录</div>
@@ -1898,27 +1933,6 @@ export default function MochiApp() {
         </div>
 
         {timerUI}{remindUI}{photoUI}
-        <style>{CSS}</style>
-      </div>
-    );
-  }
-
-  // ── Note Editor ──
-  if (editingNote) {
-    const n = data.notes.find(x=>x.id===editingNote);
-    if (!n) { setEditingNote(null); return null; }
-    return (
-      <div style={{...S.ctn,background:n.color.bg}}>
-        <div style={S.edH}>
-          <button style={S.ib} onClick={()=>setEditingNote(null)}><Ic.Back/></button>
-          <button style={{...S.ib,color:n.color.accent}} onClick={()=>deleteNote(n.id)}><Ic.Trash/></button>
-        </div>
-        <div style={{padding:"8px 28px"}}>
-          <input ref={ntRef} style={{...S.neT,color:n.color.accent}} placeholder="标题" value={n.title} onChange={e=>updateNote(n.id,"title",e.target.value)} />
-          <textarea style={S.neB} placeholder="写点什么..." value={n.body} onChange={e=>updateNote(n.id,"body",e.target.value)} />
-        </div>
-        {timerUI}
-      {remindUI}
         <style>{CSS}</style>
       </div>
     );
@@ -2013,7 +2027,8 @@ export default function MochiApp() {
   // 只是把 state 改了，屏幕上什么都不会发生。
   if (advisorOpen) {
     return (<>
-      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} onPhoto={setViewPhoto} />
+      <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} onPhoto={setViewPhoto}
+        actions={{ createProject: createGroupProject, setProjectMembers, addComment, dropComment }} />
       {photoUI}
       <style>{CSS}</style>
     </>);
@@ -2069,7 +2084,7 @@ export default function MochiApp() {
             <SyncBar data={data} applySync={applySync} onOpenAdvisor={()=>setAdvisorOpen(true)} />
             {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
 
-            {data.projects.length===0 && data.notes.length===0 && projForm!=="new" && (
+            {data.projects.length===0 && projForm!=="new" && (
               <div style={S.empty}>
                 <div style={{fontSize:48}}>🔬</div>
                 <div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有项目</div>
@@ -2094,29 +2109,6 @@ export default function MochiApp() {
             })}
             </div>
 
-            {(data.notes.length > 0 || data.projects.length > 0) && (
-              <div>
-                <div style={{ ...S.grp, display:"flex", alignItems:"center", gap:8 }}>
-                  散记
-                  <button onClick={createNote} style={{
-                    marginLeft:"auto", border:"none", background:"none", cursor:"pointer",
-                    color:"#B0A99B", fontSize:11, fontWeight:700, fontFamily:"inherit", padding:2,
-                  }}>+ 随手记</button>
-                </div>
-                {data.notes.map(n=>(
-                  <div key={n.id} onClick={()=>setEditingNote(n.id)} style={{
-                    ...S.pcard, background:n.color.bg, borderColor:"transparent",
-                    borderLeft:`3px solid ${n.color.accent}`,
-                  }}>
-                    <div style={{fontSize:14,fontWeight:600,color:n.color.accent,lineHeight:1.35}}>{n.title||"无标题"}</div>
-                    <div style={{fontSize:12.5,color:"#777",lineHeight:1.5,marginTop:4}}>
-                      {n.body?n.body.slice(0,60)+(n.body.length>60?"…":""):"空笔记"}
-                    </div>
-                    <div style={{fontSize:10.5,color:"#B0A99B",marginTop:6}}>{fmtDay(n.ts)} {fmtBJ(n.ts)}</div>
-                  </div>
-                ))}
-              </div>
-            )}
           </>
         )}
       </div>

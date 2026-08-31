@@ -104,8 +104,8 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | POST | `/api/password` | `{oldPassword, newPassword}` 本人改密码 |
 | POST | `/api/avatar` | 设置头像（data URL，≤96KB） |
 | POST | `/api/profile` | 改显示名 |
-| GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, seq, more}` |
-| POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[]}` |
+| GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, comments, seq, more}` |
+| POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[], comments:[]}` |
 | POST | `/api/photo/<id>` | 上传照片二进制（元数据须先经 `/api/sync` 建好） |
 | GET | `/api/photo/<id>` | 下载照片（本人或导师） |
 | POST | `/api/file/<id>/init` | 登记数据文件 `{name, size, mime}` → `{received}` 续传点 |
@@ -145,6 +145,26 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | `MOCHI_MAX_FILE_MB` | 512 | 单个数据文件上限 |
 | `MOCHI_USER_QUOTA_MB` | 10240 | 每人数据文件总量上限 |
 | `MOCHI_ORPHAN_GRACE_H` | 24 | 多久没被记录引用就回收 |
+
+### 可见性：两处「不是我的行也得给我」
+
+同步的默认规则是「只给你自己的行」，但有两处必须破例，否则功能是断的：
+
+| 例外 | 为什么 | 怎么实现 |
+|---|---|---|
+| 导师建的项目 | 学生看不到这个项目就没法往里记 | 成员名单存在项目 `data.members` 里跟着同步走；服务端另存一张 `project_members` 倒排表，拉取时走索引 |
+| 别人对我的记录写的回复和赞 | 那条评论的 `owner_id` 是导师，按 owner 过滤学生根本拉不到 | 写入时冗余存一份 `target_owner`（被评论记录的作者），拉取条件是 `owner_id = 我 OR target_owner = 我` |
+
+两个坑：
+
+- **评论的墓碑不能清 `target_owner`**。取消赞是删除，删除时 `data` 是空的，
+  跟着把 `target_owner` 清掉的话学生就拉不到这条墓碑，那个赞会永远留在他屏幕上。
+- **评论只能挂在自己看得到的记录上**（`comment_target_error`）。不查的话，
+  猜中一个记录 id 就能往别人的记录下面塞东西，而且靠 `target_owner` 直接
+  显示到对方界面上。
+
+「未读」状态**只存在本机**（`src/seen.js`），不上服务器：那是导师一个人的
+阅读进度，没有理由让被看的学生知道他读没读、什么时候读的。
 
 ### 同步模型
 
@@ -204,6 +224,9 @@ extendedKeyUsage 含 serverAuth。
 | `src/sync.js` | 同步引擎：打戳、墓碑、LWW 合并、推拉、照片 |
 | `src/photos.js` | 照片的 IndexedDB 存取（主应用和同步引擎共用） |
 | `src/files.js` | 数据文件的分块上传 / 续传 / 凭票下载 |
+| `src/photos.js` / `src/PhotoView.jsx` | 照片的存取 / 显示组件（主应用和导师端共用） |
+| `src/comments.js` / `src/Comments.jsx` | 回复与点赞的纯逻辑 / UI |
+| `src/seen.js` | 导师端「哪些记录还没看」，只存本机 |
 | `src/SyncUI.jsx` | 同步状态条、登录/注册表单、导师视图 |
 
 **关键设计**：业务代码里那 23 处 `setData` 一处都没改。`todo-notes-app.jsx`
@@ -216,9 +239,9 @@ extendedKeyUsage 含 serverAuth。
 ### 测试
 
 ```bash
-node src/sync.test.mjs      # 同步引擎纯逻辑（29 项）
-node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（61 项）
-python3 server/test_server.py   # 服务端 API（152 项）
+node src/sync.test.mjs      # 同步引擎纯逻辑（42 项）
+node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（74 项）
+python3 server/test_server.py   # 服务端 API（169 项）
 ```
 
 `sync.e2e.mjs` 会自己起一个临时服务实例，不碰正式数据。它覆盖了多设备双向同步、

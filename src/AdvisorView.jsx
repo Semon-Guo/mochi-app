@@ -3,6 +3,8 @@ import * as Sync from "./sync.js";
 import { avatarFallback } from "./avatar.js";
 import { downloadFile, fmtBytes } from "./files.js";
 import { Photo } from "./PhotoView.jsx";
+import { Thread, indexComments, threadOf, LIKE, REPLY } from "./Comments.jsx";
+import { loadSeen, persistSeen } from "./seen.js";
 import { AdminPanel } from "./AdminPanel.jsx";
 
 /* 导师端：按学生或按项目看全组进展。
@@ -169,7 +171,8 @@ function FileLink({ f }) {
    「按成员」看的是一个人的时间线，作者是废话，项目标签才是信息；
    「按项目」看的是同一个项目下谁在推进，所以人要立得住——头像放大、
    名字加粗，一屏扫下来能立刻分清是谁写的。 */
-function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor = true }) {
+function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor = true,
+                    thread, meId, onLike, onReply, onDropComment }) {
   const withAuthor = showAuthor && author;
   return (
     <div style={{ display: "flex", gap: 10, padding: withAuthor ? "14px 0" : "11px 0",
@@ -219,6 +222,10 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
           <div style={{ display: "flex", flexWrap: "wrap" }}>
             {r.files.map((f) => <FileLink key={f.id} f={f} />)}
           </div>
+        )}
+        {thread && (
+          <Thread thread={thread} meId={meId} onToggleLike={onLike}
+            onReply={onReply} onDelete={onDropComment} />
         )}
       </div>
     </div>
@@ -287,9 +294,71 @@ function RequestPanel({ token, onChanged }) {
 }
 
 /* ── 导师端主界面 ── */
-export function AdvisorView({ data, onClose, onPhoto }) {
+/* ── 主页那一条「新记录」 ──
+   导师打开 app 想知道的第一件事是「谁又干活了」，所以内容直接铺开：头像、
+   正文、缩略图、附件一次看全，赞和回复就地能点，不用点进去再点回来。 */
+function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
+                    onLike, onReply, onDropComment, onSeen, onOpenUser }) {
+  return (
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 14, background: C.panel,
+      padding: "13px 14px", marginBottom: 10, borderLeft: `3px solid ${C.amber}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <button onClick={() => onOpenUser?.(r.ownerId)} style={{ border: "none", background: "none",
+          padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
+          minWidth: 0, flex: 1, fontFamily: "inherit", textAlign: "left" }}>
+          <Avatar user={author} size={40} ring />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: C.ink, lineHeight: 1.25,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {author?.displayName || "未知成员"}
+            </div>
+            <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
+              {fmtAgo(r.at)}{r.weather ? ` · ${r.weather}` : ""}
+            </div>
+          </div>
+        </button>
+        {projectName && (
+          <span style={{ fontSize: 10.5, color: projectColor || C.sub, fontWeight: 700, flexShrink: 0,
+            background: `color-mix(in srgb, ${projectColor || C.sub} 12%, transparent)`,
+            padding: "3px 9px", borderRadius: 6 }}>{projectName}</span>
+        )}
+      </div>
+
+      <div style={{ fontSize: 14, lineHeight: 1.7, color: C.ink, whiteSpace: "pre-wrap",
+        wordBreak: "break-word" }}>
+        {r.text || <span style={{ color: C.dim }}>（无正文）</span>}
+      </div>
+
+      {r.photos?.length > 0 && (
+        <div style={{ display: "flex", gap: 7, marginTop: 10, flexWrap: "wrap" }}>
+          {r.photos.map((id) => <Photo key={id} id={id} size={84} onOpen={onPhoto} />)}
+        </div>
+      )}
+      {r.files?.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap" }}>
+          {r.files.map((f) => <FileLink key={f.id} f={f} />)}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${C.hair}`, marginTop: 11, paddingTop: 4,
+        display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Thread thread={thread} meId={meId} onToggleLike={onLike}
+            onReply={onReply} onDelete={onDropComment} />
+        </div>
+        <button onClick={onSeen} style={{ marginTop: 9, flexShrink: 0, padding: "4px 10px",
+          borderRadius: 999, border: `1px solid ${C.line}`, background: "#FFF", color: C.dim,
+          fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>✓ 已读</button>
+      </div>
+    </div>
+  );
+}
+
+export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
   const auth = Sync.getAuth();
-  const [tab, setTab] = useState("people");     // people | projects
+  const [tab, setTab] = useState("feed");       // feed | people | projects | admin
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
   const [focus, setFocus] = useState(null);      // {type:'user'|'project', id}
   const [members, setMembers] = useState([]);
   const [err, setErr] = useState("");
@@ -316,6 +385,46 @@ export function AdvisorView({ data, onClose, onPhoto }) {
     projects.forEach((p, i) => { m[p.id] = p.color || NC[i % NC.length]; });
     return m;
   }, [projects]);
+
+  const meId = auth?.user?.id;
+  const cmtIndex = useMemo(() => indexComments(data.comments), [data.comments]);
+  const recordIds = useMemo(() => records.map((r) => r.id), [records]);
+
+  // 已读状态只存本机：这是导师一个人的阅读进度，没理由让被看的学生知道
+  // 他读没读、什么时候读的。
+  const [seen, setSeen] = useState(() => loadSeen(auth?.user?.id, records.map((r) => r.id)));
+  const markSeen = (ids) => setSeen((prev) => {
+    const next = new Set(prev);
+    ids.forEach((i) => next.add(i));
+    persistSeen(meId, next, recordIds);
+    return next;
+  });
+
+  // 只看最近两周的：万一某天已读状态丢了，也不至于被历史上的几百条糊一脸
+  const fresh = records.filter((r) => r.ownerId !== meId && !seen.has(r.id)
+    && (r.at || 0) >= Date.now() - 14 * DAY);
+
+  // 点赞和回复都算「看过了」——都动手互动了，再让他手动点一下已读是多余的
+  const toggleLike = (r) => {
+    const mine = threadOf(cmtIndex, r.id).likes.find((c) => !c.ownerId || c.ownerId === meId);
+    if (mine) actions.dropComment?.(mine);
+    else actions.addComment?.(r.id, LIKE, "");
+    markSeen([r.id]);
+  };
+  const reply = (r, text) => { actions.addComment?.(r.id, REPLY, text); markSeen([r.id]); };
+
+  // 只有项目的拥有者能改名单——服务端本来就只接受本人的写入
+  const ownsProject = (p) => p && (!p.ownerId || p.ownerId === meId);
+  const toggleMember = (p, uid) => {
+    const cur = p.members || [];
+    actions.setProjectMembers?.(p.id,
+      cur.includes(uid) ? cur.filter((x) => x !== uid) : [...cur, uid]);
+  };
+  const rowProps = (r) => ({
+    thread: threadOf(cmtIndex, r.id), meId,
+    onLike: () => toggleLike(r), onReply: (t) => reply(r, t),
+    onDropComment: actions.dropComment,
+  });
 
   const weekAgo = Date.now() - 7 * DAY;
   const thisWeek = records.filter((r) => (r.at || 0) >= weekAgo).length;
@@ -362,7 +471,7 @@ export function AdvisorView({ data, onClose, onPhoto }) {
         <Panel title={`全部记录 · ${mine.length}`}>
           {mine.length === 0 && <Empty text="这位成员还没有记录" />}
           {mine.map((r) => (
-            <RecordRow key={r.id} r={r} showAuthor={false} onPhoto={onPhoto}
+            <RecordRow key={r.id} r={r} showAuthor={false} onPhoto={onPhoto} {...rowProps(r)}
               projectName={projects.find((p) => p.id === r.projectId)?.name}
               projectColor={projColor[r.projectId]} />
           ))}
@@ -383,8 +492,39 @@ export function AdvisorView({ data, onClose, onPhoto }) {
         <Panel>
           <Heatmap records={mine} color={projColor[focus.id] || C.blue} />
         </Panel>
+        {ownsProject(p) ? (
+          <Panel title="项目成员">
+            <div style={{ fontSize: 11.5, color: C.sub, lineHeight: 1.6, marginBottom: 10 }}>
+              勾中的人才看得到这个项目，也才能往里记。移出后他已经写下的记录不受影响。
+            </div>
+            {students.length === 0 && <div style={{ fontSize: 12.5, color: C.dim }}>组里还没有成员</div>}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {students.map((m) => {
+                const on = (p.members || []).includes(m.id);
+                return (
+                  <button key={m.id} onClick={() => toggleMember(p, m.id)} style={{
+                    display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                    border: `1.5px solid ${on ? C.ink : C.line}`, borderRadius: 999,
+                    padding: "5px 13px 5px 5px", fontFamily: "inherit",
+                    background: on ? C.ink : "#FFF", color: on ? "#FFF" : C.sub,
+                  }}>
+                    <Avatar user={m} size={22} />
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>{m.displayName}</span>
+                    <span style={{ fontSize: 12 }}>{on ? "✓" : "＋"}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </Panel>
+        ) : (
+          <Panel title="项目成员">
+            <div style={{ fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
+              这是 {byId[p?.ownerId]?.displayName || "成员"} 自己建的项目，名单由他自己管。
+            </div>
+          </Panel>
+        )}
         {people.length > 0 && (
-          <Panel title="参与成员">
+          <Panel title="有记录的成员">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {people.map((uid) => {
                 const n = mine.filter((r) => r.ownerId === uid).length;
@@ -406,7 +546,7 @@ export function AdvisorView({ data, onClose, onPhoto }) {
         <Panel title={`全部记录 · ${mine.length}`}>
           {mine.length === 0 && <Empty text="这个项目还没有记录" />}
           {mine.map((r) => (
-            <RecordRow key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto} />
+            <RecordRow key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto} {...rowProps(r)} />
           ))}
         </Panel>
       </Shell>
@@ -446,7 +586,8 @@ export function AdvisorView({ data, onClose, onPhoto }) {
       </Panel>
 
       <div style={{ display: "flex", gap: 6, padding: "0 0 10px" }}>
-        {[["people", "按成员"], ["projects", "按项目"],
+        {[["feed", `新记录${fresh.length ? ` ${fresh.length}` : ""}`],
+          ["people", "按成员"], ["projects", "按项目"],
           ...(Sync.isAdmin(auth?.user) ? [["admin", "管理"]] : [])].map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} style={{
             padding: "8px 16px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
@@ -456,6 +597,41 @@ export function AdvisorView({ data, onClose, onPhoto }) {
           }}>{label}</button>
         ))}
       </div>
+
+      {tab === "feed" && (
+        <>
+          {fresh.length === 0 ? (
+            <Empty text={records.length ? "没有新记录，都看过了" : "还没有任何记录"} />
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 2px 10px" }}>
+                <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>
+                  {fresh.length} 条还没看
+                </span>
+                <button onClick={() => markSeen(fresh.map((r) => r.id))} style={{
+                  marginLeft: "auto", border: "none", background: "none", cursor: "pointer",
+                  color: C.dim, fontSize: 12, fontWeight: 600, fontFamily: "inherit", padding: 2,
+                }}>全部标为已读</button>
+              </div>
+              {fresh.slice(0, 30).map((r) => (
+                <FeedCard key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto}
+                  projectName={projects.find((p) => p.id === r.projectId)?.name}
+                  projectColor={projColor[r.projectId]}
+                  thread={threadOf(cmtIndex, r.id)} meId={meId}
+                  onLike={() => toggleLike(r)} onReply={(t) => reply(r, t)}
+                  onDropComment={actions.dropComment}
+                  onSeen={() => markSeen([r.id])}
+                  onOpenUser={(id) => setFocus({ type: "user", id })} />
+              ))}
+              {fresh.length > 30 && (
+                <div style={{ textAlign: "center", color: C.dim, fontSize: 12, padding: "6px 0 2px" }}>
+                  还有 {fresh.length - 30} 条，处理完这批再看
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
 
       {/* 只有成员视图依赖网络；项目视图的数据都在本地，不该跟着一起等 */}
       {loading && tab === "people" && (
@@ -546,6 +722,45 @@ export function AdvisorView({ data, onClose, onPhoto }) {
       )}
 
       {tab === "projects" && (
+        <>
+        <div style={{ marginBottom: 10 }}>
+          {creating ? (
+            <div style={{ border: `1px solid ${C.line}`, borderRadius: 14, background: C.panel, padding: 13 }}>
+              <div style={{ fontSize: 11.5, color: C.sub, marginBottom: 8, lineHeight: 1.6 }}>
+                建一个组级项目，然后在项目里勾选成员。学生会在自己的记录本里看到它。
+              </div>
+              <input autoFocus value={newName} onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newName.trim()) {
+                    actions.createProject?.(newName.trim()); setNewName(""); setCreating(false);
+                  }
+                  if (e.key === "Escape") { setNewName(""); setCreating(false); }
+                }}
+                placeholder="项目名称…"
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 10, fontSize: 14,
+                  border: `1.5px solid ${C.edge || C.line}`, background: "#FFF", color: C.ink,
+                  fontFamily: "inherit", outline: "none", boxSizing: "border-box" }} />
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button onClick={() => {
+                  if (!newName.trim()) return;
+                  actions.createProject?.(newName.trim()); setNewName(""); setCreating(false);
+                }} style={{ padding: "8px 16px", borderRadius: 10, border: "none", background: C.ink,
+                  color: "#FFF", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                  fontFamily: "inherit", opacity: newName.trim() ? 1 : 0.4 }}>建立</button>
+                <button onClick={() => { setNewName(""); setCreating(false); }} style={{
+                  padding: "8px 16px", borderRadius: 10, border: `1px solid ${C.line}`,
+                  background: "#FFF", color: C.sub, fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit" }}>取消</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setCreating(true)} style={{
+              width: "100%", padding: "11px 0", borderRadius: 12, cursor: "pointer",
+              border: `1px dashed ${C.dim}`, background: "transparent", color: C.sub,
+              fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+            }}>＋ 新建组级项目</button>
+          )}
+        </div>
         <div className="adv-grid">
           {projects.length === 0 && <Empty text="全组还没有项目" />}
           {projects.map((p) => {
@@ -583,6 +798,7 @@ export function AdvisorView({ data, onClose, onPhoto }) {
             );
           })}
         </div>
+        </>
       )}
     </Shell>
   );

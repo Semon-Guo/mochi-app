@@ -122,6 +122,7 @@ def main():
         s, r = call("POST", "/api/register",
                     {"username": "stu2", "password": "stu2-passwd-1", "displayName": "学生乙", "inviteCode": INVITE})
         stu2 = r.get("token")
+        stu2_id = r.get("user", {}).get("id")
         chk("第二个学生注册成功", s == 200)
 
         s, r = call("POST", "/api/register",
@@ -530,6 +531,85 @@ def main():
             f"n={len(names)}")
         s, r = call("GET", "/api/users", token=stu1)
         chk("学生不能列出成员", s == 403, f"HTTP {s}")
+
+        print("\n── 共享项目：导师建、把学生拉进来 ──")
+        # 导师建的项目归导师所有，学生只有进了成员名单才拉得到——
+        # 拉不到就意味着他在自己的 app 里看不见这个项目，没法往里记。
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "shared1", "updatedAt": now + 50000,
+             "data": {"name": "组级项目：光场重建", "members": []}}]}, token=admin)
+        chk("导师能建项目", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("没进名单的学生拉不到这个项目",
+            not any(p["id"] == "shared1" for p in r.get("projects", [])))
+
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "shared1", "updatedAt": now + 51000,
+             "data": {"name": "组级项目：光场重建", "members": [stu2_id]}}]}, token=admin)
+        chk("导师能把学生纳入项目", s == 200 and r["applied"] == 1)
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        got = [p for p in r.get("projects", []) if p["id"] == "shared1"]
+        chk("纳入后学生就拉得到了", len(got) == 1 and got[0]["data"]["name"].startswith("组级项目"))
+        chk("学生看得到成员名单", got and got[0]["data"].get("members") == [stu2_id])
+
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "shared1", "updatedAt": now + 52000, "data": {"name": "改名字", "members": []}}]},
+            token=stu2)
+        chk("学生改不了不属于自己的项目", s == 200 and r["rejected"], str(r))
+
+        s, r = call("POST", "/api/sync", {"records": [
+            {"id": "r-shared", "updatedAt": now + 53000,
+             "data": {"projectId": "shared1", "at": now + 53000, "text": "在组级项目里记一条"}}]},
+            token=stu2)
+        chk("学生能往共享项目里记录", s == 200 and r["applied"] == 1)
+
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "shared1", "updatedAt": now + 54000, "data": {"name": "组级项目", "members": []}}]},
+            token=admin)
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("移出名单后学生就拉不到了",
+            not any(p["id"] == "shared1" for p in r.get("projects", [])))
+
+        print("\n── 导师回复与点赞 ──")
+        s, r = call("POST", "/api/sync", {"comments": [
+            {"id": "cm1", "updatedAt": now + 60000,
+             "data": {"recordId": "r-ov", "kind": "reply", "text": "暗场校正做了吗？"}}]}, token=admin)
+        chk("导师能对学生的记录回复", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        mine = [x for x in r.get("comments", []) if x["id"] == "cm1"]
+        chk("回复能被记录的作者拉到（这条评论的 owner 是导师，不是他）", len(mine) == 1, str(r.get("comments")))
+        chk("回复内容正确", mine and mine[0]["data"]["text"] == "暗场校正做了吗？")
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("无关的学生拉不到别人记录下的回复",
+            not any(x["id"] == "cm1" for x in r.get("comments", [])))
+
+        s, r = call("POST", "/api/sync", {"comments": [
+            {"id": "cm2", "updatedAt": now + 61000,
+             "data": {"recordId": "r-ov", "kind": "like"}}]}, token=admin)
+        chk("点赞也是一条评论", s == 200 and r["applied"] == 1)
+
+        s, r = call("POST", "/api/sync", {"comments": [
+            {"id": "cm3", "updatedAt": now + 62000,
+             "data": {"recordId": "r-ov", "kind": "reply", "text": "我来偷看"}}]}, token=stu2)
+        chk("学生不能评论别人的记录", s == 200 and r["rejected"] and not r["applied"], str(r))
+
+        s, r = call("POST", "/api/sync", {"comments": [
+            {"id": "cm4", "updatedAt": now + 63000,
+             "data": {"recordId": "no-such-record", "kind": "reply", "text": "挂在不存在的记录上"}}]},
+            token=admin)
+        chk("挂在不存在的记录上被拒", s == 200 and r["rejected"] and not r["applied"], str(r))
+
+        s, r = call("POST", "/api/sync", {"comments": [
+            {"id": "cm2", "updatedAt": now + 64000, "deletedAt": now + 64000}]}, token=admin)
+        chk("能取消赞", s == 200 and r["applied"] == 1)
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        tomb = [x for x in r.get("comments", []) if x["id"] == "cm2"]
+        chk("取消赞的墓碑作者也能拉到（否则赞会永远留在他屏幕上）",
+            len(tomb) == 1 and tomb[0]["data"] is None, str(tomb))
 
         print("\n── 数据文件：分块上传 ──")
         DATA = b"idx,psnr,ssim\n" + b"".join(

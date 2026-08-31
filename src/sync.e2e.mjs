@@ -374,6 +374,83 @@ try {
     { method: "POST", headers: { Authorization: `Bearer ${b.token}` } });
   chk("组里其他学生换不到", bobTk.status === 404, `HTTP ${bobTk.status}`);
 
+  console.log("\n── 组级项目：导师建、学生才拉得到 ──");
+  asDevice("P"); Sync.setServer(BASE);
+  let dP3 = base();
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+  dP3 = Sync.stampChanges(dP3, { ...dP3, projects: [...dP3.projects,
+    { id: "gp1", name: "组级项目：光场重建", color: "#5B7FC7", members: [] }] }, 80000);
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+
+  let dGrpA = base();
+  res = await syncDevice("A", dGrpA, a.token); dGrpA = res.data;
+  chk("没进名单时学生拉不到组级项目",
+      !(dGrpA.projects || []).some((p) => p.id === "gp1"),
+      `projects=${(dGrpA.projects || []).map((p) => p.id).join(",")}`);
+
+  dP3 = Sync.stampChanges(dP3, { ...dP3,
+    projects: dP3.projects.map((p) => p.id === "gp1" ? { ...p, members: [a.user.id] } : p) }, 81000);
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+
+  let dGrpA2 = base();
+  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
+  const gp = (dGrpA2.projects || []).find((p) => p.id === "gp1");
+  chk("纳入名单后学生就拉得到了", !!gp, `projects=${(dGrpA2.projects || []).length}`);
+  chk("学生看到的是导师的那份（带 ownerId，界面据此禁掉改名删除）",
+      gp?.ownerId === p.user.id, String(gp?.ownerId));
+
+  let dGrpB = base();
+  res = await syncDevice("B", dGrpB, b.token); dGrpB = res.data;
+  chk("组里别的学生仍然拉不到", !(dGrpB.projects || []).some((x) => x.id === "gp1"));
+
+  console.log("\n── 导师回复与点赞：一路同步到学生那边 ──");
+  // 用一条新记录，免得受前面删除测试的影响
+  dGrpA2 = Sync.stampChanges(dGrpA2, { ...dGrpA2, records: [...dGrpA2.records,
+    { id: "rc1", projectId: "gp1", at: 90000, text: "在组级项目里跑了第一轮", photos: [] }] }, 90000);
+  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
+
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+  chk("导师拉到了学生的新记录", (dP3.records || []).some((r) => r.id === "rc1"));
+
+  dP3 = Sync.stampChanges(dP3, { ...dP3, comments: [
+    { id: "cm1", recordId: "rc1", kind: "reply", text: "暗场校正做了吗？", byName: "导师", at: 91000 },
+    { id: "cm2", recordId: "rc1", kind: "like", byName: "导师", at: 91000 },
+  ] }, 91000);
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+  chk("回复和赞都推上去了", res.pushed >= 2, `pushed=${res.pushed}`);
+
+  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
+  const got = (dGrpA2.comments || []).filter((c) => c.recordId === "rc1");
+  chk("学生拉到了导师的回复（这条评论的 owner 是导师，不是他）",
+      got.some((c) => c.kind === "reply" && c.text === "暗场校正做了吗？"),
+      JSON.stringify(got));
+  chk("赞也拉到了", got.some((c) => c.kind === "like"));
+  chk("带着作者名字，学生不至于只看到一串 id",
+      got.find((c) => c.kind === "reply")?.byName === "导师");
+
+  const ix = (await import("./comments.js")).indexComments(dGrpA2.comments);
+  const th = (await import("./comments.js")).threadOf(ix, "rc1");
+  chk("索引出来就是 1 条回复 + 1 个赞", th.replies.length === 1 && th.likes.length === 1);
+
+  // 学生回一句，导师要能看到——单向的回复没法用
+  dGrpA2 = Sync.stampChanges(dGrpA2, { ...dGrpA2, comments: [...dGrpA2.comments,
+    { id: "cm3", recordId: "rc1", kind: "reply", text: "做了，暗场是前一天测的", byName: "爱丽丝", at: 92000 },
+  ] }, 92000);
+  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+  chk("学生的回复导师也收得到（对话得能来回）",
+      (dP3.comments || []).some((c) => c.id === "cm3" && c.text.startsWith("做了")));
+
+  // 取消赞：墓碑必须传到学生那边，否则赞永远留在他屏幕上
+  dP3 = Sync.stampChanges(dP3, { ...dP3,
+    comments: dP3.comments.filter((c) => c.id !== "cm2") }, 93000);
+  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
+  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
+  chk("取消赞会传播到学生那边，不会永远挂着",
+      !(dGrpA2.comments || []).some((c) => c.id === "cm2"),
+      JSON.stringify((dGrpA2.comments || []).map((c) => c.id)));
+  chk("回复不受取消赞影响", (dGrpA2.comments || []).some((c) => c.id === "cm1"));
+
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {
   proc.kill();

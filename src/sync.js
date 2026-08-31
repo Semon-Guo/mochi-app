@@ -19,8 +19,8 @@ const TODOS_SK = "mochi_sync_todos";
 
 // 实验记录始终同步（课题组共用）；待办是可选项，而且**只在自己的设备之间**
 // 同步——服务端不会把它给导师或任何其他人看。
-export const LAB_KINDS = ["projects", "records"];
-export const ALL_KINDS = ["projects", "records", "todos"];
+export const LAB_KINDS = ["projects", "records", "comments"];
+export const ALL_KINDS = ["projects", "records", "comments", "todos"];
 
 export function getSyncTodos() {
   try { return localStorage.getItem(TODOS_SK) !== "0"; } catch { return true; }
@@ -67,7 +67,7 @@ export function setDataOwner(id) {
 export async function resetLocalData() {
   await clearPhotos().catch(() => {});
   return {
-    todos: [], notes: [], projects: [], records: [],
+    todos: [], notes: [], projects: [], records: [], comments: [],
     _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
   };
 }
@@ -90,7 +90,7 @@ export async function switchAccount(data, prevOwnerId, nextOwnerId) {
 
   await clearPhotos().catch(() => {});
   return {
-    todos: [], notes: [], projects: [], records: [],
+    todos: [], notes: [], projects: [], records: [], comments: [],
     _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
   };
 }

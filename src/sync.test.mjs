@@ -5,6 +5,7 @@
  */
 import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_AFTER,
          LAB_KINDS, ALL_KINDS } from "./sync.js";
+import { indexComments, threadOf, myLike } from "./comments.js";
 
 let passed = 0, failed = 0;
 const chk = (name, cond, info = "") => {
@@ -118,6 +119,48 @@ const freshSync = (d) => ({
     records: [{ id: "r1", ownerId: "u1", updatedAt: 100, data: { projectId: "p1", text: "a" } }],
   });
   chk("projects 和 records 一起合并", out.projects.length === 1 && out.records.length === 1);
+}
+
+console.log("\n── 评论索引 ──");
+{
+  const cs = [
+    { id: "c1", recordId: "r1", kind: "reply", text: "第二条", at: 200, ownerId: "prof" },
+    { id: "c2", recordId: "r1", kind: "reply", text: "第一条", at: 100, ownerId: "prof" },
+    { id: "c3", recordId: "r1", kind: "like", ownerId: "prof" },
+    { id: "c4", recordId: "r2", kind: "like", ownerId: "other" },
+    { id: "c5", kind: "reply", text: "没挂在任何记录上" },
+  ];
+  const ix = indexComments(cs);
+  const t1 = threadOf(ix, "r1");
+  chk("回复和赞分开归类", t1.replies.length === 2 && t1.likes.length === 1);
+  chk("回复按时间正序", t1.replies[0].text === "第一条" && t1.replies[1].text === "第二条");
+  chk("没有 recordId 的评论被忽略，不会污染任何一条记录", !ix.has(undefined) && ix.size === 2);
+  chk("没有评论的记录拿到空线程", threadOf(ix, "r9").replies.length === 0);
+  chk("认得出自己点的赞", myLike(t1, "prof")?.id === "c3");
+  chk("别人的赞不算自己点的", myLike(threadOf(ix, "r2"), "prof") === undefined);
+  // 本机刚点的赞还没同步，服务器还没回填 ownerId
+  const local = indexComments([{ id: "c6", recordId: "r3", kind: "like" }]);
+  chk("本机新点、还没同步的赞也算自己的", myLike(threadOf(local, "r3"), "prof")?.id === "c6");
+}
+
+console.log("\n── 评论走同步 ──");
+{
+  const prev = { ...base(), comments: [] };
+  const next = { ...prev, comments: [{ id: "c1", recordId: "r1", kind: "reply", text: "问一句" }] };
+  const out = stampChanges(prev, next, 7000, ALL_KINDS);
+  chk("新回复会打戳，能被推上去", out._sync.stamps.c1?.t === "comments",
+      JSON.stringify(out._sync.stamps.c1));
+  const gone = stampChanges(out, { ...out, comments: [] }, 8000, ALL_KINDS);
+  chk("取消赞/删回复留下墓碑", gone._sync.tombs.c1?.t === "comments");
+}
+{
+  const d = { ...base(), comments: [] };
+  const out = mergeIncoming(d, freshSync(d), {
+    comments: [{ id: "c1", ownerId: "prof", updatedAt: 100,
+                 data: { recordId: "r1", kind: "reply", text: "暗场校正做了吗？", byName: "郭老师" } }],
+  });
+  chk("导师的回复能合并进本地", out.comments.length === 1 && out.comments[0].text === "暗场校正做了吗？");
+  chk("合并后带上作者 id", out.comments[0].ownerId === "prof");
 }
 
 console.log("\n── planPhotoSync ──");

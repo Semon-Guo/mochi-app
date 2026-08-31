@@ -74,11 +74,11 @@ IO_CHUNK = 1 << 16
 ORPHAN_GRACE = int(os.environ.get("MOCHI_ORPHAN_GRACE_H") or 24) * 3600 * 1000
 TICKET_TTL = 5 * 60 * 1000
 SESSION_TTL = 90 * 24 * 3600
-SYNC_TABLES = ("projects", "records", "photos", "todos")
+SYNC_TABLES = ("projects", "records", "photos", "comments", "todos")
 # 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
-ADVISOR_VISIBLE = ("projects", "records", "photos")
+ADVISOR_VISIBLE = ("projects", "records", "photos", "comments")
 
 # 三种角色。admin 是 advisor 的超集：除了能看全组记录，还能审批导师申请。
 # 用导师码注册只是「申请」，在管理员点头之前一律按学生对待——否则导师码
@@ -168,6 +168,24 @@ CREATE TABLE IF NOT EXISTS photos (
   updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_photos_seq ON photos(seq);
 CREATE INDEX IF NOT EXISTS idx_photos_owner ON photos(owner_id, seq);
+
+/* 导师的回复和点赞。owner_id 是发言人，而拉取是按 owner_id 过滤的——
+   所以必须冗余存一份「被评论记录的作者」，否则导师写的回复学生根本拉不到。
+   record_id 单独成列是为了删记录时能连带清掉。 */
+CREATE TABLE IF NOT EXISTS comments (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  data TEXT NOT NULL, record_id TEXT, target_owner TEXT,
+  updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_comments_seq ON comments(seq);
+CREATE INDEX IF NOT EXISTS idx_comments_owner ON comments(owner_id, seq);
+CREATE INDEX IF NOT EXISTS idx_comments_target ON comments(target_owner, seq);
+
+/* 项目成员的倒排索引。成员名单本身存在项目 data 里跟着同步走，这张表只是
+   为了让「拉取我参与的项目」能走索引，而不是每次去解析每行 JSON。 */
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (project_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_pm_user ON project_members(user_id);
 
 /* 数据文件不进 SYNC_TABLES：文件名、大小这些元数据是跟着记录正文一起同步的
    （record.data.files[]），这张表只负责回答「这坨字节归谁、传完了没有」。 */
@@ -490,16 +508,31 @@ def shape(table, r):
 
 
 def pull(user, since):
-    """增量拉取。实验记录导师可见全组；待办任何角色都只能看自己的。"""
+    """增量拉取。实验记录导师可见全组；待办任何角色都只能看自己的。
+
+    学生除了自己的行，还要能看到两类别人拥有的行，否则功能是断的：
+      - 导师建的项目，只要把他拉进了成员名单（不然他看不见这个项目，没法往里记）
+      - 别人对他的记录写的回复和点赞（那条评论的 owner 是导师，不是他）
+    """
     c = conn()
+    uid = user["id"]
     out = {"since": since, "seq": since, "more": False}
     for t in SYNC_TABLES:
         advisor = can_read_group(user) and t in ADVISOR_VISIBLE
         if advisor:
             rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?", (since, PAGE)).fetchall()
+        elif t == "projects":
+            rows = c.execute(
+                "SELECT * FROM projects WHERE (owner_id = ?"
+                " OR id IN (SELECT project_id FROM project_members WHERE user_id = ?))"
+                " AND seq > ? ORDER BY seq LIMIT ?", (uid, uid, since, PAGE)).fetchall()
+        elif t == "comments":
+            rows = c.execute(
+                "SELECT * FROM comments WHERE (owner_id = ? OR target_owner = ?)"
+                " AND seq > ? ORDER BY seq LIMIT ?", (uid, uid, since, PAGE)).fetchall()
         else:
             rows = c.execute(f"SELECT * FROM {t} WHERE owner_id = ? AND seq > ? ORDER BY seq LIMIT ?",
-                             (user["id"], since, PAGE)).fetchall()
+                             (uid, since, PAGE)).fetchall()
         out[t] = [shape(t, r) for r in rows]
         if len(rows) == PAGE:
             out["more"] = True
@@ -542,7 +575,14 @@ def push(user, changes):
                         continue
 
                     deleted_at = int(row["deletedAt"]) if row.get("deletedAt") else None
-                    data = json.dumps({} if deleted_at else (row.get("data") or {}), ensure_ascii=False)
+                    payload = {} if deleted_at else (row.get("data") or {})
+                    data = json.dumps(payload, ensure_ascii=False)
+                    if t == "comments" and not deleted_at:
+                        why = comment_target_error(c, user, payload)
+                        if why:
+                            res["rejected"].append({"table": t, "id": rid, "why": why})
+                            continue
+
                     if cur:
                         c.execute(f"UPDATE {t} SET data=?, updated_at=?, deleted_at=?, seq=? WHERE id=?",
                                   (data, updated_at, deleted_at, next_seq(c), rid))
@@ -550,6 +590,18 @@ def push(user, changes):
                         c.execute(f"INSERT INTO {t} (id, owner_id, data, updated_at, deleted_at, seq)"
                                   " VALUES (?,?,?,?,?,?)",
                                   (rid, user["id"], data, updated_at, deleted_at, next_seq(c)))
+
+                    # 成员名单跟着项目 data 同步过来，这里同步进倒排索引
+                    if t == "projects":
+                        reindex_members(c, rid, payload)
+                    # 评论要记下它挂在哪条记录、那条记录是谁的——学生靠这个才拉得到。
+                    # 删除时不能碰这两列：墓碑的 data 是空的，跟着清掉的话学生就
+                    # 再也拉不到这条墓碑，取消的赞会永远留在他屏幕上。
+                    if t == "comments" and not deleted_at:
+                        rec = c.execute("SELECT owner_id FROM records WHERE id = ?",
+                                        (str(payload.get("recordId") or ""),)).fetchone()
+                        c.execute("UPDATE comments SET record_id = ?, target_owner = ? WHERE id = ?",
+                                  (payload.get("recordId"), rec["owner_id"] if rec else None, rid))
                     res["applied"] += 1
             c.commit()
         except Exception:
@@ -557,6 +609,37 @@ def push(user, changes):
             raise
     res["seq"] = current_seq(c)
     return res
+
+
+def reindex_members(c, project_id, data):
+    """把项目 data 里的成员名单刷进倒排索引。项目删了（data 为空）就清空。"""
+    members = data.get("members") if isinstance(data, dict) else None
+    ids = [m for m in (members or []) if isinstance(m, str) and m][:200]
+    c.execute("DELETE FROM project_members WHERE project_id = ?", (project_id,))
+    for uid in ids:
+        # 名单里可能有已被删掉的账号，外键会拦下来，跳过即可
+        try:
+            c.execute("INSERT OR IGNORE INTO project_members (project_id, user_id) VALUES (?,?)",
+                      (project_id, uid))
+        except sqlite3.IntegrityError:
+            pass
+
+
+def comment_target_error(c, user, data):
+    """评论只能挂在自己看得到的记录上。
+
+    不查的话，知道（或猜中）一个记录 id 就能往别人的记录下面塞东西——
+    而那条评论会因为 target_owner 的关系直接出现在对方界面上。
+    """
+    rid = data.get("recordId")
+    if not isinstance(rid, str) or not rid:
+        return "评论缺少 recordId"
+    rec = c.execute("SELECT owner_id, deleted_at FROM records WHERE id = ?", (rid,)).fetchone()
+    if not rec or rec["deleted_at"]:
+        return "这条记录不存在"
+    if rec["owner_id"] != user["id"] and not can_read_group(user):
+        return "不能评论别人的记录"
+    return None
 
 
 def claim_photo(user, pid, mime, size):
