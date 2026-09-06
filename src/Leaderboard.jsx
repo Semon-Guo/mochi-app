@@ -1,9 +1,10 @@
 /* 积分榜。
  *
- * 分数怎么来的：一条记录 1 分（每天封顶 3 条），导师的每个赞、每条点评各 5 分。
- * 权重差 5 倍是刻意的——记录是自己写的，导师的认可不是，后者才是这个榜想
- * 鼓励的东西。所以榜单上一定要把「记录 / 赞 / 点评」拆开显示，不然分数是个
- * 黑箱，看不出该往哪使劲。
+ * 分数怎么来的：一条记录 1 分（每天封顶 3 条），**导师的**每个赞 5 分。
+ * 权重差 5 倍是刻意的——记录是自己写的，导师的认可不是。
+ *
+ * 点评不计分：那是给学生的反馈，不该变成筹码。同学之间也能点赞，同样不计分。
+ * 榜单上把「记录 / 导师赞」拆开显示，不然分数是个黑箱，看不出该往哪使劲。
  *
  * 榜单由服务端算：学生本地只有自己的数据，看不见别人的名次，那就不成其为榜。
  */
@@ -33,9 +34,11 @@ function Rank({ n }) {
   );
 }
 
-const Bits = ({ r }) => (
-  <span style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
-    记录 {r.records} · 赞 {r.likes} · 点评 {r.replies}
+const Bits = ({ r, light }) => (
+  <span style={{ fontSize: 10.5, fontFamily: MONO,
+    color: light ? "rgba(255,255,255,.6)" : C.dim }}>
+    记录 {r.records} · 导师赞 {r.likes}
+    {r.replies > 0 && <span style={{ opacity: .75 }}> · 点评 {r.replies}（不计分）</span>}
   </span>
 );
 
@@ -81,7 +84,7 @@ export function Leaderboard({ onClose }) {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 20, fontWeight: 700 }}>积分榜</div>
           <div style={{ fontSize: 11.5, color: C.sub }}>
-            记录 1 分 · 导师点赞 / 点评各 5 分
+            记录 1 分 · 导师点赞 5 分
           </div>
         </div>
       </div>
@@ -130,9 +133,7 @@ export function Leaderboard({ onClose }) {
             <Rank n={mine.rank} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 14.5, fontWeight: 700 }}>我</div>
-              <span style={{ fontSize: 10.5, color: "rgba(255,255,255,.6)", fontFamily: MONO }}>
-                记录 {mine.records} · 赞 {mine.likes} · 点评 {mine.replies}
-              </span>
+              <Bits r={mine} light />
             </div>
             <div style={{ textAlign: "right", flexShrink: 0 }}>
               <div style={{ fontSize: 24, fontWeight: 800, fontFamily: MONO, lineHeight: 1 }}>
@@ -185,8 +186,12 @@ export function Leaderboard({ onClose }) {
             <div style={{ fontSize: 10.5, fontWeight: 700, color: C.sub, letterSpacing: "0.4px",
               marginBottom: 9 }}>怎么算分 · 拿什么</div>
             <div style={{ fontSize: 12.5, color: C.ink, lineHeight: 1.85 }}>
-              一条实验记录 <b>{rules.record} 分</b>，每天最多算 <b>{rules.dailyCap} 条</b>；
-              导师的每个赞 <b>{rules.like} 分</b>、每条点评 <b>{rules.reply} 分</b>。
+              一条实验记录 <b>{rules.record} 分</b>，每天最多记 <b>{rules.dailyCap} 条</b>；
+              <b>导师</b>的每个赞 <b>{rules.like} 分</b>。
+              <span style={{ color: C.sub }}>
+                导师的点评不计分——那是给你的反馈，不该变成筹码；
+                同学之间也能互相点赞，同样不计分。
+              </span>
             </div>
             <div style={{ height: 1, background: C.hair, margin: "10px 0" }} />
             {[["周榜", ["第 1 名：1 天事假额度", "前 3 名：免一周值日"]],

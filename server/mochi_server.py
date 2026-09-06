@@ -64,7 +64,10 @@ except Exception as _e:
 # 积分：一条记录 1 分，导师的每个赞 / 每条点评各 5 分。
 # 每天最多 3 条记录——防的是「为了刷分把一条拆成十条」。
 MAX_RECORDS_PER_DAY = int(os.environ.get("MOCHI_MAX_RECORDS_PER_DAY") or 3)
-PT_RECORD, PT_LIKE, PT_REPLY = 1, 5, 5
+# 只有导师的**点赞**计分。点评不计分：那是给学生的反馈，不该变成筹码——
+# 总不该让导师在「要不要多写一句」时先想想给不给分。
+# 同学之间也能互相点赞，同样不计分，否则互刷就是几分钟的事。
+PT_RECORD, PT_LIKE = 1, 5
 
 MAX_PHOTO = 8 * 1024 * 1024
 
@@ -141,7 +144,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id, seq);
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0,
-  day TEXT);
+  day TEXT, project_id TEXT);
 CREATE INDEX IF NOT EXISTS idx_records_seq ON records(seq);
 CREATE INDEX IF NOT EXISTS idx_records_owner ON records(owner_id, seq);
 /* day 的索引不在这里建：老库里 records 表已经存在，CREATE TABLE IF NOT EXISTS
@@ -244,8 +247,14 @@ def init_db():
     # 顺序要紧：先补列，再建索引。反过来在老库上会 no such column 直接崩，
     # 而测试用的永远是新建的空库（CREATE TABLE 里就带 day），抓不到这个。
     rhave = {r[1] for r in c.execute("PRAGMA table_info(records)")}
+    for col in ("day TEXT", "project_id TEXT"):
+        if col.split()[0] not in rhave:
+            c.execute(f"ALTER TABLE records ADD COLUMN {col}")
+    for tbl in ("photos", "files"):
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({tbl})")}
+        if "project_id" not in cols:
+            c.execute(f"ALTER TABLE {tbl} ADD COLUMN project_id TEXT")
     if "day" not in rhave:
-        c.execute("ALTER TABLE records ADD COLUMN day TEXT")
         # 老数据补上归日。库很小（几百条），一次性扫完就好
         for rid, blob in c.execute("SELECT id, data FROM records").fetchall():
             try:
@@ -254,7 +263,24 @@ def init_db():
                 at = None
             if at:
                 c.execute("UPDATE records SET day = ? WHERE id = ?", (bj_day(at), rid))
+    if "project_id" not in rhave:
+        # 回填归属项目，可见性要靠它过滤；顺带把照片和数据文件也挂上
+        for rid, blob in c.execute("SELECT id, data FROM records").fetchall():
+            try:
+                d = json.loads(blob) or {}
+            except Exception:
+                continue
+            pid = d.get("projectId")
+            if not pid:
+                continue
+            c.execute("UPDATE records SET project_id = ? WHERE id = ?", (pid, rid))
+            for ph in (d.get("photos") or []):
+                c.execute("UPDATE photos SET project_id = ? WHERE id = ?", (pid, ph))
+            for f in (d.get("files") or []):
+                if isinstance(f, dict) and f.get("id"):
+                    c.execute("UPDATE files SET project_id = ? WHERE id = ?", (pid, f["id"]))
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_day ON records(owner_id, day)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_project ON records(project_id)")
 
     have = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
@@ -551,6 +577,38 @@ def current_user(headers):
 
 # ─────────────────────────── 同步 ───────────────────────────
 
+def hidden_projects(user):
+    """这个人看不到的项目 id。
+
+    两种情况算「受限」，只对名单内的人开放（外加项目主人和导师）：
+      - 有成员名单的项目（导师圈定了谁参与）
+      - **导师自己建的项目**，哪怕名单还空着
+
+    第二条是必须的：只看名单的话，导师刚建完还没加人时它是全组可见的，
+    加上第一个人的瞬间又对所有人消失——这个跳变没法跟人解释。导师建的项目
+    从头到尾都是圈定范围的，那就从创建起就受限。
+
+    其余的都是个人课题，全组可见——组里互相看得到彼此在做什么本来就是好事，
+    这也正是这次要的。
+    """
+    if can_read_group(user):
+        return set()
+    uid = user["id"]
+    return {r["id"] for r in conn().execute(
+        "SELECT id FROM projects WHERE owner_id != ?"
+        " AND (owner_id IN (SELECT id FROM users WHERE role IN ('advisor','admin'))"
+        "      OR id IN (SELECT project_id FROM project_members))"
+        " AND id NOT IN (SELECT project_id FROM project_members WHERE user_id = ?)",
+        (uid, uid))}
+
+
+def can_see_record(row, hidden, uid):
+    if row["owner_id"] == uid:
+        return True
+    pid = row["project_id"] if "project_id" in row.keys() else None
+    return bool(pid) and pid not in hidden
+
+
 def shape(table, r):
     out = {"id": r["id"], "ownerId": r["owner_id"],
            "data": None if r["deleted_at"] else json.loads(r["data"]),
@@ -560,25 +618,36 @@ def shape(table, r):
     return out
 
 
-def pull(user, since):
-    """增量拉取。实验记录导师可见全组；待办任何角色都只能看自己的。
+def tomb(table, r):
+    """把一行伪装成墓碑：内容一个字都不给，但客户端知道该把本地那份删掉。"""
+    out = shape(table, r)
+    out["data"] = None
+    out["deletedAt"] = r["deleted_at"] or r["updated_at"]
+    return out
 
-    学生除了自己的行，还要能看到两类别人拥有的行，否则功能是断的：
-      - 导师建的项目，只要把他拉进了成员名单（不然他看不见这个项目，没法往里记）
-      - 别人对他的记录写的回复和点赞（那条评论的 owner 是导师，不是他）
+
+def pull(user, since):
+    """增量拉取。待办任何角色都只能看自己的；实验记录是全组共享的。
+
+    项目和记录的可见性由 hidden_projects() 决定：个人课题全组可见，
+    有成员名单的项目只给名单内的人。
+
+    不可见的行**发墓碑而不是直接过滤掉**：客户端可能早就存着旧的那一份
+    （比如导师后来给某个项目加了名单，它就此变成受限），不发墓碑的话
+    那份数据会一直留在他设备上。
     """
     c = conn()
     uid = user["id"]
+    hidden = hidden_projects(user)
     out = {"since": since, "seq": since, "more": False}
     for t in SYNC_TABLES:
         advisor = can_read_group(user) and t in ADVISOR_VISIBLE
-        if advisor:
+        veil = None
+        if advisor or t in ("projects", "records"):
             rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?", (since, PAGE)).fetchall()
-        elif t == "projects":
-            rows = c.execute(
-                "SELECT * FROM projects WHERE (owner_id = ?"
-                " OR id IN (SELECT project_id FROM project_members WHERE user_id = ?))"
-                " AND seq > ? ORDER BY seq LIMIT ?", (uid, uid, since, PAGE)).fetchall()
+            if not advisor:
+                veil = (lambda r: r["id"] not in hidden) if t == "projects" \
+                    else (lambda r: can_see_record(r, hidden, uid))
         elif t in GROUP_SHARED:
             rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?",
                              (since, PAGE)).fetchall()
@@ -589,7 +658,7 @@ def pull(user, since):
         else:
             rows = c.execute(f"SELECT * FROM {t} WHERE owner_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                              (uid, since, PAGE)).fetchall()
-        out[t] = [shape(t, r) for r in rows]
+        out[t] = [shape(t, r) if (veil is None or veil(r)) else tomb(t, r) for r in rows]
         if len(rows) == PAGE:
             out["more"] = True
         for r in rows:
@@ -695,8 +764,18 @@ def push(user, changes):
                                   (rid, user["id"], data, updated_at, deleted_at, next_seq(c)))
 
                     if t == "records" and not deleted_at:
-                        c.execute("UPDATE records SET day = ? WHERE id = ?",
-                                  (bj_day(payload.get("at")), rid))
+                        pid = payload.get("projectId")
+                        c.execute("UPDATE records SET day = ?, project_id = ? WHERE id = ?",
+                                  (bj_day(payload.get("at")), pid, rid))
+                        # 照片和数据文件跟着记录走：可见性、回收都要知道它们属于
+                        # 哪个项目，而它们自己是先于记录上传的，当时还不知道
+                        if pid:
+                            for ph in (payload.get("photos") or []):
+                                c.execute("UPDATE photos SET project_id = ? WHERE id = ?", (pid, ph))
+                            for f in (payload.get("files") or []):
+                                if isinstance(f, dict) and f.get("id"):
+                                    c.execute("UPDATE files SET project_id = ? WHERE id = ?",
+                                              (pid, f["id"]))
                     # 成员名单跟着项目 data 同步过来，这里同步进倒排索引
                     if t == "projects":
                         reindex_members(c, rid, payload)
@@ -792,11 +871,13 @@ def comment_target_error(c, user, data):
     rid = data.get("recordId")
     if not isinstance(rid, str) or not rid:
         return "评论缺少 recordId"
-    rec = c.execute("SELECT owner_id, deleted_at FROM records WHERE id = ?", (rid,)).fetchone()
+    rec = c.execute("SELECT owner_id, deleted_at, project_id FROM records WHERE id = ?",
+                    (rid,)).fetchone()
     if not rec or rec["deleted_at"]:
         return "这条记录不存在"
-    if rec["owner_id"] != user["id"] and not can_read_group(user):
-        return "不能评论别人的记录"
+    # 看得到就评得了：同学之间也能互相点赞（只是不计分）
+    if not can_see_record(rec, hidden_projects(user), user["id"]):
+        return "看不到这条记录"
     return None
 
 
@@ -925,9 +1006,7 @@ def readable_file(user, fid):
     row = conn().execute("SELECT * FROM files WHERE id = ?", (fid,)).fetchone()
     if not row or not row["uploaded"]:
         return None
-    if row["owner_id"] != user["id"] and not can_read_group(user):
-        return None
-    return row
+    return row if visible_blob(user, row) else None
 
 
 def file_drop(user, fid):
@@ -1405,7 +1484,7 @@ def leaderboard(user, period="week", offset=0):
         rows.append({
             "userId": uid, "username": u["username"], "displayName": u["display_name"],
             "avatar": u["avatar"], **e,
-            "points": e["records"] * PT_RECORD + e["likes"] * PT_LIKE + e["replies"] * PT_REPLY,
+            "points": e["records"] * PT_RECORD + e["likes"] * PT_LIKE,
         })
     rows.sort(key=lambda x: (-x["points"], x["displayName"]))
 
@@ -1427,9 +1506,21 @@ def leaderboard(user, period="week", offset=0):
 
     return {"period": period, "offset": offset, "label": label, "from": lo, "to": hi,
             "rows": rows, "totalPoints": sum(x["points"] for x in rows),
-            "rules": {"record": PT_RECORD, "like": PT_LIKE, "reply": PT_REPLY,
+            "rules": {"record": PT_RECORD, "like": PT_LIKE, "reply": 0,
                       "dailyCap": MAX_RECORDS_PER_DAY,
                       "week": WEEK_REWARDS, "month": MONTH_REWARDS, "year": YEAR_POOL_NOTE}}
+
+
+def member_list(user):
+    """全组的名字和头像。学生现在看得到彼此的记录，就得知道那一条是谁写的。
+
+    只给展示身份必需的字段——角色、是否离组、上次活跃这些仍然只有导师看得到
+    （那些是管理信息，跟「这条记录是谁写的」是两回事）。
+    """
+    rows = conn().execute(
+        "SELECT id, username, display_name, avatar FROM users ORDER BY created_at").fetchall()
+    return {"members": [{"id": r["id"], "username": r["username"],
+                         "displayName": r["display_name"], "avatar": r["avatar"]} for r in rows]}
 
 
 def group_overview(user):
@@ -1635,9 +1726,20 @@ def readable_photo(user, pid):
     row = conn().execute("SELECT * FROM photos WHERE id = ?", (pid,)).fetchone()
     if not row or row["deleted_at"]:
         return None
-    if row["owner_id"] != user["id"] and not can_read_group(user):
-        return None
-    return row
+    return row if visible_blob(user, row) else None
+
+
+def visible_blob(user, row):
+    """照片 / 数据文件跟着它所在的项目走。
+
+    学生现在看得到别人的记录，配套的照片自然也得给——不给的话记录里就是
+    一排空灰块，而同步引擎还会一遍遍去拉、一遍遍 403。
+    project_id 为空的是还没被任何记录引用的（刚传上来），只有本人能取。
+    """
+    if row["owner_id"] == user["id"] or can_read_group(user):
+        return True
+    pid = row["project_id"] if "project_id" in row.keys() else None
+    return bool(pid) and pid not in hidden_projects(user)
 
 
 # ─────────────────────────── HTTP ───────────────────────────
@@ -1869,6 +1971,9 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/api/project-log":
                 return self._json(project_log(self._need_user(), query.get("id", [""])[0]))
 
+            if method == "GET" and path == "/api/members":
+                return self._json(member_list(self._need_user()))
+
             if method == "GET" and path == "/api/leaderboard":
                 # 榜单全组可见——看不见别人的名次，排行榜就没有意义
                 return self._json(leaderboard(
@@ -2004,6 +2109,270 @@ KEY = os.environ.get("MOCHI_KEY", "")
 CA_CERT = os.environ.get("MOCHI_CA_CERT", "")
 CERT_PORT = int(os.environ.get("MOCHI_CERT_PORT") or 3001)
 
+GUIDE_PAGE = """<!doctype html><html lang=zh-CN><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Mochi 使用手册</title>
+<style>
+:root{--ink:#2C2C2C;--sub:#8C8478;--dim:#B0A99B;--line:#EDE8DE;--bg:#FDFBF7;--panel:#FFFDF9}
+*{box-sizing:border-box}
+body{font:16px/1.75 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+max-width:720px;margin:0 auto;padding:24px 20px 80px;color:var(--ink);background:var(--bg)}
+h1{font-size:26px;margin:0 0 6px;letter-spacing:-.5px}
+h2{font-size:20px;margin:44px 0 10px;padding-top:18px;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}
+p,li{font-size:15px}
+.sub{color:var(--dim);font-size:14px;margin-bottom:8px}
+a{color:#5B7FC7}
+ol,ul{padding-left:22px}li{margin:6px 0}
+code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13.5px;
+font-family:"SF Mono",Menlo,monospace;word-break:break-all}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--sub);font-size:12.5px;font-weight:700;background:var(--panel)}
+.note{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+padding:12px 14px;margin:14px 0;font-size:14px}
+.warn{background:#FFF6E5;border:1px solid #E8A838;border-radius:12px;
+padding:12px 14px;margin:14px 0;font-size:14px}
+.key{background:#EEF7EC;border:1px solid #5A9E4B;border-radius:12px;
+padding:12px 14px;margin:14px 0;font-size:14px}
+.toc{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:20px 0}
+.toc ol{margin:0;padding-left:20px}.toc li{margin:3px 0;font-size:14.5px}
+.role{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:5px;
+vertical-align:middle;margin-left:6px}
+.stu{background:#EEF2FB;color:#4A6FB5}.adv{background:#FFF6E5;color:#A9791A}
+.back{display:inline-block;margin-bottom:18px;font-size:14px;color:var(--sub);text-decoration:none}
+hr{border:none;border-top:1px solid var(--line);margin:28px 0}
+</style>
+
+<a class=back href="/">&lsaquo; 回到证书安装页</a>
+<h1>Mochi 使用手册</h1>
+<div class=sub>课题组的实验记录本 · 待办与专注 · 积分榜</div>
+
+<div class=toc><ol>
+<li><a href="#start">第一次使用</a></li>
+<li><a href="#todo">待办与专注计时</a></li>
+<li><a href="#lab">实验记录本</a></li>
+<li><a href="#see">谁能看到什么</a>（重要）</li>
+<li><a href="#cal">日历与重点节点</a></li>
+<li><a href="#score">积分榜与奖励</a></li>
+<li><a href="#adv">导师端</a></li>
+<li><a href="#push">推送通知</a></li>
+<li><a href="#faq">遇到问题</a></li>
+</ol></div>
+
+<h2 id=start>1. 第一次使用</h2>
+
+<h3>装根证书</h3>
+<p>同步服务跑在实验室内网，走的是自签证书的 HTTPS。<b>每台设备装一次</b>，装完才能同步。
+步骤见 <a href="/">证书安装页</a>——iPhone 上最容易漏掉「证书信任设置」那一步，注意看。</p>
+
+<h3>打开 app 并装到主屏幕</h3>
+<p>浏览器打开 <code>https://semon-guo.github.io/mochi-app/</code>。</p>
+<ul>
+<li><b>iPhone：</b>用 Safari 打开 → 分享按钮 → 「添加到主屏幕」。
+<b>不加到主屏幕就收不到推送通知</b>，这是 iOS 的硬性限制，不是 app 的问题。</li>
+<li><b>安卓 / 电脑：</b>地址栏会有安装图标，装不装都能用。</li>
+</ul>
+
+<h3>注册</h3>
+<p>进 app → 「记录」页 → 点最上面那条同步条展开 → 注册。需要<b>邀请码</b>，问组里要。</p>
+<div class=warn><b>注册后一律是学生身份。</b>导师权限只能由管理员在服务器上授予——
+邀请码万一外泄，拿到的人也拿不到全组记录。</div>
+
+<h3>登录之后</h3>
+<p>同步是自动的：打开 app 同步一次，之后每 2 分钟一次，切回前台也补一次。
+同步条上会显示「已同步 · 几分钟前」或「N 条待同步」。</p>
+<div class=note>换账号登录会<b>清空本机数据</b>（上一个人的记录不会留在你屏幕上，
+也不会被当成你的推上去）。这是有意的。</div>
+
+<h2 id=todo>2. 待办与专注计时</h2>
+
+<h3>建任务</h3>
+<p>「待办」页右下角 <b>+</b>。三档重要度：<b>主线 / 支线 / 休闲</b>，列表按这个排序。
+可以给任务加子任务。</p>
+
+<h3>专注计时</h3>
+<p>点任务上的 ▶ 开始计时。<b>可以同时计好几个</b>（跑程序的同时读文献）。
+计时会记下完整的 timeline：几点开始、暂停过几次、总共多久。</p>
+<div class=note>app 退到后台时计时不会中断——重新打开会把这段时间补回来。
+但如果离开太久，会问你一句「这段时间真的在做吗」，避免忘记停表把数据搞脏。</div>
+
+<h3>提醒</h3>
+<p>任务上可以设提醒时间。开了推送的话，app 关着也会响（见第 8 节）。</p>
+
+<h3>完成记录</h3>
+<p>顶部那个 ✓ 按钮进「完成记录」，可以切「周视图」——把每天的专注时段画在时间网格上，
+一眼看出哪几天在干活。</p>
+
+<div class=key><b>待办、计时、timeline 只有你自己看得到。</b>
+导师和同学都看不到，这是服务端强制的，不是靠界面藏起来。
+同步待办只是为了你自己多设备互通，可以在同步面板里关掉。</div>
+
+<h2 id=lab>3. 实验记录本</h2>
+
+<h3>两层结构</h3>
+<p><b>项目 → 记录</b>。项目是一个课题（几个月到一年），记录是一次上手的流水账。</p>
+
+<h3>记一条</h3>
+<p>进项目 → 最上面那张卡片：选天气 → 写正文 → <b>📷 照片</b> / <b>📎 数据</b> → 「记下」。</p>
+
+<div class=warn><b>一天最多记 3 条。</b>右上角有 <code>2/3</code> 的计数，记满了「记下」会变灰。
+这是为了防止把一条拆成十条刷积分。一天要记的事多，就写在同一条里。</div>
+
+<h3>照片和数据文件是两回事</h3>
+<table>
+<tr><th></th><th>📷 照片</th><th>📎 数据文件</th></tr>
+<tr><td>用途</td><td>光路、示数、现象</td><td>原始测量结果：csv / mat / npy / tif / zip</td></tr>
+<tr><td>处理</td><td>自动压到长边 1600</td><td>原样不动</td></tr>
+<tr><td>存在哪</td><td>你每台设备各一份</td><td>只在服务器上一份</td></tr>
+<tr><td>大小</td><td>几百 KB</td><td>单个最大 512 MB</td></tr>
+<tr><td>要联网吗</td><td>不用，回头自动传</td><td><b>要</b>，选中就开始传</td></tr>
+</table>
+<p>数据文件传的时候有进度条，断了能<b>断点续传</b>，不用从头再来。
+别人（有权限看这条记录的人）点文件名就能下载。</p>
+<div class=note>数据文件必须在线传，是有意的取舍：几百 MB 的东西攒在本地「回头再传」，
+最后只会变成「以为传上去了其实没有」。</div>
+
+<h3>改和删</h3>
+<p>点记录右上角的铅笔可以改正文、天气，也可以<b>补挂数据文件</b>——
+分析常常是隔天才跑完的。别人的记录你改不了。</p>
+
+<h2 id=see>4. 谁能看到什么</h2>
+<p>这一节值得看完，它决定了你写的东西谁看得见。</p>
+
+<table>
+<tr><th>东西</th><th>谁看得到</th></tr>
+<tr><td>待办 / 专注计时 / timeline</td><td><b>只有你自己</b>（服务端强制）</td></tr>
+<tr><td>你的个人课题和里面的记录</td><td><b>全组</b>——组里互相看得到彼此在做什么</td></tr>
+<tr><td>导师建的项目</td><td><b>只有名单里的人</b> + 导师</td></tr>
+<tr><td>被导师加了成员名单的项目</td><td>同上，只给名单内</td></tr>
+<tr><td>记录里的照片和数据文件</td><td>跟着它所属的项目走</td></tr>
+<tr><td>导师给你的点赞和点评</td><td>你 + 导师们</td></tr>
+<tr><td>日历上的重点节点</td><td>全组</td></tr>
+<tr><td>积分榜</td><td>全组</td></tr>
+</table>
+
+<div class=note>「记录」页分成两段：上面是<b>你自己的课题</b>（以及你被拉进名单的组级项目），
+下面「组里的课题」是同学的——可以看、可以点赞，但不能往人家本子里记。</div>
+
+<div class=key><b>点赞是公开的鼓励。</b>任何人都可以给看得到的记录点赞。
+只有<b>导师</b>点的赞才计积分（见第 6 节）。</div>
+
+<h2 id=cal>5. 日历与重点节点</h2>
+<p>「日历」页把两半信息合到一张图上——一天里到底发生了什么，一眼看全。</p>
+
+<h3>月视图怎么读</h3>
+<ul>
+<li><b>格子背景越绿</b> = 那天专注的时间越长</li>
+<li><b>下面的圆点</b> = 那天记了几条实验记录，颜色按项目分</li>
+<li><b>顶边的色条</b> = 那天有重点节点</li>
+<li><b>右上角小黄点</b> = 那天有待办到期</li>
+</ul>
+<p>点任意一天，下面会列出那天的全部内容：节点、每条记录（点进去跳到项目）、
+专注时长、完成项数、到期的待办。</p>
+
+<h3>周视图</h3>
+<p>切到「周」是一周七天的日程列表，适合看「这一周有什么」。</p>
+
+<h3>重点节点</h3>
+<p>投稿截止、组会、开题、答辩这些。<b>只有导师能设置，但全组都看得到。</b></p>
+<p>页面最上面是倒计时卡片，「还有 N 天」；≤3 天转红，当天显示「就是今天」。</p>
+
+<h2 id=score>6. 积分榜与奖励</h2>
+<p>入口在「记录」页的 🏆 积分榜。</p>
+
+<h3>怎么算分</h3>
+<table>
+<tr><th>行为</th><th>分数</th><th>说明</th></tr>
+<tr><td>写一条实验记录</td><td><b>1 分</b></td><td>每天最多 3 条</td></tr>
+<tr><td>被<b>导师</b>点赞</td><td><b>5 分</b></td><td>每个赞都算</td></tr>
+<tr><td>导师的点评</td><td>0 分</td><td>不计分</td></tr>
+<tr><td>同学之间的点赞</td><td>0 分</td><td>不计分</td></tr>
+</table>
+<div class=note>点评不计分是刻意的：那是给你的反馈，不该变成筹码——
+总不该让导师在「要不要多写一句」时先想想给不给分。同学互赞不计分，
+否则互刷就是几分钟的事。</div>
+
+<h3>奖励</h3>
+<table>
+<tr><th>榜单</th><th>奖励</th></tr>
+<tr><td>周榜第 1</td><td>1 天事假额度 + 免一周值日</td></tr>
+<tr><td>周榜前 3</td><td>免一周值日</td></tr>
+<tr><td>月榜第 1 / 2 / 3</td><td>2 天 / 1 天 / 0.5 天事假</td></tr>
+<tr><td>年榜</td><td>按积分占比分配年终激励</td></tr>
+</table>
+<p>榜单上方的 <b>‹ ›</b> 可以翻到上一期——上周、上个月的最终名次和奖励都在那儿，
+这就是结算。同分并列同名次。</p>
+
+<h2 id=adv>7. 导师端<span class="role adv">导师 / 管理员</span></h2>
+<p>登录后「记录」页顶部会多一个 <b>🔬 查看全组记录</b> 的入口，带未读角标。</p>
+
+<h3>新记录</h3>
+<p>默认页签，是一条时间流：谁写的、写了什么、缩略图、附件一次铺开。
+可以就地 <b>☆ 赞</b> 和 <b>💬 点评</b>。</p>
+<p>点「✓ 已读」那条会<b>就地变灰但留在原位</b>，下次再进这个页签才清掉——
+刚点完手还在那儿、列表就跳一格是最容易点错的。点错了再点一下「已读 ↺」撤销。
+点赞或点评会自动算已读。</p>
+
+<h3>按成员 / 按项目</h3>
+<p>「今日活跃 ›」和「本周活跃 ›」可以点开，是一张两段名单：有记录的、没有记录的
+（写明「已 N 天没记」，超 7 天转琥珀、超 14 天转红）。</p>
+
+<h3>建项目、管成员</h3>
+<p>「按项目」→「＋ 新建组级项目」。进项目详情，在「项目成员」里点胶囊加人减人。</p>
+<div class=note><b>任何导师都能调任何项目的成员</b>，包括学生自建的课题。
+但只能改成员——项目名、颜色仍归建它的人，也删不掉别人的项目。
+每次调整都会写进项目详情下面的<b>管理记录</b>：谁、什么时候、加了谁移了谁。</div>
+
+<h3>重点节点</h3>
+<p>在「日历」页里加，见第 5 节。只有导师能加，全组可见。</p>
+
+<h2 id=push>8. 推送通知</h2>
+<p>同步面板里打开「到点推送通知」。会推两类：</p>
+<ul>
+<li>你设的待办提醒到点了</li>
+<li><b>导师给你的记录点赞或写了点评</b></li>
+</ul>
+<div class=warn><b>iPhone 必须先「添加到主屏幕」</b>，从 Safari 标签页里打开的话，
+系统连推送 API 都不提供。这是 iOS 的限制。</div>
+<p>开了推送后，待办的标题会上传到服务器（不然服务器不知道该推什么内容）。
+不想上传就别开，app 开着的时候仍然会在界面上提醒。</p>
+
+<h2 id=faq>9. 遇到问题</h2>
+
+<h3>连不上服务器</h3>
+<ol>
+<li>是不是在实验室网络里？服务只在内网可达。</li>
+<li>根证书装了吗？iPhone 上「证书信任设置」的开关打开了吗？</li>
+<li>同步面板里展开「服务器地址」，确认是 <code>https://172.29.249.177:3000</code>。</li>
+</ol>
+
+<h3>照片显示成一个空灰块</h3>
+<p>说明那张还没同步到这台设备上。等一轮同步（2 分钟）；如果一直不出现，
+可能是上传方还没传上来。</p>
+
+<h3>刚写的记录不见了</h3>
+<p>大概率是被服务端拒绝后回滚了——同步条上会显示原因。最常见的是<b>今天已经记满 3 条</b>。
+其它可能：想改别人的东西、想改导师设的重点节点。</p>
+
+<h3>「今天记满了」</h3>
+<p>一天上限 3 条。把内容补进今天已有的记录里（点铅笔编辑），或者明天再记。</p>
+
+<h3>换了账号，记录没了</h3>
+<p>换账号会清空本机数据，这是防止数据串号。重新登录原账号，同步一轮就会全部拉回来
+（记录在服务器上，没丢）。</p>
+
+<h3>导师入口不见了</h3>
+<p>角色是在服务器上改的。被提为导师之后，等一轮同步（或退出重登）就会出现。</p>
+
+<hr>
+<p style="color:var(--dim);font-size:13px">
+数据存在实验室内网的服务器上，每天自动备份。
+待办和计时数据只存在你自己的设备上。
+</p>
+</html>"""
+
+
 INSTALL_PAGE = """<!doctype html><html lang=zh-CN><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Mochi 根证书安装</title>
@@ -2038,6 +2407,7 @@ code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13px;word-br
 
 <a class=btn href="/mochi-ca.mobileconfig">📱 iPhone / iPad 点这里安装</a>
 <a class=btn href="/ca.crt">💻 Mac 点这里下载</a>
+<a class=btn style="background:#FFF;color:#2C2C2C;border:2px solid #E8E4DA" href="/guide">📖 Mochi 使用手册</a>
 
 <h2>iPhone 步骤</h2>
 <ol>
@@ -2060,6 +2430,7 @@ Mac 在钥匙串访问里删除「Mochi Lab Root CA」。删掉之后 Mochi 的�
 但待办和计时功能不受影响（那些数据本来就只存在你自己手机上）。</p>
 
 <div class=warn>装完之后，同步地址是 <code>https://172.29.249.177:3000</code>，只在实验室网络里能连上。</div>
+<p style="text-align:center;margin-top:22px"><a href="/guide">怎么用？看使用手册 &rsaquo;</a></p>
 </html>"""
 
 
@@ -2092,6 +2463,8 @@ class CertHandler(BaseHTTPRequestHandler):
             if path == "/mochi-ca.mobileconfig" and CA_CERT:
                 return self._out(build_mobileconfig(Path(CA_CERT).read_bytes()),
                                  "application/x-apple-aspen-config", "mochi-ca.mobileconfig")
+            if path in ("/guide", "/guide/"):
+                return self._out(GUIDE_PAGE.encode(), "text/html; charset=utf-8")
             self._out(INSTALL_PAGE.encode(), "text/html; charset=utf-8")
         except Exception as e:
             print(f"[cert] 出错: {e}", flush=True)

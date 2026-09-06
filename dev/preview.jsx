@@ -32,12 +32,14 @@ const MEMBERS = [
 window.fetch = async (url) => {
   const u = String(url);
   const body = u.includes("/api/overview") ? { members: MEMBERS }
+    : u.includes("/api/members") ? { members: MEMBERS.map(
+        ({ id, username, displayName, avatar }) => ({ id, username, displayName, avatar })) }
     : u.includes("/api/leaderboard") ? {
         period: "week", offset: 0, label: "8/31 — 9/6", totalPoints: 61,
-        rules: { record: 1, like: 5, reply: 5, dailyCap: 3 },
+        rules: { record: 1, like: 5, reply: 0, dailyCap: 3 },
         rows: [
           { userId: "u1", username: "semon", displayName: "郭思蒙", rank: 1,
-            records: 3, likes: 3, replies: 2, points: 28, reward: "1 天事假额度 · 免一周值日" },
+            records: 3, likes: 3, replies: 2, points: 18, reward: "1 天事假额度 · 免一周值日" },
           { userId: "u2", username: "wenqian", displayName: "李文倩", rank: 2,
             records: 3, likes: 2, replies: 1, points: 18, reward: "免一周值日" },
           { userId: "u4", username: "haoran", displayName: "陈浩然", rank: 3,
@@ -71,6 +73,7 @@ const data = {
     { id: "p1", name: "双矩法实时公里级三维重建", color: "#5B7FC7", ownerId: "u1" },
     { id: "p2", name: "组级项目：光场重建", color: "#5A9E4B", ownerId: "prof", members: ["u1", "u2"] },
     { id: "p3", name: "单像素相机标定", color: "#C08A1E", ownerId: "u2" },
+    { id: "p4", name: "张亦弛的个人课题：湍流退化建模", color: "#8B6AAF", ownerId: "u3" },
   ],
   records: [
     { id: "r1", ownerId: "u1", projectId: "p1", at: Date.now() - 2 * H, weather: "☀️ 晴",
@@ -84,6 +87,9 @@ const data = {
       text: "标定板拍糊了，明天重来。", photos: [], files: [] },
     { id: "r4", ownerId: "u1", projectId: "p2", at: Date.now() - 3 * D,
       text: "光场重建第一版跑通，但边缘有明显振铃。", photos: ["ph4"], files: [] },
+    { id: "r5", ownerId: "u3", projectId: "p4", at: Date.now() - 5 * H,
+      text: "把大气湍流的相位屏做成了可复用的模块，下周接到成像链路上试。",
+      photos: [], files: [] },
   ],
   milestones: [
     { id: "m1", ownerId: "u1", at: Date.now() + 4 * D, title: "Optica 投稿截止", kind: "deadline",

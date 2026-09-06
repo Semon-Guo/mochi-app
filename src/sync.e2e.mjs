@@ -90,8 +90,15 @@ try {
   let dB = base();
   res = await syncDevice("B", dB, b.token);
   dB = res.data;
-  chk("学生 B 拉不到 A 的记录", dB.records.length === 0 && dB.projects.length === 0,
-      `projects=${dB.projects.length} records=${dB.records.length}`);
+  // 个人课题现在是全组共享的。要守住的是「看得到 ≠ 变成我的」：
+  // 拉回来的行必须带着原主人的 ownerId，且不能进本地的待推送队列。
+  chk("学生 B 看得到 A 的个人课题记录（全组共享）",
+      dB.records.some((r) => r.id === "r1"), `records=${dB.records.length}`);
+  chk("拉回来的记录仍标着 A 的归属，没被算成 B 的",
+      dB.records.find((r) => r.id === "r1")?.ownerId === a.user.id,
+      String(dB.records.find((r) => r.id === "r1")?.ownerId));
+  chk("别人的记录不会进 B 的待推送队列", Sync.pendingCount(dB) === 0,
+      String(Sync.pendingCount(dB)));
 
   let dP = base();
   res = await syncDevice("P", dP, prof.token);
@@ -223,7 +230,11 @@ try {
   res = await syncDevice("D", afterSwitch, b.token);
   const dSwitched = res.data;
   chk("B 同步后没有推送任何 A 的数据", res.pushed === 0, `pushed=${res.pushed}`);
-  chk("B 看不到 A 的记录", !(dSwitched.records || []).some((r) => r.id === "dr1"));
+  // A 的记录现在 B 也看得到（全组共享），所以这里要守的不是「看不见」，
+  // 而是「没被算成 B 的」——换账号那次事故的要害本来就在归属，不在可见性
+  chk("A 的记录即使被拉回来，也仍然标着 A 的归属",
+      (dSwitched.records || []).every((r) => r.id !== "dr1" || r.ownerId === a.user.id),
+      String((dSwitched.records || []).find((r) => r.id === "dr1")?.ownerId));
 
   // 从服务器侧确认 A 的记录没有被划到 B 名下
   asDevice("D2"); Sync.setServer(BASE);
@@ -372,7 +383,8 @@ try {
   chk("导师能换到下载票", profTk.ok, `HTTP ${profTk.status}`);
   const bobTk = await fetch(`${BASE}/api/file/f-e2e/ticket`,
     { method: "POST", headers: { Authorization: `Bearer ${b.token}` } });
-  chk("组里其他学生换不到", bobTk.status === 404, `HTTP ${bobTk.status}`);
+  // 数据文件跟着记录的可见性走：个人课题全组可见，同学也拿得到
+  chk("同学也能换到票（个人课题的附件是全组可见的）", bobTk.ok, `HTTP ${bobTk.status}`);
 
   console.log("\n── 组级项目：导师建、学生才拉得到 ──");
   asDevice("P"); Sync.setServer(BASE);

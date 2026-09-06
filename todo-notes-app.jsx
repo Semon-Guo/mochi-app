@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import * as Sync from "./src/sync.js";
 import { SyncBar } from "./src/SyncUI.jsx";
-import { AdvisorView } from "./src/AdvisorView.jsx";
+import { AdvisorView, Avatar } from "./src/AdvisorView.jsx";
 import { putPhoto, delPhoto } from "./src/photos.js";
 import { Photo, FullPhoto } from "./src/PhotoView.jsx";
 import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
@@ -1204,7 +1204,8 @@ function Compose({ lastWeather, onSave, todayCount = 0 }) {
 }
 
 /* ── 已经记下的一条 ── */
-function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, onReply, onDropComment }) {
+function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, author,
+                     onReply, onDropComment, onLike }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(r.text);
   const [weather, setWeather] = useState(r.weather || "");
@@ -1216,12 +1217,22 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, onReply, o
   return (
     <div style={{ background:"#FFF", border:"1px solid #EDE8DE", borderRadius:14, padding:"13px 14px", marginBottom:10 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:7 }}>
+        {/* 别人的记录才标作者：自己的本子上每条都写「我」是废话 */}
+        {author && (
+          <span style={{ display:"inline-flex", alignItems:"center", gap:5, flexShrink:0 }}>
+            <Avatar user={author} size={18}/>
+            <span style={{ fontSize:12, fontWeight:700, color:"#3A3630" }}>{author.displayName}</span>
+          </span>
+        )}
         <span style={{ fontSize:12.5, fontWeight:700, color:"#5A544A" }}>{fmtRecDay(r.at)}</span>
         <span style={{ fontSize:11, color:"#C0B8A8", fontFamily:MONO }}>{fmtBJ(r.at)}</span>
         {r.weather && !editing && <span style={{ fontSize:12, color:"#8C8478" }}>{r.weather}</span>}
-        <button onClick={()=>setEditing(v=>!v)} style={{ ...S.ib, marginLeft:"auto", color:"#C5BEB0", padding:4 }}>
-          <Ic.Edit s={14}/>
-        </button>
+        {/* 别人的记录不给编辑入口——服务端本来就只接受本人的写入 */}
+        {!author && (
+          <button onClick={()=>setEditing(v=>!v)} style={{ ...S.ib, marginLeft:"auto", color:"#C5BEB0", padding:4 }}>
+            <Ic.Edit s={14}/>
+          </button>
+        )}
       </div>
 
       {editing ? (
@@ -1258,9 +1269,10 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, onReply, o
               自己的记录本就吵了。有人搭话时输入框自然会长出来。
               也不给自己的记录点赞的按钮，但导师点的赞要看得见。
               按钮写「回复」不写「点评」：学生是在回导师，不是点评自己。 */}
-          {thread && (thread.replies.length > 0 || thread.likes.length > 0) && (
-            <Thread thread={thread} meId={meId} canLike={false} replyLabel="回复"
-              onReply={onReply} onDelete={onDropComment}/>
+          {/* 自己的记录不给自己点赞的按钮；别人的记录可以点（不计分，就是个鼓励） */}
+          {thread && (author || thread.replies.length > 0 || thread.likes.length > 0) && (
+            <Thread thread={thread} meId={meId} canLike={!!author} onToggleLike={onLike}
+              replyLabel="回复" onReply={onReply} onDelete={onDropComment}/>
           )}
         </>
       )}
@@ -1633,12 +1645,33 @@ export default function MochiApp() {
   // 导师的回复和点赞。作者名字要跟着一起存——对面拿不到成员名单，
   // 不存的话他只会看到一串 user id。
   const me = Sync.getAuth()?.user;
+  // 现在看得到别人的记录了，就得知道那一条是谁写的。名册是轻量接口，
+  // 只有名字和头像。token 取成字符串再进依赖，getAuth() 每次返回新对象。
+  const authTok = Sync.getAuth()?.token;
+  const [members, setMembers] = useState([]);
+  useEffect(() => {
+    if (!authTok) return;
+    let alive = true;
+    Sync.fetchMembers(authTok).then(r => { if (alive) setMembers(r.members || []); }).catch(()=>{});
+    return () => { alive = false; };
+  }, [authTok]);
+  const memberById = useMemo(() => Object.fromEntries(members.map(m => [m.id, m])), [members]);
+
+  // 能不能往这个项目里记：自己建的，或者被拉进了名单。
+  // 别人的个人课题现在看得到，但那是他的本子，不该往里写。
+  const canWriteProject = (pr) =>
+    !!pr && (!pr.ownerId || pr.ownerId === me?.id || (pr.members || []).includes(me?.id));
   const cmtIndex = useMemo(() => indexComments(data.comments), [data.comments]);
   const addComment = (recordId, kind, text) => setData(d => ({ ...d, comments: [
     ...(d.comments || []),
     { id: uid(), recordId, kind, text: text || "", byName: me?.displayName || "", at: Date.now() },
   ] }));
   const dropComment = (c) => setData(d => ({ ...d, comments: (d.comments || []).filter(x => x.id !== c.id) }));
+  // 谁都能给看得到的记录点赞；只有导师的赞计分，这条规则在服务端
+  const toggleLike = (r) => {
+    const mine = threadOf(cmtIndex, r.id).likes.find(c => !c.ownerId || c.ownerId === me?.id);
+    if (mine) dropComment(mine); else addComment(r.id, LIKE, "");
+  };
 
   // 重点节点是组里的共同日程（投稿截止、组会、答辩），只有导师能定，所有人都看得到。
   // 界面上已经不给学生编辑入口，这里再挡一道：真让他改出去，服务端会永久拒绝，
@@ -1704,6 +1737,31 @@ export default function MochiApp() {
     const d = Math.round((new Date(m.at || 0).setHours(0,0,0,0) - new Date().setHours(0,0,0,0)) / 86400000);
     return d >= 0 && d <= 7;
   }).length;
+
+  // 自己的（含被拉进名单的）和别人的分开：这一页首先是「我的记录本」
+  const myProjects = data.projects.filter(canWriteProject);
+  const otherProjects = data.projects.filter(pr => !canWriteProject(pr));
+  const projCard = (pr) => {
+    const rs = data.records.filter(r => r.projectId === pr.id);
+    const last = rs.reduce((m, r) => Math.max(m, r.at), 0);
+    const owner = pr.ownerId && pr.ownerId !== me?.id ? memberById[pr.ownerId] : null;
+    return (
+      <div key={pr.id} onClick={()=>setOpenProject(pr.id)} className="pcard"
+        style={{ ...S.pcard, animation:"popIn .3s ease both" }}>
+        <div style={{ fontSize:15.5, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
+        <div style={{ display:"flex", alignItems:"center", gap:7, marginTop:6,
+          fontSize:11, color:"#B0A99B" }}>
+          {owner && (
+            <span style={{ display:"inline-flex", alignItems:"center", gap:4, color:"#8C8478" }}>
+              <Avatar user={owner} size={15}/>{owner.displayName}
+            </span>
+          )}
+          <span>{rs.length} 条记录</span>
+          {last > 0 && <><span>·</span><span>最后 {fmtDay(last)}</span></>}
+        </div>
+      </div>
+    );
+  };
 
   const pending = data.todos.filter(t => !t.done && !t.parentId);
   const allPending = data.todos.filter(t => !t.done);
@@ -1931,19 +1989,35 @@ export default function MochiApp() {
               <button style={S.ib} onClick={()=>setProjForm(pr.id)}><Ic.Edit s={17}/></button>
               <button style={{ ...S.ib, color:"#DDD" }} onClick={()=>deleteProject(pr.id)}><Ic.Trash s={16}/></button>
             </>) : (
-              <span style={{ fontSize:10.5, fontWeight:700, color:"#5B7FC7", background:"#EEF2FB",
-                padding:"3px 8px", borderRadius:6 }}>组级项目</span>
+              <span style={{ fontSize:10.5, fontWeight:700, flexShrink:0, padding:"3px 8px",
+                borderRadius:6,
+                ...(canWriteProject(pr)
+                  ? { color:"#5B7FC7", background:"#EEF2FB" }
+                  : { color:"#8C8478", background:"#F2EFE8" }) }}>
+                {canWriteProject(pr) ? "组级项目" : `${memberById[pr.ownerId]?.displayName || "同学"}的课题`}
+              </span>
             )}
           </div>
           <div style={{ fontSize:11, color:"#B0A99B", paddingLeft:34, marginBottom:16 }}>{recs.length} 条记录</div>
         </div>
 
         <div style={{ padding:"0 24px" }}>
-          <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}
-            todayCount={myTodayRecords}/>
+          {canWriteProject(pr) ? (
+            <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}
+              todayCount={myTodayRecords}/>
+          ) : (
+            /* 别人的个人课题：看得到、能点赞，但不往人家本子里写 */
+            <div style={{ background:"#F7F4EE", border:"1px solid #EDE8DE", borderRadius:14,
+              padding:"11px 13px", marginBottom:18, fontSize:12.5, color:"#8C8478", lineHeight:1.6 }}>
+              这是 {memberById[pr.ownerId]?.displayName || "同学"} 的课题，你可以看和点赞，
+              但不能往里记。
+            </div>
+          )}
           {recs.map(r => (
             <RecordCard key={r.id} r={r} onSave={saveRecord} onDelete={deleteRecord} onOpenPhoto={setViewPhoto}
               thread={threadOf(cmtIndex, r.id)} meId={me?.id}
+              author={r.ownerId && r.ownerId !== me?.id ? memberById[r.ownerId] : null}
+              onLike={()=>toggleLike(r)}
               onReply={(text)=>addComment(r.id, REPLY, text)} onDropComment={dropComment}/>
           ))}
           {recs.length === 0 && (
@@ -2132,7 +2206,7 @@ export default function MochiApp() {
             </button>
             {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
 
-            {data.projects.length===0 && projForm!=="new" && (
+            {myProjects.length===0 && projForm!=="new" && (
               <div style={S.empty}>
                 <div style={{fontSize:48}}>🔬</div>
                 <div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有项目</div>
@@ -2140,22 +2214,16 @@ export default function MochiApp() {
               </div>
             )}
 
-            <div className="proj-grid">
-            {data.projects.map(pr => {
-              const n = data.records.filter(r => r.projectId === pr.id).length;
-              const last = data.records.filter(r => r.projectId === pr.id).reduce((m,r)=>Math.max(m,r.at),0);
-              return (
-                <div key={pr.id} onClick={()=>setOpenProject(pr.id)} className="pcard"
-                  style={{ ...S.pcard, animation:"popIn .3s ease both" }}>
-                  <div style={{ fontSize:15.5, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
-                  <div style={{ display:"flex", gap:7, marginTop:6, fontSize:11, color:"#B0A99B" }}>
-                    <span>{n} 条记录</span>
-                    {last > 0 && <><span>·</span><span>最后 {fmtDay(last)}</span></>}
-                  </div>
-                </div>
-              );
-            })}
-            </div>
+            <div className="proj-grid">{myProjects.map(projCard)}</div>
+
+            {/* 组里其他人的个人课题：单独一段，不跟自己的混在一起——
+                这一页首先是「我的记录本」，别人的东西灌进来就不是了 */}
+            {otherProjects.length > 0 && (
+              <div>
+                <div style={S.grp}>组里的课题 · {otherProjects.length}</div>
+                <div className="proj-grid">{otherProjects.map(projCard)}</div>
+              </div>
+            )}
 
           </>
         )}

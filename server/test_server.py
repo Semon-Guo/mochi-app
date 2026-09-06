@@ -93,12 +93,28 @@ def test_old_db_upgrade():
       CREATE TABLE records (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
         data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER,
         seq INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE projects (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+        data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER,
+        seq INTEGER NOT NULL DEFAULT 0);
+      /* 老结构的 photos / files：也缺 project_id，走的是另一条 ALTER 分支 */
+      CREATE TABLE photos (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+        data TEXT NOT NULL DEFAULT '{}', mime TEXT NOT NULL DEFAULT 'image/jpeg',
+        size INTEGER NOT NULL DEFAULT 0, uploaded INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE files (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL DEFAULT '',
+        size INTEGER NOT NULL DEFAULT 0, uploaded INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     """)
     c.execute("INSERT INTO users VALUES ('u-old','olduser','x','老用户','student',1)")
     # UTC 8/30 18:00 = 北京 8/31 02:00：顺带验证归日真的按 +8 算，
     # 而不是照搬 UTC 日期
+    c.execute("INSERT INTO projects VALUES ('p-old','u-old',?,1,NULL,1)",
+              (json.dumps({"name": "升级前的项目"}),))
     c.execute("INSERT INTO records VALUES ('r-old','u-old',?,1,NULL,1)",
-              (json.dumps({"at": 1756576800000, "text": "升级前就有的记录"}),))
+              (json.dumps({"at": 1756576800000, "text": "升级前就有的记录",
+                           "projectId": "p-old", "photos": ["ph-old"]}),))
+    c.execute("INSERT INTO photos (id, owner_id, updated_at) VALUES ('ph-old','u-old',1)")
     c.commit(); c.close()
 
     env = {**os.environ, "MOCHI_DATA": tmp, "MOCHI_PORT": str(port), "MOCHI_INVITE_CODE": INVITE}
@@ -121,9 +137,17 @@ def test_old_db_upgrade():
             chk("新列补上了", "day" in cols, str(sorted(cols)))
             day = c.execute("SELECT day FROM records WHERE id='r-old'").fetchone()[0]
             chk("老数据被回填了归日，且按北京时间算（UTC 是 8/30）", day == "2025-08-31", str(day))
-            idx = [r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_records_day'")]
-            chk("索引也建上了（顺序是先补列再建索引）", idx == ["idx_records_day"], str(idx))
+            idx = {r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+                " AND name IN ('idx_records_day','idx_records_project')")}
+            chk("索引也建上了（顺序是先补列再建索引）",
+                idx == {"idx_records_day", "idx_records_project"}, str(sorted(idx)))
+            pid = c.execute("SELECT project_id FROM records WHERE id='r-old'").fetchone()[0]
+            chk("老记录回填了归属项目", pid == "p-old", str(pid))
+            ph = c.execute("SELECT project_id FROM photos WHERE id='ph-old'").fetchone()[0]
+            chk("老照片也跟着挂到了项目上（可见性要靠它）", ph == "p-old", str(ph))
+            fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
+            chk("files 表也补上了 project_id", "project_id" in fcols, str(sorted(fcols)))
             c.close()
     finally:
         proc.terminate()
@@ -184,6 +208,7 @@ def main():
         s, r = call("POST", "/api/register",
                     {"username": "stu1", "password": "stu1-passwd-1", "displayName": "学生甲", "inviteCode": INVITE})
         stu1 = r.get("token")
+        stu1_id = r.get("user", {}).get("id")
         chk("带邀请码注册成功且是学生", s == 200 and r["user"]["role"] == "student", r.get("user", {}).get("role"))
 
         s, r = call("POST", "/api/register",
@@ -225,8 +250,11 @@ def main():
         chk("增量拉取不重复返回", s == 200 and not r["projects"] and not r["records"])
 
         s, r = call("GET", "/api/sync?since=0", token=stu2)
-        chk("学生乙看不到学生甲的记录", s == 200 and not r["projects"] and not r["records"],
+        # 个人课题现在是全组共享的：组里互相看得到彼此在做什么
+        chk("学生乙看得到学生甲的个人课题记录", s == 200 and r["projects"] and r["records"],
             f"projects={len(r.get('projects', []))} records={len(r.get('records', []))}")
+        chk("但待办仍然只有自己看得见", not r.get("todos"),
+            f"todos={len(r.get('todos', []))}")
 
         s, r = call("GET", "/api/sync?since=0", token=advisor)
         chk("导师能看到学生的记录", s == 200 and len(r["projects"]) == 1 and len(r["records"]) == 1,
@@ -605,6 +633,58 @@ def main():
         s, r = call("GET", "/api/users", token=stu1)
         chk("学生不能列出成员", s == 403, f"HTTP {s}")
 
+        print("\n── 记录的可见性：个人课题全组可见，带名单的项目只给名单内 ──")
+        s, r = call("POST", "/api/sync", {
+            "projects": [{"id": "open1", "updatedAt": now + 40000, "data": {"name": "我的个人课题"}}],
+            "records": [{"id": "or1", "updatedAt": now + 40001,
+                         "data": {"projectId": "open1", "at": now + 40001, "text": "个人课题的记录"}}],
+        }, token=stu1)
+        chk("学生建了个没有成员名单的个人课题", s == 200 and r["applied"] == 2, str(r.get("rejected")))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("别的学生看得到这个个人课题",
+            any(p["id"] == "open1" and p["data"] for p in r.get("projects", [])))
+        got = [x for x in r.get("records", []) if x["id"] == "or1" and x["data"]]
+        chk("也看得到里面的记录", len(got) == 1, str(len(got)))
+        chk("看得到是谁写的", got and got[0]["ownerId"], str(got[0].get("ownerId") if got else None))
+
+        # 加上名单之后就只给名单内的人
+        s, r = call("POST", "/api/sync", {"projects": [
+            {"id": "open1", "updatedAt": now + 40002,
+             "data": {"name": "我的个人课题", "members": [stu1_id]}}]}, token=stu1)
+        chk("给它加上成员名单", s == 200 and r["applied"] == 1)
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        pj = [p for p in r.get("projects", []) if p["id"] == "open1"]
+        chk("名单外的人立刻看不到了", pj and pj[0]["data"] is None, str(pj))
+        rc = [x for x in r.get("records", []) if x["id"] == "or1"]
+        chk("里面的记录也收到墓碑（本地那份得删掉，不能留着）",
+            rc and rc[0]["data"] is None, str(rc))
+
+        # 去掉名单又恢复全组可见
+        call("POST", "/api/sync", {"projects": [
+            {"id": "open1", "updatedAt": now + 40003, "data": {"name": "我的个人课题"}}]}, token=stu1)
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("去掉名单又变回全组可见",
+            any(p["id"] == "open1" and p["data"] for p in r.get("projects", [])))
+
+        s, r = call("POST", "/api/sync", {"comments": [
+            {"id": "cm-peer", "updatedAt": now + 40004,
+             "data": {"recordId": "or1", "kind": "like", "at": now}}]}, token=stu2)
+        chk("同学之间能互相点赞", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("GET", "/api/leaderboard?period=week", token=stu2)
+        him = [x for x in r["rows"] if x["username"] == "stu1"]
+        chk("同学点的赞不计分（只有导师的算）",
+            him and him[0]["likes"] == 0, str(him[0] if him else None))
+
+        s, r = call("GET", "/api/members", token=stu2)
+        chk("学生能取到全组名册（否则不知道记录是谁写的）",
+            s == 200 and any(m["username"] == "stu1" for m in r.get("members", [])), f"HTTP {s}")
+        chk("名册只给展示用的字段，不含角色",
+            s == 200 and "role" not in (r["members"][0] if r.get("members") else {"role": 1}),
+            str(list((r.get("members") or [{}])[0].keys())))
+
         print("\n── 共享项目：导师建、把学生拉进来 ──")
         # 导师建的项目归导师所有，学生只有进了成员名单才拉得到——
         # 拉不到就意味着他在自己的 app 里看不见这个项目，没法往里记。
@@ -614,8 +694,11 @@ def main():
         chk("导师能建项目", s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
         s, r = call("GET", "/api/sync?since=0", token=stu2)
-        chk("没进名单的学生拉不到这个项目",
-            not any(p["id"] == "shared1" for p in r.get("projects", [])))
+        # 拿到的是墓碑而不是「没有这一行」：客户端可能早就存着旧的那份，
+        # 只有墓碑才能让它删掉
+        pj = [p for p in r.get("projects", []) if p["id"] == "shared1"]
+        chk("没进名单的学生拿不到内容（导师建的项目从创建起就受限）",
+            not pj or pj[0]["data"] is None, str(pj))
 
         s, r = call("POST", "/api/sync", {"projects": [
             {"id": "shared1", "updatedAt": now + 51000,
@@ -642,8 +725,8 @@ def main():
             {"id": "shared1", "updatedAt": now + 54000, "data": {"name": "组级项目", "members": []}}]},
             token=admin)
         s, r = call("GET", "/api/sync?since=0", token=stu2)
-        chk("移出名单后学生就拉不到了",
-            not any(p["id"] == "shared1" for p in r.get("projects", [])))
+        pj = [p for p in r.get("projects", []) if p["id"] == "shared1"]
+        chk("移出名单后立刻收到墓碑", pj and pj[0]["data"] is None, str(pj))
 
         print("\n── 积分与排行榜 ──")
         DAY = 86400000
@@ -695,8 +778,8 @@ def main():
             me = me[0]
             chk("今天记录计 3 条（第 4 条根本没进来）", me["records"] == 3, str(me["records"]))
             chk("赞记 1 个", me["likes"] == 1, str(me["likes"]))
-            chk("点评记 1 条，自评不算", me["replies"] == 1, str(me["replies"]))
-            chk("积分 = 3×1 + 1×5 + 1×5 = 13", me["points"] == 13, str(me["points"]))
+            chk("点评仍然统计，但不计分", me["replies"] == 1, str(me["replies"]))
+            chk("积分 = 3×1 + 1×5 = 8（点评不加分）", me["points"] == 8, str(me["points"]))
             chk("有名次", me["rank"] >= 1, str(me["rank"]))
 
         chk("导师不进榜（他不靠记录挣分）",
@@ -822,10 +905,11 @@ def main():
              "data": {"recordId": "r-ov", "kind": "like"}}]}, token=admin)
         chk("点赞也是一条评论", s == 200 and r["applied"] == 1)
 
+        # 看得到就评得了——同学之间也能互相点赞（只是不计分）
         s, r = call("POST", "/api/sync", {"comments": [
             {"id": "cm3", "updatedAt": now + 62000,
-             "data": {"recordId": "r-ov", "kind": "reply", "text": "我来偷看"}}]}, token=stu2)
-        chk("学生不能评论别人的记录", s == 200 and r["rejected"] and not r["applied"], str(r))
+             "data": {"recordId": "r-ov", "kind": "like"}}]}, token=stu2)
+        chk("同学能给看得到的记录点赞", s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
         s, r = call("POST", "/api/sync", {"comments": [
             {"id": "cm4", "updatedAt": now + 63000,
