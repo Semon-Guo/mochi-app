@@ -71,7 +71,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（216 项）
+python3 server/test_server.py   # 服务端 API（232 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -96,6 +96,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | GET | `/api/overview` | 全组统计聚合（导师 / 管理员） |
 | GET | `/api/project-log?id=<projectId>` | 这个项目的成员管理记录（导师 / 管理员） |
 | GET | `/api/leaderboard?period=week\|month\|year&offset=<0..-60>` | 积分榜，全组可见 |
+| GET | `/api/members` | 全组的名字和头像（任何登录用户）——看得到别人的记录，就得知道是谁写的 |
 | POST | `/api/admin/role` | `{userId, role}` 任命角色（仅管理员） |
 | POST | `/api/admin/remove` | `{userId}` 移除成员及其全部数据（仅管理员） |
 | POST | `/api/admin/reset-password` | `{userId}` → `{tempPassword}`（仅管理员） |
@@ -155,6 +156,8 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | 例外 | 为什么 | 怎么实现 |
 |---|---|---|
 | 重点节点 | 组里的日程（投稿截止、组会、答辩）是共同信息 | 在 `GROUP_SHARED` 里：**谁都读得到，只有导师写得了**（`GROUP_WRITABLE_BY`）。`owner_id` 只记「谁定的」，不影响谁看得到；换了导师之后前一任定的日程也改得动 |
+| 个人课题和记录 | 组里互相看得到彼此在做什么 | 没有成员名单、且不是导师建的项目 → **全组可见**，连同里面的记录、照片、数据文件 |
+| 有名单的 / 导师建的项目 | 导师圈定了参与范围 | `hidden_projects()`：只给名单内的人 + 项目主人 + 导师。**导师建的项目从创建起就受限**，哪怕名单还空着——只看名单的话，加上第一个人的瞬间它会对所有人消失，这个跳变没法跟人解释 |
 | 项目成员 | 组里谁参与哪个课题本来就是导师在管 | 导师能改**任何**项目的 `members`，但服务端只取这一个字段合并（`merge_members`）——项目名、颜色仍归建它的人，导师也删不掉别人的项目。每次改动写进 `audit_log`，`/api/project-log` 供导师互查 |
 | 导师建的项目 | 学生看不到这个项目就没法往里记 | 成员名单存在项目 `data.members` 里跟着同步走；服务端另存一张 `project_members` 倒排表，拉取时走索引 |
 | 别人对我的记录写的回复和赞 | 那条评论的 `owner_id` 是导师，按 owner 过滤学生根本拉不到 | 写入时冗余存一份 `target_owner`（被评论记录的作者），拉取条件是 `owner_id = 我 OR target_owner = 我` |
@@ -181,9 +184,11 @@ CREATE TABLE 里就带着所有列），线上崩了三分钟。现在
   用户看到的就是「刚写好的记录自己没了」。
 - `records.day` 是为此加的列（北京时间归日）。没有它，每推一条记录都得把那个人
   的全部记录取出来解析 JSON 数一遍。
-- 只算**导师**给的赞和点评，且自己给自己的不算——否则刷分太容易。
+- **只有导师的点赞计分**。点评不计分：那是给学生的反馈，不该变成筹码。
+  同学之间也能互相点赞（看得到就点得了），同样不计分，否则互刷就是几分钟的事。
 - 榜单**全组可见**：看不见别人的名次，排行榜就不成其为排行榜。所以只能由服务端
   聚合，学生本地只有自己的数据。
+- 使用手册在证书站点的 `/guide`（`GUIDE_PAGE`），跟根证书一个站点，装完就能顺手看。
 - 奖励规则集中在 `WEEK_REWARDS` / `MONTH_REWARDS` / `YEAR_POOL_NOTE`，改这一处、
   接口和界面一起变。`offset` 只允许 ≤0：能翻旧账，不能预支未来。
 
@@ -198,6 +203,11 @@ CREATE TABLE 里就带着所有列），线上崩了三分钟。现在
   一行时（学生擅自新建的），塞一条墓碑把本地那条删掉。
 - 被拒的行同时标成「推过了」。拒绝理由全是永久性的，留着重试就是每两分钟
   白发一次，界面上还永远挂着「N 条待同步」。
+
+**不可见的行发墓碑，不是直接过滤掉**：客户端可能早就存着旧的那一份（比如导师
+后来给某个项目加了名单，它就此变成受限），不发墓碑那份数据会一直留在他设备上。
+照片和数据文件跟着所属项目走（`visible_blob()`），否则别人的记录里就是一排空灰块，
+而同步引擎还会一遍遍去拉、一遍遍 403。
 
 **`audit()` 不能在事务里调**：它自己要拿 `_write_lock`，而那是个不可重入锁，
 在 `push()` 里调用会当场死锁（改项目成员时踩过一次）。事务里要留痕就先攒着，
@@ -290,8 +300,8 @@ extendedKeyUsage 含 serverAuth。
 
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
-node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（84 项）
-python3 server/test_server.py   # 服务端 API（215 项；服务器上多一项 scrypt，共 216）
+node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（86 项）
+python3 server/test_server.py   # 服务端 API（231 项；服务器上多一项 scrypt，共 232）
 ```
 
 ### 推送
