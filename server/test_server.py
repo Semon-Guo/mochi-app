@@ -107,6 +107,7 @@ def test_old_db_upgrade():
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     """)
     c.execute("INSERT INTO users VALUES ('u-old','olduser','x','老用户','student',1)")
+    c.execute("INSERT INTO users VALUES ('u-adm','oldadmin','x','老管理员','admin',1)")
     # UTC 8/30 18:00 = 北京 8/31 02:00：顺带验证归日真的按 +8 算，
     # 而不是照搬 UTC 日期
     c.execute("INSERT INTO projects VALUES ('p-old','u-old',?,1,NULL,1)",
@@ -148,6 +149,11 @@ def test_old_db_upgrade():
             chk("老照片也跟着挂到了项目上（可见性要靠它）", ph == "p-old", str(ph))
             fcols = {r[1] for r in c.execute("PRAGMA table_info(files)")}
             chk("files 表也补上了 project_id", "project_id" in fcols, str(sorted(fcols)))
+            feats = dict(c.execute("SELECT username, features FROM users").fetchall())
+            chk("升级后老用户的待办一律是关的（全组默认看不到）",
+                not json.loads(feats["olduser"] or "{}"), str(feats["olduser"]))
+            chk("唯独管理员先开着——他是唯一能再打开的人",
+                json.loads(feats["oldadmin"] or "{}").get("todo") is True, str(feats["oldadmin"]))
             c.close()
     finally:
         proc.terminate()
@@ -441,6 +447,51 @@ def main():
         chk("不能修改自己的角色（否则会把自己锁在门外）", s == 403, f"HTTP {s}")
         s, r = call("POST", "/api/admin/role", {"userId": "nonexistent", "role": "advisor"}, token=admin)
         chk("对不存在的用户报 404", s == 404, f"HTTP {s}")
+
+        print("\n── 待办的开放权限 ──")
+        s, r = call("GET", "/api/me", token=stu1)
+        chk("新注册的人默认看不到待办", s == 200 and r["user"]["features"] == {},
+            str(r.get("user", {}).get("features")))
+
+        s, r = call("POST", "/api/admin/feature", {"userId": prof2_id, "feature": "todo", "on": True},
+                    token=stu1)
+        chk("非管理员不能开放功能", s == 403, f"HTTP {s}")
+
+        s, r = call("POST", "/api/admin/feature", {"userId": prof2_id, "feature": "todo", "on": True},
+                    token=admin)
+        chk("管理员能开放待办", s == 200 and r["user"]["features"].get("todo") is True,
+            str(r.get("user", {}).get("features")))
+        s, r = call("GET", "/api/me", token=prof2)
+        chk("本人下次刷身份就看得到（客户端靠它显隐）",
+            r["user"]["features"].get("todo") is True, str(r["user"]["features"]))
+
+        s, r = call("POST", "/api/admin/feature", {"userId": prof2_id, "feature": "分身术", "on": True},
+                    token=admin)
+        chk("没有的功能名被拒", s == 400, f"HTTP {s}")
+        s, r = call("POST", "/api/admin/feature", {"userId": "nonexistent", "feature": "todo",
+                                                   "on": True}, token=admin)
+        chk("对不存在的用户报 404", s == 404, f"HTTP {s}")
+
+        # 收回不删数据：这是界面开关，不是数据操作
+        s, r = call("POST", "/api/sync", {"todos": [{"id": "td-feat", "updatedAt": now,
+                                                     "data": {"text": "被收回前记的"}}]}, token=prof2)
+        chk("开放期间能同步待办", s == 200 and r["applied"] == 1, f"applied={r.get('applied')}")
+        s, r = call("POST", "/api/admin/feature", {"userId": prof2_id, "feature": "todo", "on": False},
+                    token=admin)
+        chk("能收回", s == 200 and "todo" not in r["user"]["features"],
+            str(r.get("user", {}).get("features")))
+        s, r = call("GET", "/api/sync?since=0", token=prof2)
+        chk("收回后待办数据一条不少（只是界面不显示）",
+            any(t["id"] == "td-feat" for t in r.get("todos", [])), f"n={len(r.get('todos', []))}")
+
+        s, r = call("POST", "/api/admin/feature", {"userId": me["id"], "feature": "todo", "on": True},
+                    token=admin)
+        chk("管理员能给自己开（角色不行，功能可以——随时点得回来）",
+            s == 200 and r["user"]["features"].get("todo") is True, f"HTTP {s}")
+
+        s, r = call("GET", "/api/admin/audit", token=admin)
+        acts = [e["action"] for e in r.get("entries", [])]
+        chk("开放/收回都进了审计日志", "开放待办" in acts and "收回待办" in acts, ",".join(acts[:6]))
 
         print("\n── 重置密码与吊销会话 ──")
         s, r = call("POST", "/api/admin/reset-password", {"userId": prof2_id}, token=stu1)

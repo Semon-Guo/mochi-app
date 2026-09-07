@@ -100,6 +100,15 @@ ROLES = ("student", "advisor", "admin")
 GROUP_READERS = ("advisor", "admin")
 GROUP_WRITABLE_BY = GROUP_READERS      # 谁能写 GROUP_SHARED 里的表
 
+# 按人开放的功能。待办 / 专注计时是「个人时间管理」，跟实验记录本不是一回事——
+# 组里多数人只需要记录本，那一半摆在最显眼的第一个页签上只是干扰。所以默认关，
+# 由管理员一个个开。
+#
+# 这不是安全边界：待办数据本来就只有本人拉得回（ADVISOR_VISIBLE 里没有它，
+# 服务端强制），这里管的只是「界面上给不给这个人显示待办这一半」。也正因如此，
+# 收回权限不动任何数据——人本来就在自己机器上存着，再开放回来一条不少。
+FEATURES = ("todo",)
+
 
 def can_read_group(user):
     return user and user.get("role") in GROUP_READERS
@@ -128,7 +137,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at INTEGER NOT NULL,
   avatar TEXT, updated_at INTEGER NOT NULL DEFAULT 0,
-  pending_role TEXT, requested_at INTEGER, archived_at INTEGER);
+  pending_role TEXT, requested_at INTEGER, archived_at INTEGER, features TEXT);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -285,9 +294,15 @@ def init_db():
     have = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, decl in (("avatar", "TEXT"), ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
                       ("pending_role", "TEXT"), ("requested_at", "INTEGER"),
-                      ("archived_at", "INTEGER")):
+                      ("archived_at", "INTEGER"), ("features", "TEXT")):
         if col not in have:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+    if "features" not in have:
+        # 升级到「待办按人开放」的这一刻：老用户一律关——全组默认看不到待办，
+        # 正是这个改动的本意。唯独管理员先开着：他是唯一能再打开的人，
+        # 把他自己也关在外面，只会让人以为升级把功能弄丢了。
+        c.execute("UPDATE users SET features = ? WHERE role = 'admin'",
+                  (json.dumps({"todo": True}),))
     c.commit()
     c.close()
 
@@ -471,9 +486,29 @@ def note_success(keys):
             _fails.pop(k, None)
 
 
+def user_features(row):
+    """这个人被开放了哪些功能。默认全关。
+
+    存成一个 JSON 列而不是每个功能一列：以后再想按人开放别的东西，
+    不用再动一次表结构（线上加列踩过坑，见 SCHEMA 那段注释）。
+    """
+    try:
+        raw = row["features"]
+    except (IndexError, KeyError):
+        return {}                       # 老库还没补上这一列
+    try:
+        f = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(f, dict):
+        return {}
+    return {k: True for k in FEATURES if f.get(k)}
+
+
 def public_user(row, with_avatar=True):
     u = {"id": row["id"], "username": row["username"],
-         "displayName": row["display_name"], "role": row["role"]}
+         "displayName": row["display_name"], "role": row["role"],
+         "features": user_features(row)}
     try:
         if with_avatar and row["avatar"]:
             u["avatar"] = row["avatar"]
@@ -1184,6 +1219,38 @@ def admin_set_role(user, target_id, role):
                   " updated_at = ? WHERE id = ?", (role, now, row["id"]))
         c.commit()
     audit(user["username"], "改角色", row["username"], f'{row["role"]} → {role}')
+    return {"user": public_user(c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone())}
+
+
+def admin_set_feature(user, target_id, feature, on):
+    """按人开放 / 收回一个功能（目前只有待办）。
+
+    跟改角色不同，这里**允许改自己**：角色改错了会把自己锁在门外，只能 SSH
+    上服务器救；而功能开关随时能再点回来。管理员要给自己开待办，总不能去
+    求另一个管理员。
+
+    收回不删任何数据——待办本来就存在本人设备上，服务器这边只是不再让
+    界面显示。再开放回来，他那些任务一条不少。
+    """
+    if not is_admin(user):
+        raise HttpError(403, "只有管理员能开放功能")
+    if feature not in FEATURES:
+        raise HttpError(400, "没有这个功能")
+    c = conn()
+    row = _target(c, target_id)
+    feats = user_features(row)
+    if on:
+        feats[feature] = True
+    else:
+        feats.pop(feature, None)
+
+    now = int(time.time() * 1000)
+    with _write_lock:
+        c.execute("UPDATE users SET features = ?, updated_at = ? WHERE id = ?",
+                  (json.dumps(feats), now, row["id"]))
+        c.commit()
+    audit(user["username"], "开放待办" if on else "收回待办", row["username"],
+          None if on else "数据保留在本人设备上")
     return {"user": public_user(c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone())}
 
 
@@ -1935,6 +2002,10 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/api/admin/role":
                 b = self._json_body()
                 return self._json(admin_set_role(self._need_user(), b.get("userId"), b.get("role")))
+            if method == "POST" and path == "/api/admin/feature":
+                b = self._json_body()
+                return self._json(admin_set_feature(self._need_user(), b.get("userId"),
+                                                    b.get("feature"), bool(b.get("on"))))
             if method == "POST" and path == "/api/admin/archive":
                 b = self._json_body()
                 return self._json(admin_archive_user(self._need_user(), b.get("userId"),
@@ -2150,7 +2221,7 @@ hr{border:none;border-top:1px solid var(--line);margin:28px 0}
 
 <div class=toc><ol>
 <li><a href="#start">第一次使用</a></li>
-<li><a href="#todo">待办与专注计时</a></li>
+<li><a href="#todo">待办与专注计时</a>（要管理员开放）</li>
 <li><a href="#lab">实验记录本</a></li>
 <li><a href="#see">谁能看到什么</a>（重要）</li>
 <li><a href="#cal">日历与重点节点</a></li>
@@ -2185,7 +2256,14 @@ hr{border:none;border-top:1px solid var(--line);margin:28px 0}
 <div class=note>换账号登录会<b>清空本机数据</b>（上一个人的记录不会留在你屏幕上，
 也不会被当成你的推上去）。这是有意的。</div>
 
-<h2 id=todo>2. 待办与专注计时</h2>
+<h2 id=todo>2. 待办与专注计时<span class="role adv">要管理员开放</span></h2>
+
+<div class=key><b>这一半默认不出现。</b>没开放的人，界面上只有「记录」和「日历」两个页签，
+这不是出了问题。要用的话跟管理员说一声，他在导师端「管理 → 成员」里点一下「开放待办」，
+你下一轮同步（最多 2 分钟，或退出重登）就能看到「待办」页了。
+<br><br>组里多数人只需要实验记录本，待办和专注计时是给需要的人用的，摆在所有人最显眼的第一个
+页签上只是干扰。<b>收回也不会删任何东西</b>——任务和计时本来就存在你自己的设备上，
+再开放回来一条不少。</div>
 
 <h3>建任务</h3>
 <p>「待办」页右下角 <b>+</b>。三档重要度：<b>主线 / 支线 / 休闲</b>，列表按这个排序。
@@ -2242,7 +2320,8 @@ hr{border:none;border-top:1px solid var(--line);margin:28px 0}
 
 <table>
 <tr><th>东西</th><th>谁看得到</th></tr>
-<tr><td>待办 / 专注计时 / timeline</td><td><b>只有你自己</b>（服务端强制）</td></tr>
+<tr><td>待办 / 专注计时 / timeline</td><td><b>只有你自己</b>（服务端强制）。
+另外这一整个功能要管理员按人开放，见<a href="#todo">第 2 节</a></td></tr>
 <tr><td>你的个人课题和里面的记录</td><td><b>全组</b>——组里互相看得到彼此在做什么</td></tr>
 <tr><td>导师建的项目</td><td><b>只有名单里的人</b> + 导师</td></tr>
 <tr><td>被导师加了成员名单的项目</td><td>同上，只给名单内</td></tr>
@@ -2364,6 +2443,11 @@ hr{border:none;border-top:1px solid var(--line);margin:28px 0}
 
 <h3>导师入口不见了</h3>
 <p>角色是在服务器上改的。被提为导师之后，等一轮同步（或退出重登）就会出现。</p>
+
+<h3>我这儿没有「待办」页</h3>
+<p>那一半要管理员按人开放（见<a href="#todo">第 2 节</a>），默认是不出现的。开放之后同样
+等一轮同步或退出重登。反过来，本来有、突然没了，是被收回了——<b>你的任务和计时一条没丢</b>，
+它们本来就存在你自己设备上，再开放回来都还在。</p>
 
 <hr>
 <p style="color:var(--dim);font-size:13px">

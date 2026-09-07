@@ -4,7 +4,7 @@
  * 出一点偏差就会静默丢数据，所以这里把每条规则都钉住。
  */
 import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_AFTER,
-         LAB_KINDS, ALL_KINDS } from "./sync.js";
+         LAB_KINDS, ALL_KINDS, canUseTodo, setAuth, onAuthChange } from "./sync.js";
 import { indexComments, threadOf, myLike } from "./comments.js";
 import { migrateLab } from "./migrate.js";
 import { freshRecords, FRESH_WINDOW } from "./seen.js";
@@ -292,6 +292,30 @@ console.log("\n── planPhotoSync ──");
     localIds: new Set(["ph1"]), state: {},
   });
   chk("不知道自己是谁时退回旧行为，不把上传整个停掉", plan.toUpload.includes("ph1"));
+}
+
+console.log("\n── 待办的开放权限 ──");
+{
+  // 界面靠这个函数决定待办那一半显不显示。默认必须是关的：
+  // 判反了的话，全组每个人都会看见本该只给几个人开的功能。
+  chk("没开放就是看不到", !canUseTodo({ id: "u1", role: "student" }));
+  chk("空的 features 也是看不到", !canUseTodo({ id: "u1", features: {} }));
+  chk("没登录（没有 user）也是看不到", !canUseTodo(null) && !canUseTodo(undefined));
+  chk("管理员不自动有，得显式开", !canUseTodo({ id: "u1", role: "admin" }));
+  chk("开放了才看得到", canUseTodo({ id: "u1", features: { todo: true } }));
+  chk("只认 true，别的值不算", !canUseTodo({ id: "u1", features: { todo: "yes" } }));
+}
+{
+  // 管理员在服务器上开放之后，客户端是在同步时刷回身份的。主界面不订阅这次
+  // 变化的话，得等它自己因为别的原因重渲染才会跟上。
+  const seen = [];
+  const off = onAuthChange((a) => seen.push(a?.user?.features?.todo === true));
+  setAuth({ token: "t", user: { id: "u1", features: { todo: true } } });
+  setAuth(null);
+  off();
+  setAuth({ token: "t", user: { id: "u1", features: { todo: true } } });
+  chk("登录态一变就广播，退订后不再收到", seen.length === 2 && seen[0] === true && seen[1] === false,
+      JSON.stringify(seen));
 }
 
 console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);

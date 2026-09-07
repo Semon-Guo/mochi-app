@@ -15,7 +15,9 @@ import { AdvisorView } from "../src/AdvisorView.jsx";
 import MochiApp, { CSS } from "../todo-notes-app.jsx";   // 导师端依赖主应用的全局样式
 import { putPhoto } from "../src/photos.js";
 
-const PROF = { id: "prof", displayName: "郭老师", username: "dr.guo", role: "admin" };
+// features.todo：待办这一半是管理员按人开放的，自检页要看的是「开放之后」的样子
+const PROF = { id: "prof", displayName: "郭老师", username: "dr.guo", role: "admin",
+  features: { todo: true } };
 localStorage.setItem("mochi_auth", JSON.stringify({ token: "x", user: PROF }));
 localStorage.removeItem("mochi_seen_records");
 
@@ -52,6 +54,20 @@ window.fetch = async (url) => {
     : u.includes("/api/project-log") ? { entries: [
         { at: Date.now() - 2 * 3600e3, actor: "dr.guo", detail: "双矩法实时公里级三维重建：加入 wenqian" },
         { at: Date.now() - 3 * 86400e3, actor: "prof2", detail: "双矩法实时公里级三维重建：加入 semon；移出 yichi" },
+      ] }
+    // 管理 tab：成员那一段要能看出「谁开放了待办」，所以这里给一个人开着
+    : u.includes("/api/users") ? { users: MEMBERS.map(({ id, username, displayName, role }) => ({
+        id, username, displayName, role, features: username === "semon" ? { todo: true } : {} })) }
+    : u.includes("/api/admin/invite") ? { code: "guang-chang-2026" }
+    : u.includes("/api/admin/status") ? {
+        counts: { users: 4, projects: 5, records: 128, todos: 37, photos: 210, sessions: 6 },
+        dbBytes: 24 * 1024 * 1024, photoBytes: 380 * 1024 * 1024, push: true, inviteSet: true,
+        disk: { freeBytes: 120 * 1024 ** 3, totalBytes: 460 * 1024 ** 3 },
+        backups: [{ at: Date.now() - 7 * 3600e3, size: 22 * 1024 * 1024 }] }
+    : u.includes("/api/admin/audit") ? { entries: [
+        { at: Date.now() - 40 * 60e3, actor: "dr.guo", action: "开放待办", target: "semon" },
+        { at: Date.now() - 2 * 86400e3, actor: "dr.guo", action: "改角色", target: "wenqian",
+          detail: "student → advisor" },
       ] }
     : {};
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
@@ -153,9 +169,11 @@ const params = new URLSearchParams(location.search);
 /* ?app=1 → 渲染学生端的真实 MochiApp（种好 localStorage 再挂载） */
 if (params.get("app")) {
   // ?app=prof 用导师身份看主界面（比如同步条上那个「查看全组记录」入口）
+  // ?todo=0 看「管理员没给这个人开放待办」时的样子：那一页整个不出现
+  const FEATS = params.get("todo") === "0" ? {} : { todo: true };
   const WHO = params.get("app") === "prof"
-    ? PROF
-    : { id: "u1", displayName: "郭思蒙", username: "semon", role: "student" };
+    ? { ...PROF, features: FEATS }
+    : { id: "u1", displayName: "郭思蒙", username: "semon", role: "student", features: FEATS };
   localStorage.setItem("mochi_auth", JSON.stringify({ token: "x", user: WHO }));
   localStorage.setItem("mochi_v3", JSON.stringify({
     todos: MOCK_TODOS, notes: [], projects: data.projects, records: data.records,

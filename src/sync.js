@@ -47,6 +47,17 @@ export function getAuth() {
 }
 export function setAuth(a) {
   try { a ? localStorage.setItem(AUTH_SK, JSON.stringify(a)) : localStorage.removeItem(AUTH_SK); } catch {}
+  for (const fn of authWatchers) { try { fn(a); } catch {} }
+}
+
+/* 登录态变了要广播一声。
+ * 界面上有东西直接跟着账号走——待办这一半是管理员按人开放的，开放/收回要在
+ * 下一次同步刷回身份时立刻生效。而 auth 存在 localStorage 里、由同步面板那个
+ * 组件改，主界面读不到这次变化，只能干等自己因为别的原因重渲染。 */
+const authWatchers = new Set();
+export function onAuthChange(fn) {
+  authWatchers.add(fn);
+  return () => authWatchers.delete(fn);
 }
 
 /* ── 本地数据的归属 ──
@@ -147,6 +158,11 @@ export const decideRequest = (token, userId, approve) =>
 /** 能读全组记录的角色。admin 是 advisor 的超集。 */
 export const canReadGroup = (user) => ["advisor", "admin"].includes(user?.role);
 export const isAdmin = (user) => user?.role === "admin";
+/** 待办这一半是管理员按人开放的功能，默认关。没开放的人整页都不出现。
+ *  没登录也算没开放——权限是挂在账号上的。 */
+export const canUseTodo = (user) => user?.features?.todo === true;
+export const adminSetFeature = (token, userId, feature, on) =>
+  api("/api/admin/feature", { method: "POST", token, body: { userId, feature, on } });
 export const uploadAvatar = (token, avatar) =>
   api("/api/avatar", { method: "POST", token, body: { avatar } });
 export const updateProfile = (token, displayName) =>

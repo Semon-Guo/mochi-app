@@ -1312,7 +1312,13 @@ export default function MochiApp() {
   // 否则刚拉下来的记录会被当成本地新改动，下一轮又推回服务器。
   const applySync = useCallback((fn) => _setData(fn), []);
   const [advisorOpen, setAdvisorOpen] = useState(false);
-  const [tab, setTab] = useState("todo");
+  // 登录态进 state（而不是每次渲染读一遍 localStorage）：待办这一半的显隐跟着
+  // 它走，管理员在服务器上开放/收回之后，下一次同步刷回身份就得立刻生效。
+  const [auth, setAuthState] = useState(() => Sync.getAuth());
+  useEffect(() => Sync.onAuthChange(setAuthState), []);
+  // 待办 / 专注计时是管理员按人开放的功能，没开放的人整页都不出现。
+  const todoOn = Sync.canUseTodo(auth?.user);
+  const [tab, setTab] = useState(() => (todoOn ? "todo" : "lab"));
   const [showAdd, setShowAdd] = useState(false);
   const [addSubParent, setAddSubParent] = useState(null);
   const [editingTodo, setEditingTodo] = useState(null);
@@ -1341,6 +1347,20 @@ export default function MochiApp() {
   const todosRef = useRef(initState.data.todos);
   const activeRef = useRef(new Set(initState.activeTodoIds));
   const firedRef = useRef(new Set());
+
+  // 权限被收回时人可能正站在待办页上（管理员刚点了「收回」，下一次同步就生效）。
+  // 不主动挪走的话，屏幕上会留着一页再也回不来的待办，还开着半截表单。
+  useEffect(() => {
+    if (todoOn) return;
+    setTab(t => (t === "todo" ? "lab" : t));
+    setView(v => (v === "done" ? "main" : v));
+    setShowAdd(false); setEditingTodo(null); setAddSubParent(null);
+    setRemindFor(null); setRemindAlert(null);
+    // 正在跑的表也停掉。看不见的秒表会一直走——等哪天权限再开回来，
+    // 那个任务上就挂着「专注 72 小时」，是纯粹的脏数据。停表不删任何东西，
+    // 跟自己点一下暂停完全一样。
+    pauseAll();
+  }, [todoOn]);
 
   useEffect(() => { save(data); }, [data]);
   useEffect(() => { todosRef.current = data.todos; }, [data.todos]);
@@ -1380,14 +1400,16 @@ export default function MochiApp() {
         if (view !== "main") setView("main");
         if (tab === "todo") { setShowAdd(true); setEditingTodo(null); setAddSubParent(null); }
         else setProjForm("new");
-      } else if (e.key === "1") { setView("main"); setTab("todo"); }
-      else if (e.key === "2") { setView("main"); setTab("lab"); }
-      else if (e.key === "3") { setView("main"); setTab("cal"); }
+      } else if (/^[1-9]$/.test(e.key)) {
+        // 按屏幕上真有的页签数：没开放待办的人，「记录」就是 1
+        const k = (todoOn ? ["todo", "lab", "cal"] : ["lab", "cal"])[+e.key - 1];
+        if (k) { setView("main"); setTab(k); }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [desktop, bgAlert, viewPhoto, boardOpen, remindFor, advisorOpen, showAdd, addSubParent,
-      editingTodo, projForm, view, openProject, tab]);
+      editingTodo, projForm, view, openProject, tab, todoOn]);
 
   // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
   // backgrounded PWA, so on return we ask whether the gap was real focus or a detour.
@@ -1415,7 +1437,10 @@ export default function MochiApp() {
 
   // Reminder scheduler — polls while the app is alive, and re-checks whenever it
   // comes back to the foreground (a backgrounded PWA gets its timers frozen).
+  // 没开放待办就整个不跑：被收回权限的人本地还留着任务，不挡的话半夜照样弹
+  // 通知，而他连那一页都打不开。
   useEffect(() => {
+    if (!todoOn) return;
     const check = () => {
       const now = Date.now();
       const due = todosRef.current.filter(t =>
@@ -1442,7 +1467,7 @@ export default function MochiApp() {
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("focus", wake);
     };
-  }, []);
+  }, [todoOn]);
 
   useEffect(() => {
     if (!dragFrom) return;
@@ -1644,10 +1669,10 @@ export default function MochiApp() {
 
   // 导师的回复和点赞。作者名字要跟着一起存——对面拿不到成员名单，
   // 不存的话他只会看到一串 user id。
-  const me = Sync.getAuth()?.user;
+  const me = auth?.user;
   // 现在看得到别人的记录了，就得知道那一条是谁写的。名册是轻量接口，
-  // 只有名字和头像。token 取成字符串再进依赖，getAuth() 每次返回新对象。
-  const authTok = Sync.getAuth()?.token;
+  // 只有名字和头像。
+  const authTok = auth?.token;
   const [members, setMembers] = useState([]);
   useEffect(() => {
     if (!authTok) return;
@@ -1676,7 +1701,7 @@ export default function MochiApp() {
   // 重点节点是组里的共同日程（投稿截止、组会、答辩），只有导师能定，所有人都看得到。
   // 界面上已经不给学生编辑入口，这里再挡一道：真让他改出去，服务端会永久拒绝，
   // 而被拒的改动如果一直重试，就是每两分钟白发一次外加界面上永远的「待同步」。
-  const canEditMilestones = Sync.canReadGroup(Sync.getAuth()?.user);
+  const canEditMilestones = Sync.canReadGroup(me);
   const saveMilestone = (ms) => canEditMilestones && setData(d => {
     const list = d.milestones || [];
     return ms.id
@@ -1815,7 +1840,9 @@ export default function MochiApp() {
     }, 60);
   };
   const awayTodos = bgAlert ? [...activeIds].map(id => data.todos.find(t => t.id === id)).filter(Boolean) : [];
-  const timerUI = (
+  // 计时条和提醒浮层跟着待办一起隐去——它们是那一半功能的外露部分，
+  // 权限收回后不该还有个计时条飘在别人的记录本上面。
+  const timerUI = todoOn && (
     <>
       <RunningBar ids={[...activeIds]} todos={data.todos} onOpen={revealTodo} onPauseAll={pauseAll} />
       {bgAlert && (
@@ -1872,7 +1899,7 @@ export default function MochiApp() {
   const alertTodo = remindAlert ? data.todos.find(t => t.id === remindAlert) : null;
   const sheetTodo = remindFor ? data.todos.find(t => t.id === remindFor) : null;
   const alertImp = alertTodo ? impOf(alertTodo) : null;
-  const remindUI = (
+  const remindUI = todoOn && (
     <>
       {alertTodo && (
         <div style={{
@@ -2151,14 +2178,14 @@ export default function MochiApp() {
 
       {/* Tabs */}
       <div style={{ display:"flex",gap:6,padding:"16px var(--app-pad) 8px",alignItems:"center" }}>
-        {[["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length,"1"],
-          ["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length,"2"],
-          ["cal","日历",<Ic.Cal s={17} key="c"/>,soonCount,"3"]].map(([k,l,ic,c,key])=>(
+        {[...(todoOn ? [["todo","待办",<Ic.Todo s={18} key="t"/>,allPending.length]] : []),
+          ["lab","记录",<Ic.Note s={18} key="n"/>,data.projects.length],
+          ["cal","日历",<Ic.Cal s={17} key="c"/>,soonCount]].map(([k,l,ic,c],i)=>(
           <button key={k} onClick={()=>{setTab(k);setShowAdd(false);setEditingTodo(null);setAddSubParent(null);setProjForm(null);}}
             style={{...S.tab,...(tab===k?S.tabA:{})}}>{ic}<span>{l}</span>{c>0&&<span style={S.bdg}>{c}</span>}
-            <span className="kbd-hint">{key}</span></button>
+            <span className="kbd-hint">{i+1}</span></button>
         ))}
-        {done.length>0&&(
+        {todoOn&&done.length>0&&(
           <button onClick={()=>setView("done")} style={{...S.tab,marginLeft:"auto",gap:5,padding:"10px 14px"}}>
             <Ic.Check s={15}/><span style={{fontSize:13}}>{done.length}</span>
           </button>
@@ -2167,7 +2194,7 @@ export default function MochiApp() {
 
       <div style={{ padding:"12px var(--app-pad)" }}>
         {tab==="cal"?(
-          <Calendar records={data.records} todos={data.todos} projects={data.projects}
+          <Calendar records={data.records} todos={todoOn ? data.todos : []} projects={data.projects}
             milestones={data.milestones || []}
             onSaveMilestone={saveMilestone} onDeleteMilestone={deleteMilestone}
             onOpenProject={(pid)=>{ if(pid){ setTab("lab"); setOpenProject(pid); } }}

@@ -134,12 +134,18 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
 
   useEffect(() => { Sync.pushStatus().then(setPush).catch(() => {}); }, [auth?.token]);
 
+  // 待办是管理员按人开放的。没开放的人，服务器上不该留着他的提醒——
+  // 界面上看不到的任务半夜推一条通知过来，人只会以为 app 坏了。
+  // 传一份空的上去就是清空，重新开放后下一轮又会补回去。
+  const todoOn = Sync.canUseTodo(auth?.user);
+  const remindSrc = (d) => (todoOn ? d : { todos: [] });
+
   const togglePush = async (on) => {
     setPushMsg(""); setPushBusy(on ? "on" : "off");
     try {
       if (on) {
         await Sync.enablePush(auth.token);
-        await Sync.syncReminders(data, auth.token);   // 立刻把已有的提醒送上去
+        await Sync.syncReminders(remindSrc(data), auth.token);   // 立刻把已有的提醒送上去
         setPushMsg("已开启，到点会推送到这台设备");
       } else {
         await Sync.disablePush(auth.token);
@@ -215,7 +221,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
 
       // 开了推送才上报提醒——没开的话服务器不需要知道你要做什么、什么时候做
       if ((await Sync.pushStatus()).subscribed) {
-        await Sync.syncReminders(dataRef.current, auth.token).catch(() => {});
+        await Sync.syncReminders(remindSrc(dataRef.current), auth.token).catch(() => {});
       }
 
       // 顺带刷新身份：角色是在服务器上改的（set_role.py 或导师码），
@@ -248,7 +254,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
   useEffect(() => {
     if (!auth || !push.subscribed) return;
     const t = setTimeout(() => {
-      Sync.syncReminders(data, auth.token).catch(() => {});
+      Sync.syncReminders(remindSrc(data), auth.token).catch(() => {});
     }, 600);   // 稍等一下，避免连点几下时间选择器时每次都发请求
     return () => clearTimeout(t);
   }, [remindKey, auth?.token, push.subscribed]);
@@ -336,6 +342,9 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                 Sync.setAuth(next); setAuthState(next);
               }} />
 
+              {/* 没开放待办的人不摆这个开关：他界面上根本没有待办那一页，
+                  却在设置里看见「同步待办」，只会让人去找那一页在哪 */}
+              {todoOn && (
               <label style={{
                 display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer",
                 padding: "10px 11px", borderRadius: 12, border: `1px solid ${C.line}`,
@@ -351,6 +360,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                   </span>
                 </span>
               </label>
+              )}
               {/* 推送：app 关着也能收到提醒，代价是任务标题要上传 */}
               <div style={{ padding: "10px 11px", borderRadius: 12, border: `1px solid ${C.line}`,
                 background: "#FCFAF6", marginTop: 8 }}>

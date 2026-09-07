@@ -27,6 +27,22 @@
 真正的删除（`/api/admin/remove`）保留着，但只该用来清理误注册和测试账号，界面上
 需要两步确认并写明「记录一并消失」。
 
+### 待办按人开放
+
+待办 / 专注计时是「个人时间管理」，跟实验记录本不是一回事：组里多数人只需要记录本，
+那一半摆在最显眼的第一个页签上只是干扰。所以它**默认不出现**，由管理员在「管理 → 成员」
+里一个个开放（`users.features` 是个 JSON 列，目前只有 `todo` 一个键；以后再想按人开放
+别的东西不用再动表结构）。
+
+- **这不是安全边界。** 待办本来就只有本人拉得回（`ADVISOR_VISIBLE` 里没有它，服务端强制），
+  这个开关只决定「界面上给不给这个人显示待办这一半」。
+- **收回不动任何数据。** 任务和计时存在本人设备上，服务器这边只是不再显示；再开放回来一条不少。
+  客户端那边会跟着停掉提醒调度，并把服务器上那份推送提醒清空——看不到的任务半夜推一条通知过来，
+  人只会以为 app 坏了。
+- **管理员能改自己的。** 角色不让改自己是怕把自己锁在门外，而这个开关随时点得回来。
+- **升级老库时**：所有人一律关（这正是这个改动的本意），唯独 `admin` 先开着——他是唯一能再
+  打开的人，把他自己也关在外面只会让人以为升级把功能弄丢了。
+
 ### 谁出现在「按成员」里
 
 服务端给每个人算一个 `inGroup`：`role == "student"` 或有任何记录/项目。
@@ -98,6 +114,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | GET | `/api/leaderboard?period=week\|month\|year&offset=<0..-60>` | 积分榜，全组可见 |
 | GET | `/api/members` | 全组的名字和头像（任何登录用户）——看得到别人的记录，就得知道是谁写的 |
 | POST | `/api/admin/role` | `{userId, role}` 任命角色（仅管理员） |
+| POST | `/api/admin/feature` | `{userId, feature, on}` 按人开放功能，目前只有 `todo`（仅管理员，含自己） |
 | POST | `/api/admin/remove` | `{userId}` 移除成员及其全部数据（仅管理员） |
 | POST | `/api/admin/reset-password` | `{userId}` → `{tempPassword}`（仅管理员） |
 | POST | `/api/admin/revoke-sessions` | `{userId}` 强制登出（仅管理员） |
@@ -299,9 +316,9 @@ extendedKeyUsage 含 serverAuth。
 ### 测试
 
 ```bash
-node src/sync.test.mjs      # 同步引擎纯逻辑（54 项）
+node src/sync.test.mjs      # 同步引擎纯逻辑（61 项）
 node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（86 项）
-python3 server/test_server.py   # 服务端 API（231 项；服务器上多一项 scrypt，共 232）
+python3 server/test_server.py   # 服务端 API（244 项；服务器上多一项 scrypt，共 245）
 ```
 
 ### 推送
@@ -331,7 +348,8 @@ npm run dev
 node dev/shot.mjs "http://localhost:5173/mochi-app/dev/preview.html?view=按项目" out.png
 ```
 
-`?app=1` 看学生端，`?view=` 切页签，`?open=` 点进详情。
+`?app=1` 看学生端，`?view=` 切页签，`?open=` 点进详情，`?todo=0` 看「没给这个人开放待办」
+时学生端的样子。
 
 `migrateLab` 每次启动抹掉项目 `ownerId`/`members` 那个 bug 就是这么发现的——
 渲染出学生端那一屏，看见本该是「组级项目」标签的位置摆着删除按钮。

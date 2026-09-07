@@ -60,13 +60,14 @@ function MemberRow({ m, me, token, onDone, onNotice }) {
     try {
       const r = await fn();
       onNotice(notice ? notice(r) : "");
-      onDone();
+      onDone(r);
     } catch (e) { onNotice("✗ " + e.message); }
     finally { setBusy(""); }
   };
 
   const roleLabel = { admin: "管理员", advisor: "导师", student: "学生" }[m.role] || m.role;
   const roleColor = { admin: C.amber, advisor: C.blue, student: C.sub }[m.role] || C.sub;
+  const todoOn = !!m.features?.todo;
 
   return (
     <div style={{ padding: "10px 0", borderTop: `1px solid ${C.hair}` }}>
@@ -79,14 +80,27 @@ function MemberRow({ m, me, token, onDone, onNotice }) {
           </div>
           <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
             @{m.username} · <span style={{ color: roleColor, fontWeight: 700 }}>{roleLabel}</span>
+            {todoOn && <span style={{ color: C.green, fontWeight: 700 }}> · 待办已开放</span>}
             {m.archivedAt && <span style={{ color: C.dim }}> · 已离组</span>}
           </div>
         </div>
       </div>
 
-      {/* 自己不能改自己的角色，也不能删自己——降错了就只能 SSH 上服务器救 */}
-      {!self && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, paddingLeft: 39 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, paddingLeft: 39 }}>
+        {/* 待办的开放权限。这一个连自己也能点：角色不让改自己是怕把自己锁在门外，
+            而这个开关随时能再点回来——管理员要给自己开待办，总不能去求另一个管理员。 */}
+        <button disabled={!!busy}
+          onClick={() => run("todo", () => Sync.adminSetFeature(token, m.id, "todo", !todoOn),
+            () => (todoOn
+              ? `✓ 已收回 ${m.displayName} 的待办。他设备上的任务和计时一条没动，再开放回来都还在`
+              : `✓ ${m.displayName} 现在能看到「待办」页了`))}
+          style={{ ...ghost, opacity: busy ? .5 : 1 }}>
+          {todoOn ? "收回待办" : "开放待办"}
+        </button>
+
+        {/* 自己不能改自己的角色，也不能删自己——降错了就只能 SSH 上服务器救 */}
+        {!self && (
+          <>
           {["student", "advisor", "admin"].filter((r) => r !== m.role).map((r) => (
             <button key={r} disabled={!!busy}
               onClick={() => run("role" + r, () => Sync.adminSetRole(token, m.id, r),
@@ -127,8 +141,9 @@ function MemberRow({ m, me, token, onDone, onNotice }) {
               { border: `1px solid ${confirm === "remove" ? C.red : C.line}`, opacity: busy ? .5 : 1 }) }}>
             {confirm === "remove" ? "确认彻底删除？记录一并消失，不可恢复" : "彻底删除"}
           </button>
-        </div>
-      )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -145,7 +160,16 @@ export function AdminPanel({ auth, onChanged }) {
   const [notice, setNotice] = useState("");
   const [err, setErr] = useState("");
   const [nonce, setNonce] = useState(0);
-  const reload = () => { setNonce((n) => n + 1); onChanged?.(); };
+  // 管理员给自己开/收待办时，本机存的那份身份也要立刻跟上——否则界面上
+  // 要等下一次同步（最多两分钟）刷回 /api/me 才认，看着像没生效。
+  const reload = (r) => {
+    if (r?.user?.id === auth.user.id) {
+      const cur = Sync.getAuth();
+      if (cur) Sync.setAuth({ ...cur, user: r.user });
+    }
+    setNonce((n) => n + 1);
+    onChanged?.();
+  };
 
   useEffect(() => {
     Promise.allSettled([
@@ -212,8 +236,9 @@ export function AdminPanel({ auth, onChanged }) {
       </Panel>
 
       <Panel title={`成员 · ${members.length}`}
-        hint="「标记离组」保留全部记录，只是把人从导师端主视图挪到「已离组」里；
-             「彻底删除」才会连数据一起清，只用于误注册。自己的角色改不了、也删不掉自己。">
+        hint="「待办」这一半默认不出现，要在这里一个个开放（自己的也能开）；收回只是不再显示，
+             他设备上的任务和计时一条不动。「标记离组」保留全部记录，只是把人从导师端主视图挪到
+             「已离组」里；「彻底删除」才会连数据一起清，只用于误注册。自己的角色改不了、也删不掉自己。">
         {members.map((m) => (
           <MemberRow key={m.id} m={m} me={auth.user} token={token}
             onDone={reload} onNotice={setNotice} />
