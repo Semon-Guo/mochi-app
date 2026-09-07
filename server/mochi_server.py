@@ -2182,278 +2182,487 @@ CERT_PORT = int(os.environ.get("MOCHI_CERT_PORT") or 3001)
 
 GUIDE_PAGE = """<!doctype html><html lang=zh-CN><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Mochi 使用手册</title>
+<title>Mochi 使用向导</title>
 <style>
-:root{--ink:#2C2C2C;--sub:#8C8478;--dim:#B0A99B;--line:#EDE8DE;--bg:#FDFBF7;--panel:#FFFDF9}
+:root{--ink:#2C2C2C;--sub:#8C8478;--dim:#B0A99B;--line:#EDE8DE;--hair:#F4F0E7;
+--bg:#FDFBF7;--panel:#FFFDF9;--amber:#E8A838;--green:#5A9E4B;--blue:#5B7FC7}
 *{box-sizing:border-box}
-body{font:16px/1.75 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
-max-width:720px;margin:0 auto;padding:24px 20px 80px;color:var(--ink);background:var(--bg)}
-h1{font-size:26px;margin:0 0 6px;letter-spacing:-.5px}
-h2{font-size:20px;margin:44px 0 10px;padding-top:18px;border-top:1px solid var(--line)}
-h3{font-size:16px;margin:22px 0 6px}
+body{font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+max-width:560px;margin:0 auto;padding:20px 18px 72px;color:var(--ink);background:var(--bg)}
+h1{font-size:23px;margin:0 0 4px;letter-spacing:-.4px}
+h2{font-size:19px;margin:0 0 14px;letter-spacing:-.3px}
+h3{font-size:15px;margin:26px 0 8px}
 p,li{font-size:15px}
-.sub{color:var(--dim);font-size:14px;margin-bottom:8px}
-a{color:#5B7FC7}
-ol,ul{padding-left:22px}li{margin:6px 0}
-code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13.5px;
+ol,ul{padding-left:20px;margin:10px 0}li{margin:7px 0}
+code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13px;
 font-family:"SF Mono",Menlo,monospace;word-break:break-all}
-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
-th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--sub);font-size:12.5px;font-weight:700;background:var(--panel)}
+b{font-weight:700}
+a{color:var(--blue)}
+
+/* 步骤条 */
+.rail{display:flex;gap:6px;margin:0 0 22px}
+.rail div{flex:1;height:3px;border-radius:2px;background:var(--line);transition:background .25s}
+.rail div.on{background:var(--ink)}
+.step-no{font-size:11.5px;font-weight:700;color:var(--dim);letter-spacing:1px;margin-bottom:6px}
+
+/* 卡片 / 按钮 */
+.pick{display:block;width:100%;text-align:left;background:#FFF;border:1.5px solid var(--line);
+border-radius:15px;padding:15px 16px;margin:9px 0;cursor:pointer;font:inherit;color:inherit}
+.pick:active{border-color:var(--ink)}
+.pick b{display:block;font-size:16px}
+.pick span{display:block;font-size:12.5px;color:var(--sub);margin-top:2px}
+.btn{display:block;width:100%;text-align:center;background:var(--ink);color:#fff;
+text-decoration:none;padding:14px;border-radius:14px;font-weight:600;font-size:15px;
+margin:12px 0;border:none;cursor:pointer;font-family:inherit}
+.btn.ghost{background:#FFF;color:var(--ink);border:1.5px solid var(--line)}
+.nav{display:flex;gap:10px;margin-top:26px}
+.nav .btn{margin:0}
+.link{background:none;border:none;color:var(--sub);font:inherit;font-size:13px;
+cursor:pointer;padding:8px 0;text-decoration:underline}
+
 .note{background:var(--panel);border:1px solid var(--line);border-radius:12px;
-padding:12px 14px;margin:14px 0;font-size:14px}
-.warn{background:#FFF6E5;border:1px solid #E8A838;border-radius:12px;
-padding:12px 14px;margin:14px 0;font-size:14px}
-.key{background:#EEF7EC;border:1px solid #5A9E4B;border-radius:12px;
-padding:12px 14px;margin:14px 0;font-size:14px}
-.toc{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:20px 0}
-.toc ol{margin:0;padding-left:20px}.toc li{margin:3px 0;font-size:14.5px}
-.role{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:5px;
-vertical-align:middle;margin-left:6px}
-.stu{background:#EEF2FB;color:#4A6FB5}.adv{background:#FFF6E5;color:#A9791A}
-.back{display:inline-block;margin-bottom:18px;font-size:14px;color:var(--sub);text-decoration:none}
-hr{border:none;border-top:1px solid var(--line);margin:28px 0}
+padding:11px 13px;margin:13px 0;font-size:13.5px;line-height:1.65}
+.warn{background:#FFF6E5;border:1px solid var(--amber);border-radius:12px;
+padding:11px 13px;margin:13px 0;font-size:13.5px;line-height:1.65}
+.key{background:#EEF7EC;border:1px solid var(--green);border-radius:12px;
+padding:11px 13px;margin:13px 0;font-size:13.5px;line-height:1.65}
+
+/* 界面图示 */
+.shot{background:var(--bg);border:1px solid var(--line);border-radius:16px;
+padding:13px;margin:14px 0 10px}
+.row{display:flex;align-items:center;gap:7px;margin:7px 0}
+.pin{width:19px;height:19px;border-radius:50%;background:var(--ink);color:#fff;
+font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;
+flex-shrink:0;font-family:"SF Mono",Menlo,monospace}
+.tab{display:inline-flex;align-items:center;gap:4px;background:#F0EDE6;color:#888;
+border-radius:20px;padding:6px 11px;font-size:12.5px;font-weight:600}
+.tab.on{background:var(--ink);color:#fff}
+.badge{background:var(--amber);color:#fff;font-size:10px;font-weight:700;
+border-radius:9px;padding:0 6px;margin-left:2px}
+.card{background:#FFF;border:1px solid var(--line);border-radius:11px;padding:10px 11px;
+font-size:13px;flex:1;min-width:0}
+.card .t{font-weight:700;font-size:13.5px}
+.card .s{color:var(--dim);font-size:11px;margin-top:3px}
+.chip{display:inline-block;border:1px solid var(--line);background:#FFF;border-radius:20px;
+padding:4px 10px;font-size:12px;font-weight:600;color:var(--sub);margin-right:5px}
+.chip.dark{background:var(--ink);color:#fff;border-color:var(--ink)}
+.fab{width:34px;height:34px;border-radius:50%;background:var(--ink);color:#fff;
+display:flex;align-items:center;justify-content:center;font-size:19px;flex-shrink:0}
+.legend{margin:0;padding:0;list-style:none}
+.legend li{display:flex;gap:9px;margin:9px 0;font-size:13.5px;line-height:1.6;align-items:flex-start}
+.legend .pin{margin-top:2px}
+.grid7{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.day{aspect-ratio:1/1;border-radius:6px;background:#FFF;box-shadow:inset 0 0 0 1px var(--hair);
+display:flex;align-items:center;justify-content:center;font-size:10px;
+color:var(--sub);font-family:"SF Mono",Menlo,monospace;position:relative}
+.day.hot{background:rgba(90,158,75,.28)}
+.day.today{background:var(--ink);color:#fff}
+.day i{position:absolute;top:0;left:0;right:0;height:3px;border-radius:6px 6px 0 0;background:#C02556}
+
+/* 折叠的深入内容 */
+details{border:1px solid var(--line);border-radius:13px;background:var(--panel);
+padding:0 14px;margin:9px 0}
+details[open]{padding-bottom:12px}
+summary{cursor:pointer;padding:13px 0;font-weight:700;font-size:14.5px;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"＋";float:right;color:var(--dim);font-weight:400}
+details[open] summary::after{content:"−"}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--sub);font-size:12px;font-weight:700}
+.hide{display:none}
 </style>
 
-<a class=back href="/">&lsaquo; 回到证书安装页</a>
-<h1>Mochi 使用手册</h1>
-<div class=sub>课题组的实验记录本 · 待办与专注 · 积分榜</div>
+<div class=rail><div id=r1></div><div id=r2></div><div id=r3></div><div id=r4></div></div>
 
-<div class=toc><ol>
-<li><a href="#start">第一次使用</a></li>
-<li><a href="#todo">待办与专注计时</a>（要管理员开放）</li>
-<li><a href="#lab">实验记录本</a></li>
-<li><a href="#see">谁能看到什么</a>（重要）</li>
-<li><a href="#cal">日历与重点节点</a></li>
-<li><a href="#score">积分榜与奖励</a></li>
-<li><a href="#adv">导师端</a></li>
-<li><a href="#push">推送通知</a></li>
-<li><a href="#faq">遇到问题</a></li>
-</ol></div>
+<!-- ═══ 第 1 步：选设备 ═══ -->
+<section id=s1>
+  <div class=step-no>第 1 步 / 共 4 步</div>
+  <h1>Mochi 使用向导</h1>
+  <p style="color:var(--sub);font-size:14px;margin:0 0 18px">
+    课题组的实验记录本。跟着走完四步，大概 5 分钟。</p>
+  <h2>你现在用的是什么设备？</h2>
+  <button class=pick onclick="pickDev('ios')">
+    <b>📱 iPhone / iPad</b><span>用 Safari 打开这一页</span></button>
+  <button class=pick onclick="pickDev('android')">
+    <b>🤖 安卓手机 / 平板</b><span>用 Chrome 打开这一页</span></button>
+  <button class=pick onclick="pickDev('mac')">
+    <b>💻 Mac</b><span>Safari 或 Chrome 都行</span></button>
+  <button class=pick onclick="pickDev('win')">
+    <b>🖥 Windows</b><span>Chrome 或 Edge</span></button>
+</section>
 
-<h2 id=start>1. 第一次使用</h2>
+<!-- ═══ 第 2 步：装 app ═══ -->
+<section id=s2 class=hide>
+  <div class=step-no>第 2 步 / 共 4 步</div>
+  <h2>把 Mochi 装到设备上</h2>
 
-<h3>装根证书</h3>
-<p>同步服务跑在实验室内网，走的是自签证书的 HTTPS。<b>每台设备装一次</b>，装完才能同步。
-步骤见 <a href="/">证书安装页</a>——iPhone 上最容易漏掉「证书信任设置」那一步，注意看。</p>
+  <div class=dev-ios>
+    <p>Mochi 是网页 app，不用去应用商店。</p>
+    <ol>
+      <li><b>用 Safari</b> 打开 <code>semon-guo.github.io/mochi-app/</code></li>
+      <li>点底部中间的<b>分享</b>按钮（方框向上箭头）</li>
+      <li>往下翻，选<b>「添加到主屏幕」</b> → 添加</li>
+    </ol>
+    <div class=warn><b>这一步不能省。</b>iOS 只给「添加到主屏幕」的 app 推送权限——
+    从 Safari 标签页里打开的话，导师给你点赞、待办到点，都不会有通知。</div>
+  </div>
 
-<h3>打开 app 并装到主屏幕</h3>
-<p>浏览器打开 <code>https://semon-guo.github.io/mochi-app/</code>。</p>
-<ul>
-<li><b>iPhone：</b>用 Safari 打开 → 分享按钮 → 「添加到主屏幕」。
-<b>不加到主屏幕就收不到推送通知</b>，这是 iOS 的硬性限制，不是 app 的问题。</li>
-<li><b>安卓 / 电脑：</b>地址栏会有安装图标，装不装都能用。</li>
-</ul>
+  <div class="dev-android hide">
+    <ol>
+      <li><b>用 Chrome</b> 打开 <code>semon-guo.github.io/mochi-app/</code></li>
+      <li>地址栏右侧或右上角菜单里会出现<b>「安装应用」/「添加到主屏幕」</b>，点它</li>
+    </ol>
+    <div class=note>不装也能用，装了之后是独立图标，不占浏览器标签页。</div>
+  </div>
 
-<h3>注册</h3>
-<p>进 app → 「记录」页 → 点最上面那条同步条展开 → 注册。需要<b>邀请码</b>，问组里要。</p>
-<div class=warn><b>注册后一律是学生身份。</b>导师权限只能由管理员在服务器上授予——
-邀请码万一外泄，拿到的人也拿不到全组记录。</div>
+  <div class="dev-mac dev-win hide">
+    <ol>
+      <li>浏览器打开 <code>semon-guo.github.io/mochi-app/</code></li>
+      <li>想要独立窗口的话：Chrome 地址栏右侧的<b>安装图标</b>，或菜单 →「安装 Mochi」</li>
+      <li>不装也完全能用，收藏这个网址就行</li>
+    </ol>
+  </div>
 
-<h3>登录之后</h3>
-<p>同步是自动的：打开 app 同步一次，之后每 2 分钟一次，切回前台也补一次。
-同步条上会显示「已同步 · 几分钟前」或「N 条待同步」。</p>
-<div class=note>换账号登录会<b>清空本机数据</b>（上一个人的记录不会留在你屏幕上，
-也不会被当成你的推上去）。这是有意的。</div>
+  <div class=nav>
+    <button class="btn ghost" onclick="go(1)">上一步</button>
+    <button class=btn onclick="go(3)">装好了</button>
+  </div>
+</section>
 
-<h2 id=todo>2. 待办与专注计时<span class="role adv">要管理员开放</span></h2>
+<!-- ═══ 第 3 步：装证书 ═══ -->
+<section id=s3 class=hide>
+  <div class=step-no>第 3 步 / 共 4 步</div>
+  <h2>装根证书</h2>
+  <p>同步服务在实验室内网，用的是自签证书。<b>这台设备装一次</b>，装完才能跟组里同步。</p>
 
-<div class=key><b>这一半默认不出现。</b>没开放的人，界面上只有「记录」和「日历」两个页签，
-这不是出了问题。要用的话跟管理员说一声，他在导师端「管理 → 成员」里点一下「开放待办」，
-你下一轮同步（最多 2 分钟，或退出重登）就能看到「待办」页了。
-<br><br>组里多数人只需要实验记录本，待办和专注计时是给需要的人用的，摆在所有人最显眼的第一个
-页签上只是干扰。<b>收回也不会删任何东西</b>——任务和计时本来就存在你自己的设备上，
-再开放回来一条不少。</div>
+  <div class=key><b>这张证书被技术手段锁死了。</b>它带 Name Constraints 扩展，
+  签发范围限死在 <code>mochi.invalid</code> 这一个永不存在的域名下——
+  即使私钥泄露，拿到的人也签不出网银、邮箱或任何真实网站的证书，你的系统会直接拒绝。
+  私钥只在管理员本人电脑里，不在服务器上。</div>
 
-<h3>建任务</h3>
-<p>「待办」页右下角 <b>+</b>。三档重要度：<b>主线 / 支线 / 休闲</b>，列表按这个排序。
-可以给任务加子任务。</p>
+  <div class=dev-ios>
+    <a class=btn href="/mochi-ca.mobileconfig">📱 下载描述文件</a>
+    <ol>
+      <li>点上面的按钮，弹出「已下载描述文件」</li>
+      <li>打开<b>设置</b>，最上方会出现「已下载描述文件」，点进去 → <b>安装</b></li>
+      <li><b>关键一步：</b>设置 → 通用 → 关于本机 → 拉到最底 →
+      <b>证书信任设置</b> → 打开「Mochi Lab Root CA」的开关</li>
+    </ol>
+    <div class=warn><b>第 3 步不能省。</b>只安装、不打开信任开关，同步依然连不上——
+    绝大多数人卡在这里。</div>
+  </div>
 
-<h3>专注计时</h3>
-<p>点任务上的 ▶ 开始计时。<b>可以同时计好几个</b>（跑程序的同时读文献）。
-计时会记下完整的 timeline：几点开始、暂停过几次、总共多久。</p>
-<div class=note>app 退到后台时计时不会中断——重新打开会把这段时间补回来。
-但如果离开太久，会问你一句「这段时间真的在做吗」，避免忘记停表把数据搞脏。</div>
+  <div class="dev-mac hide">
+    <a class=btn href="/ca.crt">💻 下载 ca.crt</a>
+    <ol>
+      <li>双击下载的 <code>ca.crt</code>，钥匙串访问会打开并把它加到「登录」</li>
+      <li>在钥匙串里找到「Mochi Lab Root CA」，双击打开</li>
+      <li>展开<b>「信任」</b>→ 把「使用此证书时」改成<b>始终信任</b> → 关窗口，输密码确认</li>
+    </ol>
+  </div>
 
-<h3>提醒</h3>
-<p>任务上可以设提醒时间。开了推送的话，app 关着也会响（见第 8 节）。</p>
+  <div class="dev-android hide">
+    <a class=btn href="/ca.crt">🤖 下载 ca.crt</a>
+    <ol>
+      <li>点上面的按钮下载</li>
+      <li>设置 → 搜索<b>「证书」</b>→ 安装证书 → <b>CA 证书</b>（不同厂商路径不一样，
+      小米/华为一般在「安全」或「更多安全设置」里）</li>
+      <li>选中刚下载的 <code>mochi-ca.crt</code>，确认安装</li>
+    </ol>
+    <div class=note>安卓各家改得比较多，路径对不上就搜「安装证书」。
+    实在找不到就问管理员。</div>
+  </div>
 
-<h3>完成记录</h3>
-<p>顶部那个 ✓ 按钮进「完成记录」，可以切「周视图」——把每天的专注时段画在时间网格上，
-一眼看出哪几天在干活。</p>
+  <div class="dev-win hide">
+    <a class=btn href="/ca.crt">🖥 下载 ca.crt</a>
+    <ol>
+      <li>双击下载的 <code>mochi-ca.crt</code> → <b>安装证书</b></li>
+      <li>存储位置选<b>「当前用户」</b>→ 下一步</li>
+      <li>选<b>「将所有证书都放入下列存储」</b>→ 浏览 →
+      <b>「受信任的根证书颁发机构」</b>→ 确定 → 完成</li>
+      <li>会弹一个安全警告，确认「是」</li>
+    </ol>
+  </div>
 
-<div class=key><b>待办、计时、timeline 只有你自己看得到。</b>
-导师和同学都看不到，这是服务端强制的，不是靠界面藏起来。
-同步待办只是为了你自己多设备互通，可以在同步面板里关掉。</div>
+  <div class=note>装完之后回 app，在「记录」页最上面那条同步条里<b>注册</b>——
+  需要邀请码，问组里要。注册后一律是学生身份，导师权限只能由管理员在服务器上授予。</div>
 
-<h2 id=lab>3. 实验记录本</h2>
+  <div class=nav>
+    <button class="btn ghost" onclick="go(2)">上一步</button>
+    <button class=btn onclick="go(4)">装好了，看怎么用</button>
+  </div>
+  <div style="text-align:center">
+    <button class=link onclick="go(4)">我只想先用待办，暂时不同步 →</button>
+  </div>
+</section>
 
-<h3>两层结构</h3>
-<p><b>项目 → 记录</b>。项目是一个课题（几个月到一年），记录是一次上手的流水账。</p>
+<!-- ═══ 第 4 步：界面速览 ═══ -->
+<section id=s4 class=hide>
+  <div class=step-no>第 4 步 / 共 4 步</div>
+  <h2>界面速览</h2>
+  <p style="color:var(--sub);font-size:14px">下面按你打开 app 后看到的顺序讲。
+  每张图对应一个真实界面，编号是要点。</p>
 
-<h3>记一条</h3>
-<p>进项目 → 最上面那张卡片：选天气 → 写正文 → <b>📷 照片</b> / <b>📎 数据</b> → 「记下」。</p>
+  <h3>顶上的页签</h3>
+  <div class=shot>
+    <div class=row>
+      <span class=pin>1</span>
+      <span class="tab on">📄 记录<span class=badge>4</span></span>
+      <span class=tab>📅 日历</span>
+    </div>
+  </div>
+  <ul class=legend>
+    <li><span class=pin>1</span><div><b>记录</b>＝实验记录本，你主要待的地方；
+    <b>日历</b>＝把记录、节点、到期的事摊在一张图上。橙色数字是项目数。</div></li>
+  </ul>
+  <div class=note>还有一个 <b>📋 待办</b> 页签（个人时间管理 + 专注计时），
+  <b>默认不显示</b>，需要管理员单独给你开放——组里多数人只用记录本，
+  那一半摆在最显眼的位置只是干扰。开放之后见下面「如果你被开放了待办」。</div>
 
-<div class=warn><b>一天最多记 3 条。</b>右上角有 <code>2/3</code> 的计数，记满了「记下」会变灰。
-这是为了防止把一条拆成十条刷积分。一天要记的事多，就写在同一条里。</div>
+  <h3>记录页</h3>
+  <div class=shot>
+    <div class=row><span class=pin>1</span>
+      <div class=card><div class=t style="font-weight:600;color:var(--sub)">● 已同步 · 刚刚</div></div></div>
+    <div class=row><span class=pin>2</span>
+      <div class=card><div class=t>🏆 积分榜　　　　今天 1/3 ›</div></div></div>
+    <div class=row><span class=pin>3</span>
+      <div class=card><div class=t>双矩法实时公里级三维重建</div>
+        <div class=s>12 条记录 · 最后 今天</div></div></div>
+    <div class=row style="margin-top:12px"><span class=pin>4</span>
+      <div style="font-size:11px;font-weight:700;color:var(--dim);letter-spacing:.8px">组里的课题 · 2</div></div>
+    <div class=row><span></span>
+      <div class=card><div class=t>湍流退化建模</div>
+        <div class=s>张亦弛 · 3 条记录</div></div></div>
+  </div>
+  <ul class=legend>
+    <li><span class=pin>1</span><div>同步状态。点开可以登录/注册、开推送、退出。</div></li>
+    <li><span class=pin>2</span><div>积分榜入口。右边 <code>1/3</code> 是今天已经记了几条
+    —— <b>一天最多 3 条</b>。</div></li>
+    <li><span class=pin>3</span><div><b>你自己的课题</b>（含被导师拉进名单的组级项目）。点进去记录。</div></li>
+    <li><span class=pin>4</span><div><b>组里其他人的课题</b>。可以看、可以点赞，
+    但不能往人家本子里写。</div></li>
+  </ul>
 
-<h3>照片和数据文件是两回事</h3>
-<table>
-<tr><th></th><th>📷 照片</th><th>📎 数据文件</th></tr>
-<tr><td>用途</td><td>光路、示数、现象</td><td>原始测量结果：csv / mat / npy / tif / zip</td></tr>
-<tr><td>处理</td><td>自动压到长边 1600</td><td>原样不动</td></tr>
-<tr><td>存在哪</td><td>你每台设备各一份</td><td>只在服务器上一份</td></tr>
-<tr><td>大小</td><td>几百 KB</td><td>单个最大 512 MB</td></tr>
-<tr><td>要联网吗</td><td>不用，回头自动传</td><td><b>要</b>，选中就开始传</td></tr>
-</table>
-<p>数据文件传的时候有进度条，断了能<b>断点续传</b>，不用从头再来。
-别人（有权限看这条记录的人）点文件名就能下载。</p>
-<div class=note>数据文件必须在线传，是有意的取舍：几百 MB 的东西攒在本地「回头再传」，
-最后只会变成「以为传上去了其实没有」。</div>
+  <h3>项目里面：记一条</h3>
+  <div class=shot>
+    <div class=row><span class=pin>1</span>
+      <div class=card><div class=t>9月6日 周日　　　　　　1/3</div>
+        <div class=s style="margin-top:6px">☀️ 晴　⛅ 多云　☁️ 阴</div>
+        <div class=s style="margin-top:6px;color:var(--dim)">今天做了什么…</div>
+        <div style="margin-top:8px">
+          <span class=chip>📷 照片</span><span class=chip>📎 数据</span><span class="chip dark">记下</span>
+        </div></div></div>
+    <div class=row style="margin-top:10px"><span class=pin>2</span>
+      <div class=card><div class=s>9月5日 18:27 ☀️ 晴</div>
+        <div class=t style="font-weight:400;margin-top:3px">第三轮扫描，NA 0.42，PSNR 28.3</div>
+        <div style="margin-top:7px"><span class=chip>★ 赞 1</span><span class=chip>💬 回复 2</span></div></div></div>
+  </div>
+  <ul class=legend>
+    <li><span class=pin>1</span><div>选天气 → 写正文 → 加附件 → <b>记下</b>。
+    右上角 <code>1/3</code> 是今天的额度，记满了「记下」会变灰。</div></li>
+    <li><span class=pin>2</span><div>记下的内容<b>只能追加不能推翻</b>，但正文可以改、
+    附件可以后补——分析常常是隔天才跑完的。
+    导师的<b>赞和点评</b>会出现在这里。</div></li>
+  </ul>
+  <div class=note><b>📷 照片</b>会自动压缩，每台设备各存一份，离线也能加，回头自动传。<br>
+  <b>📎 数据</b>是原始文件（csv / mat / npy / tif），原样不动，只在服务器上存一份，
+  单个最大 512 MB，<b>要联网才能传</b>，断了能续。</div>
 
-<h3>改和删</h3>
-<p>点记录右上角的铅笔可以改正文、天气，也可以<b>补挂数据文件</b>——
-分析常常是隔天才跑完的。别人的记录你改不了。</p>
+  <h3>日历页</h3>
+  <div class=shot>
+    <div class=row><span class=pin>1</span>
+      <div class=card style="border-left:3px solid #C02556">
+        <div class=s>⏳ 截止 · 9月10日 周四</div>
+        <div class=t>Optica 投稿截止</div>
+        <div class=s style="font-size:15px;font-weight:700;color:#C02556">还有 4 天</div></div></div>
+    <div class=row style="align-items:flex-start;margin-top:10px"><span class=pin>2</span>
+      <div style="flex:1">
+        <div class=grid7>
+          <div class=day>1</div><div class=day>2</div><div class="day hot">3</div>
+          <div class="day hot">4</div><div class=day><i></i>5</div>
+          <div class="day today">6</div><div class=day>7</div>
+        </div></div></div>
+  </div>
+  <ul class=legend>
+    <li><span class=pin>1</span><div><b>重点节点</b>的倒计时：投稿截止、组会、答辩。
+    <b>只有导师能设，但全组都看得到。</b></div></li>
+    <li><span class=pin>2</span><div>格子里的信号：<b>圆点</b>＝那天记了几条（按项目着色）；
+    <b>顶上的色条</b>＝那天有重点节点。点任意一天，下面列出那天的全部内容。
+    <br><span style="color:var(--sub)">开放了待办的人还会多两样：
+    <b>背景越绿</b>＝那天专注越久，<b>右上角小黄点</b>＝那天有待办到期。</span></div></li>
+  </ul>
 
-<h2 id=see>4. 谁能看到什么</h2>
-<p>这一节值得看完，它决定了你写的东西谁看得见。</p>
+  <h3>积分榜</h3>
+  <div class=shot>
+    <div class=row><span class=pin>1</span>
+      <div class=card style="background:var(--ink);color:#fff;border-color:var(--ink)">
+        <div class=t>① 我　　　　　　　　18 分</div>
+        <div class=s style="color:rgba(255,255,255,.6)">记录 3 · 导师赞 3</div></div></div>
+    <div class=row><span class=pin>2</span>
+      <div class=card><div class=t>② 李文倩　　　　　　13 分</div>
+        <div class=s>🎁 免一周值日</div></div></div>
+  </div>
+  <ul class=legend>
+    <li><span class=pin>1</span><div>你自己钉在最上面。分数＝<b>记录 1 分</b>（每天最多 3 条）
+    ＋ <b>导师点赞 5 分</b>。</div></li>
+    <li><span class=pin>2</span><div>周 / 月 / 年三个榜，<b>‹ ›</b> 能翻到上一期看结算结果。
+    奖励见下面「积分和奖励」。</div></li>
+  </ul>
 
-<table>
-<tr><th>东西</th><th>谁看得到</th></tr>
-<tr><td>待办 / 专注计时 / timeline</td><td><b>只有你自己</b>（服务端强制）。
-另外这一整个功能要管理员按人开放，见<a href="#todo">第 2 节</a></td></tr>
-<tr><td>你的个人课题和里面的记录</td><td><b>全组</b>——组里互相看得到彼此在做什么</td></tr>
-<tr><td>导师建的项目</td><td><b>只有名单里的人</b> + 导师</td></tr>
-<tr><td>被导师加了成员名单的项目</td><td>同上，只给名单内</td></tr>
-<tr><td>记录里的照片和数据文件</td><td>跟着它所属的项目走</td></tr>
-<tr><td>导师给你的点赞和点评</td><td>你 + 导师们</td></tr>
-<tr><td>日历上的重点节点</td><td>全组</td></tr>
-<tr><td>积分榜</td><td>全组</td></tr>
-</table>
+  <h3>再深入一点</h3>
+  <p style="color:var(--sub);font-size:13.5px;margin-top:-2px">下面这些用到了再看，不着急。</p>
 
-<div class=note>「记录」页分成两段：上面是<b>你自己的课题</b>（以及你被拉进名单的组级项目），
-下面「组里的课题」是同学的——可以看、可以点赞，但不能往人家本子里记。</div>
+  <details><summary>如果你被开放了「待办」</summary>
+    <p style="margin-top:6px">页签栏会多出一个 <b>📋 待办</b>。这一半是个人时间管理，
+    跟实验记录本是两回事。</p>
+    <div class=shot>
+      <div class=row><span class=pin>1</span>
+        <div class=card><div class=t>▶ 跑 FPM 重建</div>
+          <div class=s>主线 · 预期 60m</div></div></div>
+      <div class=row><span class=pin>2</span>
+        <div class=card style="opacity:.6"><div class=t>⏸ 读 Zheng 2013　12:30</div>
+          <div class=s>休闲 · 已计时 45m</div></div></div>
+      <div class=row style="justify-content:flex-end">
+        <span class=pin>3</span><div class=fab>＋</div></div>
+    </div>
+    <ul class=legend>
+      <li><span class=pin>1</span><div>点 <b>▶</b> 开始专注计时。<b>可以同时计好几个</b>——
+      跑程序的同时读文献。退到后台也不会断。</div></li>
+      <li><span class=pin>2</span><div>任务上能设<b>提醒时间</b>，到点会响
+      （开了推送的话 app 关着也响）。</div></li>
+      <li><span class=pin>3</span><div>右下角加号新建任务。三档重要度：<b>主线 / 支线 / 休闲</b>。
+      顶上还会多一个 ✓ 入口，看完成记录和每周的专注时段。</div></li>
+    </ul>
+    <div class=key><b>待办、计时、timeline 只有你自己看得到。</b>
+    导师和同学都看不到——这是服务端强制的，跟开不开放这个页签无关。</div>
+    <p style="font-size:13.5px;color:var(--sub)">收回开放不会删任何数据：
+    任务和计时存在你自己设备上，再开放回来一条不少。</p>
+  </details>
 
-<div class=key><b>点赞是公开的鼓励。</b>任何人都可以给看得到的记录点赞。
-只有<b>导师</b>点的赞才计积分（见第 6 节）。</div>
+  <details><summary>谁能看到什么</summary>
+    <table>
+      <tr><th>东西</th><th>谁看得到</th></tr>
+      <tr><td>待办 / 计时 / timeline</td><td><b>只有你自己</b>（服务端强制）</td></tr>
+      <tr><td>你的个人课题和记录</td><td><b>全组</b>——含照片和数据文件</td></tr>
+      <tr><td>导师建的项目</td><td>只有名单里的人 + 导师</td></tr>
+      <tr><td>被导师加了名单的项目</td><td>同上</td></tr>
+      <tr><td>导师给你的赞和点评</td><td>你 + 导师们</td></tr>
+      <tr><td>重点节点 / 积分榜</td><td>全组</td></tr>
+    </table>
+    <div class=warn>写记录时记着这一条：<b>你的个人课题是全组可见的</b>，
+    照片和数据文件也一样。不想让人看到的，别放进来。</div>
+  </details>
 
-<h2 id=cal>5. 日历与重点节点</h2>
-<p>「日历」页把两半信息合到一张图上——一天里到底发生了什么，一眼看全。</p>
+  <details><summary>积分和奖励</summary>
+    <table>
+      <tr><th>行为</th><th>分数</th></tr>
+      <tr><td>写一条实验记录</td><td><b>1 分</b>（每天最多 3 条）</td></tr>
+      <tr><td>被<b>导师</b>点赞</td><td><b>5 分</b></td></tr>
+      <tr><td>导师的点评</td><td>0 分</td></tr>
+      <tr><td>同学之间的点赞</td><td>0 分</td></tr>
+    </table>
+    <p style="font-size:13.5px;color:var(--sub)">点评不计分是刻意的：那是给你的反馈，
+    不该变成筹码。同学互赞不计分，否则互刷就是几分钟的事。</p>
+    <table>
+      <tr><th>榜单</th><th>奖励</th></tr>
+      <tr><td>周榜第 1</td><td>1 天事假额度 + 免一周值日</td></tr>
+      <tr><td>周榜前 3</td><td>免一周值日</td></tr>
+      <tr><td>月榜 1 / 2 / 3</td><td>2 天 / 1 天 / 0.5 天事假</td></tr>
+      <tr><td>年榜</td><td>按积分占比分配年终激励</td></tr>
+    </table>
+  </details>
 
-<h3>月视图怎么读</h3>
-<ul>
-<li><b>格子背景越绿</b> = 那天专注的时间越长</li>
-<li><b>下面的圆点</b> = 那天记了几条实验记录，颜色按项目分</li>
-<li><b>顶边的色条</b> = 那天有重点节点</li>
-<li><b>右上角小黄点</b> = 那天有待办到期</li>
-</ul>
-<p>点任意一天，下面会列出那天的全部内容：节点、每条记录（点进去跳到项目）、
-专注时长、完成项数、到期的待办。</p>
+  <details><summary>打开推送通知</summary>
+    <p>同步面板里打开「到点推送通知」。会推：</p>
+    <ul>
+      <li><b>导师给你的记录点赞或写了点评</b></li>
+      <li>你设的待办提醒到点了（需要开放了待办）</li>
+    </ul>
+    <div class=warn>iPhone 必须先<b>「添加到主屏幕」</b>，从 Safari 标签页里打开的话
+    系统连推送 API 都不提供。</div>
+    <p style="font-size:13.5px;color:var(--sub)">开了推送后，待办标题会上传到服务器
+    （不然服务器不知道该推什么内容）。不想上传就别开，app 开着时仍会在界面上提醒。</p>
+  </details>
 
-<h3>周视图</h3>
-<p>切到「周」是一周七天的日程列表，适合看「这一周有什么」。</p>
+  <details><summary>导师专用</summary>
+    <p>导师登录后，「记录」页顶部会多一个 <b>🔬 查看全组记录</b> 的入口，带未读角标。</p>
+    <ul>
+      <li><b>新记录</b>：谁写的、写了什么、缩略图、附件一次铺开，就地能赞和点评。
+      点「✓ 已读」那条会<b>就地变灰但留在原位</b>，下次再进这个页签才清掉——
+      刚点完列表就跳一格最容易点错。点错了再点一下撤销。</li>
+      <li><b>今日活跃 › / 本周活跃 ›</b> 可以点开，是一张两段名单：有记录的、
+      没有记录的（写明「已 N 天没记」）。</li>
+      <li><b>按项目</b> → 新建组级项目，进详情勾选成员。<b>任何导师都能调任何项目的成员</b>，
+      但只能改成员，改不了项目名、也删不掉别人的项目。每次调整都写进项目详情下方的
+      <b>管理记录</b>。</li>
+      <li><b>重点节点</b>在「日历」页里加，只有导师能加，全组可见。</li>
+      <li><b>管理 → 成员</b>（管理员）：审批导师申请、改角色、离组归档，
+      以及<b>给某个人开放「待办」页签</b>。收回不删任何数据。</li>
+    </ul>
+  </details>
 
-<h3>重点节点</h3>
-<p>投稿截止、组会、开题、答辩这些。<b>只有导师能设置，但全组都看得到。</b></p>
-<p>页面最上面是倒计时卡片，「还有 N 天」；≤3 天转红，当天显示「就是今天」。</p>
+  <details><summary>遇到问题</summary>
+    <h3 style="margin-top:8px">连不上服务器</h3>
+    <ol><li>在实验室网络里吗？服务只在内网可达。</li>
+    <li>根证书装了吗？iPhone 上那个「证书信任设置」开关打开了吗？</li>
+    <li>同步面板里展开「服务器地址」，确认是 <code>https://172.29.249.177:3000</code>。</li></ol>
+    <h3>照片是个空灰块</h3>
+    <p>那张还没同步到这台设备。等一轮同步（2 分钟）；一直不出现说明上传方还没传上来。</p>
+    <h3>刚写的记录不见了</h3>
+    <p>被服务端拒绝后回滚了，同步条上会写原因。最常见的是<b>今天已经记满 3 条</b>。</p>
+    <h3>换了账号，记录没了</h3>
+    <p>换账号会清空本机数据，防止数据串号。重新登录原账号，同步一轮就全回来了
+    （记录在服务器上，没丢）。</p>
+    <h3>看不到「待办」页签</h3>
+    <p>默认就不显示，要管理员在导师端「管理 → 成员」里单独给你开放。
+    开放后等一轮同步（或退出重登）就会出现。</p>
+    <h3>导师入口不见了</h3>
+    <p>角色在服务器上改。被提为导师后等一轮同步，或退出重登。</p>
+  </details>
 
-<h2 id=score>6. 积分榜与奖励</h2>
-<p>入口在「记录」页的 🏆 积分榜。</p>
+  <div class=nav>
+    <button class="btn ghost" onclick="go(3)">上一步</button>
+    <a class=btn href="https://semon-guo.github.io/mochi-app/">打开 Mochi</a>
+  </div>
+  <div style="text-align:center">
+    <button class=link onclick="go(1)">换一台设备重看 →</button>
+  </div>
+</section>
 
-<h3>怎么算分</h3>
-<table>
-<tr><th>行为</th><th>分数</th><th>说明</th></tr>
-<tr><td>写一条实验记录</td><td><b>1 分</b></td><td>每天最多 3 条</td></tr>
-<tr><td>被<b>导师</b>点赞</td><td><b>5 分</b></td><td>每个赞都算</td></tr>
-<tr><td>导师的点评</td><td>0 分</td><td>不计分</td></tr>
-<tr><td>同学之间的点赞</td><td>0 分</td><td>不计分</td></tr>
-</table>
-<div class=note>点评不计分是刻意的：那是给你的反馈，不该变成筹码——
-总不该让导师在「要不要多写一句」时先想想给不给分。同学互赞不计分，
-否则互刷就是几分钟的事。</div>
-
-<h3>奖励</h3>
-<table>
-<tr><th>榜单</th><th>奖励</th></tr>
-<tr><td>周榜第 1</td><td>1 天事假额度 + 免一周值日</td></tr>
-<tr><td>周榜前 3</td><td>免一周值日</td></tr>
-<tr><td>月榜第 1 / 2 / 3</td><td>2 天 / 1 天 / 0.5 天事假</td></tr>
-<tr><td>年榜</td><td>按积分占比分配年终激励</td></tr>
-</table>
-<p>榜单上方的 <b>‹ ›</b> 可以翻到上一期——上周、上个月的最终名次和奖励都在那儿，
-这就是结算。同分并列同名次。</p>
-
-<h2 id=adv>7. 导师端<span class="role adv">导师 / 管理员</span></h2>
-<p>登录后「记录」页顶部会多一个 <b>🔬 查看全组记录</b> 的入口，带未读角标。</p>
-
-<h3>新记录</h3>
-<p>默认页签，是一条时间流：谁写的、写了什么、缩略图、附件一次铺开。
-可以就地 <b>☆ 赞</b> 和 <b>💬 点评</b>。</p>
-<p>点「✓ 已读」那条会<b>就地变灰但留在原位</b>，下次再进这个页签才清掉——
-刚点完手还在那儿、列表就跳一格是最容易点错的。点错了再点一下「已读 ↺」撤销。
-点赞或点评会自动算已读。</p>
-
-<h3>按成员 / 按项目</h3>
-<p>「今日活跃 ›」和「本周活跃 ›」可以点开，是一张两段名单：有记录的、没有记录的
-（写明「已 N 天没记」，超 7 天转琥珀、超 14 天转红）。</p>
-
-<h3>建项目、管成员</h3>
-<p>「按项目」→「＋ 新建组级项目」。进项目详情，在「项目成员」里点胶囊加人减人。</p>
-<div class=note><b>任何导师都能调任何项目的成员</b>，包括学生自建的课题。
-但只能改成员——项目名、颜色仍归建它的人，也删不掉别人的项目。
-每次调整都会写进项目详情下面的<b>管理记录</b>：谁、什么时候、加了谁移了谁。</div>
-
-<h3>重点节点</h3>
-<p>在「日历」页里加，见第 5 节。只有导师能加，全组可见。</p>
-
-<h2 id=push>8. 推送通知</h2>
-<p>同步面板里打开「到点推送通知」。会推两类：</p>
-<ul>
-<li>你设的待办提醒到点了</li>
-<li><b>导师给你的记录点赞或写了点评</b></li>
-</ul>
-<div class=warn><b>iPhone 必须先「添加到主屏幕」</b>，从 Safari 标签页里打开的话，
-系统连推送 API 都不提供。这是 iOS 的限制。</div>
-<p>开了推送后，待办的标题会上传到服务器（不然服务器不知道该推什么内容）。
-不想上传就别开，app 开着的时候仍然会在界面上提醒。</p>
-
-<h2 id=faq>9. 遇到问题</h2>
-
-<h3>连不上服务器</h3>
-<ol>
-<li>是不是在实验室网络里？服务只在内网可达。</li>
-<li>根证书装了吗？iPhone 上「证书信任设置」的开关打开了吗？</li>
-<li>同步面板里展开「服务器地址」，确认是 <code>https://172.29.249.177:3000</code>。</li>
-</ol>
-
-<h3>照片显示成一个空灰块</h3>
-<p>说明那张还没同步到这台设备上。等一轮同步（2 分钟）；如果一直不出现，
-可能是上传方还没传上来。</p>
-
-<h3>刚写的记录不见了</h3>
-<p>大概率是被服务端拒绝后回滚了——同步条上会显示原因。最常见的是<b>今天已经记满 3 条</b>。
-其它可能：想改别人的东西、想改导师设的重点节点。</p>
-
-<h3>「今天记满了」</h3>
-<p>一天上限 3 条。把内容补进今天已有的记录里（点铅笔编辑），或者明天再记。</p>
-
-<h3>换了账号，记录没了</h3>
-<p>换账号会清空本机数据，这是防止数据串号。重新登录原账号，同步一轮就会全部拉回来
-（记录在服务器上，没丢）。</p>
-
-<h3>导师入口不见了</h3>
-<p>角色是在服务器上改的。被提为导师之后，等一轮同步（或退出重登）就会出现。</p>
-
-<h3>我这儿没有「待办」页</h3>
-<p>那一半要管理员按人开放（见<a href="#todo">第 2 节</a>），默认是不出现的。开放之后同样
-等一轮同步或退出重登。反过来，本来有、突然没了，是被收回了——<b>你的任务和计时一条没丢</b>，
-它们本来就存在你自己设备上，再开放回来都还在。</p>
-
-<hr>
-<p style="color:var(--dim);font-size:13px">
-数据存在实验室内网的服务器上，每天自动备份。
-待办和计时数据只存在你自己的设备上。
-</p>
+<script>
+var DEV = null;
+function pickDev(d){
+  DEV = d;
+  try { localStorage.setItem('mochi_guide_dev', d); } catch(e){}
+  applyDev(); go(2);
+}
+function applyDev(){
+  var all = ['ios','android','mac','win'];
+  for (var i = 0; i < all.length; i++) {
+    var nodes = document.querySelectorAll('.dev-' + all[i]);
+    for (var j = 0; j < nodes.length; j++) {
+      if (all[i] === DEV) nodes[j].classList.remove('hide');
+      else nodes[j].classList.add('hide');
+    }
+  }
+}
+function go(n){
+  for (var i = 1; i <= 4; i++) {
+    document.getElementById('s' + i).classList.toggle('hide', i !== n);
+    document.getElementById('r' + i).classList.toggle('on', i <= n);
+  }
+  scrollTo(0, 0);
+  try { history.replaceState(null, '', '#' + n); } catch(e){}
+}
+// 记住上次选的设备：装到一半被打断，回来不用重选
+try {
+  var saved = localStorage.getItem('mochi_guide_dev');
+  if (saved) { DEV = saved; applyDev(); }
+} catch(e){}
+var start = parseInt((location.hash || '').slice(1), 10);
+go(DEV && start >= 1 && start <= 4 ? start : 1);
+</script>
 </html>"""
 
 
@@ -2491,7 +2700,7 @@ code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13px;word-br
 
 <a class=btn href="/mochi-ca.mobileconfig">📱 iPhone / iPad 点这里安装</a>
 <a class=btn href="/ca.crt">💻 Mac 点这里下载</a>
-<a class=btn style="background:#FFF;color:#2C2C2C;border:2px solid #E8E4DA" href="/guide">📖 Mochi 使用手册</a>
+<a class=btn style="background:#FFF;color:#2C2C2C;border:2px solid #E8E4DA" href="/guide">📖 使用向导：装好 + 会用</a>
 
 <h2>iPhone 步骤</h2>
 <ol>
@@ -2514,7 +2723,7 @@ Mac 在钥匙串访问里删除「Mochi Lab Root CA」。删掉之后 Mochi 的�
 但待办和计时功能不受影响（那些数据本来就只存在你自己手机上）。</p>
 
 <div class=warn>装完之后，同步地址是 <code>https://172.29.249.177:3000</code>，只在实验室网络里能连上。</div>
-<p style="text-align:center;margin-top:22px"><a href="/guide">怎么用？看使用手册 &rsaquo;</a></p>
+<p style="text-align:center;margin-top:22px"><a href="/guide">第一次用？跟着向导走一遍 &rsaquo;</a></p>
 </html>"""
 
 
