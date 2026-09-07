@@ -2385,6 +2385,19 @@ th{color:var(--sub);font-size:12px;font-weight:700}
     </ol>
   </div>
 
+  <details><summary>想自己核对，或者想删掉</summary>
+    <p style="margin-top:6px;font-size:13.5px">装之前可以自己验：</p>
+    <p><code>openssl x509 -in mochi-ca.crt -noout -text</code></p>
+    <p style="font-size:13.5px;color:var(--sub)">看 <code>X509v3 Name Constraints</code>
+    那一节，签发范围应该被限死在 <code>mochi.invalid</code> 下。</p>
+    <p style="font-size:13.5px">随时可以删掉：<b>iPhone</b> 在「设置 → 通用 →
+    VPN 与设备管理」里删除描述文件；<b>Mac</b> 在钥匙串访问里删除「Mochi Lab Root CA」；
+    <b>Windows</b> 在 certmgr 的「受信任的根证书颁发机构」里删；
+    <b>安卓</b>在「设置 → 安全 → 加密与凭据 → 用户凭据」里删。</p>
+    <p style="font-size:13.5px;color:var(--sub)">删掉之后同步就用不了了，
+    但已经记下的东西都在服务器上，装回来就能拉回。</p>
+  </details>
+
   <div class=note>装完之后回 app，在「记录」页最上面那条同步条里<b>注册</b>——
   需要邀请码，问组里要。注册后一律是学生身份，导师权限只能由管理员在服务器上授予。</div>
 
@@ -2666,72 +2679,11 @@ go(DEV && start >= 1 && start <= 4 ? start : 1);
 </html>"""
 
 
-INSTALL_PAGE = """<!doctype html><html lang=zh-CN><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>Mochi 根证书安装</title>
-<style>
-body{font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
-max-width:600px;margin:0 auto;padding:24px;color:#2C2C2C;background:#FDFBF7}
-h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px}
-.sub{color:#999;font-size:14px;margin-bottom:24px}
-a.btn{display:block;background:#2C2C2C;color:#fff;text-decoration:none;text-align:center;
-padding:15px;border-radius:14px;font-weight:600;margin:10px 0}
-ol{padding-left:22px}li{margin:8px 0}
-.warn{background:#FFF6E5;border:1px solid #E8A838;border-radius:12px;padding:12px 14px;margin:16px 0;font-size:14px}
-.safe{background:#EEF7EC;border:1px solid #5A9E4B;border-radius:12px;padding:12px 14px;margin:16px 0;font-size:14px}
-code{background:#F0EDE6;padding:2px 6px;border-radius:4px;font-size:13px;word-break:break-all}
-</style>
-<h1>Mochi 根证书</h1>
-<div class=sub>装一次就好。装完才能用 Mochi 同步实验记录。</div>
-
-<h2>先看清楚你在装什么</h2>
-<p>你要装的是一张<b>根证书</b>。一般来说，装根证书是件需要谨慎的事——普通的根证书一旦被滥用，
-持有者可以伪造<b>任意网站</b>的身份（网银、邮箱、微信），在你连的网络里解密你的 HTTPS 流量。</p>
-<div class=safe>
-<b>这张证书被从技术上锁死了。</b>它带有 X.509 的 Name Constraints 扩展，签发范围被限制在
-<code>mochi.invalid</code> 这一个永不存在的域名下。也就是说：<b>即使这张证书的私钥泄露，
-拿到它的人也签不出 google.com、网银或任何真实网站的证书</b>——你的系统会直接拒绝。
-已在 Apple 的证书验证栈上实测确认。
-</div>
-<p>它唯一能做的，就是让你的设备信任实验室内网那台 <code>172.29.249.177</code> 上的同步服务。
-私钥不在服务器上，只保存在管理员本人的电脑里。</p>
-<p style="color:#999;font-size:13.5px">不放心的话可以自己核对：装之前用
-<code>openssl x509 -in mochi-ca.crt -noout -text</code> 看 <code>X509v3 Name Constraints</code> 一节。</p>
-
-<a class=btn href="/mochi-ca.mobileconfig">📱 iPhone / iPad 点这里安装</a>
-<a class=btn href="/ca.crt">💻 Mac 点这里下载</a>
-<a class=btn style="background:#FFF;color:#2C2C2C;border:2px solid #E8E4DA" href="/guide">📖 使用向导：装好 + 会用</a>
-
-<h2>iPhone 步骤</h2>
-<ol>
-<li>用 <b>Safari</b> 打开本页（微信里打不开描述文件），点上面第一个按钮</li>
-<li>弹出「已下载描述文件」→ 打开<b>设置</b>，最上方会出现「已下载描述文件」，点进去<b>安装</b></li>
-<li><b>关键一步：</b>设置 → 通用 → 关于本机 → 拉到最底部 → <b>证书信任设置</b> → 打开「Mochi Lab Root CA」的开关</li>
-</ol>
-<div class=warn><b>第 3 步不能省。</b>只安装不打开信任开关，浏览器依然会报证书错误——绝大多数人卡在这里。</div>
-
-<h2>Mac 步骤</h2>
-<ol>
-<li>点上面第二个按钮下载 <code>ca.crt</code></li>
-<li>双击它，钥匙串访问会打开并添加到「登录」</li>
-<li>在钥匙串里找到「Mochi Lab Root CA」，双击 → 展开「信任」→ 把「使用此证书时」改成<b>始终信任</b> → 关窗口输密码确认</li>
-</ol>
-
-<h2>不想装 / 想撤销</h2>
-<p>随时可以删掉：iPhone 在「设置 → 通用 → VPN 与设备管理」里删除描述文件；
-Mac 在钥匙串访问里删除「Mochi Lab Root CA」。删掉之后 Mochi 的同步就用不了，
-但待办和计时功能不受影响（那些数据本来就只存在你自己手机上）。</p>
-
-<div class=warn>装完之后，同步地址是 <code>https://172.29.249.177:3000</code>，只在实验室网络里能连上。</div>
-<p style="text-align:center;margin-top:22px"><a href="/guide">第一次用？跟着向导走一遍 &rsaquo;</a></p>
-</html>"""
-
-
 class CertHandler(BaseHTTPRequestHandler):
-    """明文 HTTP，只提供根证书下载和安装指引。
+    """明文 HTTP：使用向导 + 根证书下载。
 
-    装证书之前 HTTPS 还不被信任，所以这一步必须走明文——但这里只发公开的
-    根证书（本来就是要公开分发的东西），没有任何敏感数据。
+    必须走明文——装证书之前 HTTPS 还不被信任，而这一页恰恰是教人装证书的。
+    这里只有公开的根证书（本来就要公开分发）和一份使用说明，没有敏感数据。
     """
     protocol_version = "HTTP/1.1"
     server_version = "mochi-cert"
@@ -2756,9 +2708,9 @@ class CertHandler(BaseHTTPRequestHandler):
             if path == "/mochi-ca.mobileconfig" and CA_CERT:
                 return self._out(build_mobileconfig(Path(CA_CERT).read_bytes()),
                                  "application/x-apple-aspen-config", "mochi-ca.mobileconfig")
-            if path in ("/guide", "/guide/"):
-                return self._out(GUIDE_PAGE.encode(), "text/html; charset=utf-8")
-            self._out(INSTALL_PAGE.encode(), "text/html; charset=utf-8")
+            # 根路径直接给使用向导。装证书是向导的第 3 步，不再单独一页——
+            # 两份说明各写一遍，迟早有一份过期。
+            self._out(GUIDE_PAGE.encode(), "text/html; charset=utf-8")
         except Exception as e:
             print(f"[cert] 出错: {e}", flush=True)
             self.send_error(500)
@@ -2833,7 +2785,7 @@ def main():
         cert_srv = ThreadingHTTPServer(("0.0.0.0", CERT_PORT), CertHandler)
         cert_srv.daemon_threads = True
         threading.Thread(target=cert_srv.serve_forever, daemon=True).start()
-        print(f"根证书分发页（明文）: http://0.0.0.0:{CERT_PORT}/")
+        print(f"使用向导 + 根证书（明文）: http://0.0.0.0:{CERT_PORT}/")
 
     srv.serve_forever()
 
