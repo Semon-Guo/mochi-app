@@ -2399,7 +2399,9 @@ th{color:var(--sub);font-size:12px;font-weight:700}
   </details>
 
   <div class=note>装完之后回 app，在「记录」页最上面那条同步条里<b>注册</b>——
-  需要邀请码，问组里要。注册后一律是学生身份，导师权限只能由管理员在服务器上授予。</div>
+  需要邀请码，问组里要。注册后一律是学生身份，导师权限只能由管理员在服务器上授予。<br>
+  注册完 app 会先让你<b>立一个自己的课题</b>（用你博士/硕士论文的题目），
+  之后的实验记录都归在它下面。</div>
 
   <div class=nav>
     <button class="btn ghost" onclick="go(2)">上一步</button>
@@ -2452,7 +2454,9 @@ th{color:var(--sub);font-size:12px;font-weight:700}
     <li><span class=pin>1</span><div>同步状态。点开可以登录/注册、开推送、退出。</div></li>
     <li><span class=pin>2</span><div>积分榜入口。右边 <code>1/3</code> 是今天已经记了几条
     —— <b>一天最多 3 条</b>。</div></li>
-    <li><span class=pin>3</span><div><b>你自己的课题</b>（含被导师拉进名单的组级项目）。点进去记录。</div></li>
+    <li><span class=pin>3</span><div><b>你自己的课题</b>（含被导师拉进名单的组级项目）。点进去记录。
+    第一次登录时 app 会先让你立<b>主课题</b>——用论文题目那个，它排在最上面、
+    标着「主课题」，<b>全组可见</b>。</div></li>
     <li><span class=pin>4</span><div><b>组里其他人的课题</b>。可以看、可以点赞，
     但不能往人家本子里写。</div></li>
   </ul>

@@ -176,7 +176,10 @@ if (params.get("app")) {
     : { id: "u1", displayName: "郭思蒙", username: "semon", role: "student", features: FEATS };
   localStorage.setItem("mochi_auth", JSON.stringify({ token: "x", user: WHO }));
   localStorage.setItem("mochi_v3", JSON.stringify({
-    todos: MOCK_TODOS, notes: [], projects: data.projects, records: data.records,
+    // ?fresh=1 装成刚注册的样子：一个项目都没有，看新人引导长什么样
+    todos: MOCK_TODOS, notes: [],
+    projects: params.get("fresh") ? [] : data.projects,
+    records: params.get("fresh") ? [] : data.records,
     comments: data.comments, milestones: data.milestones,
   }));
   Promise.all([fakePhoto("ph1", 210), fakePhoto("ph2", 30), fakePhoto("ph3", 140), fakePhoto("ph4", 280)])

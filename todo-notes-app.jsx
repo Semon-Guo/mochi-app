@@ -1280,6 +1280,52 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, author,
   );
 }
 
+/* ── 新人第一课：先把自己的课题立起来 ──
+   记录本是按项目组织的，没有项目就没有地方记第一条。与其让新人对着一个空
+   页面和一个加号发愣，不如直接问他课题叫什么——反正每个人都得有这一个。 */
+function ThesisOnboard({ canSkip, onCreate, onSkip }) {
+  const [name, setName] = useState("");
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  const go = () => { if (name.trim()) onCreate(name.trim()); };
+
+  return (
+    <div style={{ background:"#FFF", border:"1px solid #EDE8DE", borderRadius:18,
+      padding:"22px 20px 20px", marginTop:6, animation:"popIn .3s ease both" }}>
+      <div style={{ fontSize:34, lineHeight:1 }}>🎓</div>
+      <div style={{ fontSize:19, fontWeight:700, marginTop:10, letterSpacing:"-.3px" }}>
+        先立一个你自己的课题
+      </div>
+      <div style={{ fontSize:14, color:"#8C8478", lineHeight:1.75, marginTop:8 }}>
+        用你<b style={{color:"#3A3630"}}>博士 / 硕士论文的题目</b>建一个项目。
+        它是你的主课题，之后的实验记录都归在它下面。
+      </div>
+
+      <div style={{ background:"#F7F4EE", border:"1px solid #EDE8DE", borderRadius:12,
+        padding:"11px 13px", marginTop:14, fontSize:12.5, color:"#8C8478", lineHeight:1.7 }}>
+        <b style={{color:"#3A3630"}}>这个课题全组可见</b>——组里互相看得到彼此在做什么。
+        不想让人看到的内容别放进来。
+      </div>
+
+      <input ref={ref} value={name} onChange={e=>setName(e.target.value)}
+        onKeyDown={e=>{ if(e.key==="Enter") go(); }}
+        placeholder="比如：双矩法实时公里级三维重建"
+        style={{ ...S.inp, marginTop:14, fontSize:15 }}/>
+
+      <button onClick={go} style={{ ...S.btnDark, width:"100%", marginTop:12,
+        opacity: name.trim() ? 1 : .4 }}>建立我的课题</button>
+
+      {canSkip && (
+        <button onClick={onSkip} style={{ display:"block", width:"100%", marginTop:10,
+          border:"none", background:"none", color:"#B0A99B", fontSize:12.5,
+          cursor:"pointer", fontFamily:"inherit", padding:"6px 0" }}>
+          跳过，我没有个人课题 →
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ── 项目：一个名字就够 ── */
 function ProjectForm({ initial, onSave, onCancel }) {
   const [name, setName] = useState(initial?.name || "");
@@ -1340,6 +1386,8 @@ export default function MochiApp() {
   const [projForm, setProjForm] = useState(null);   // "new" | project id
   const [viewPhoto, setViewPhoto] = useState(null);
   const [boardOpen, setBoardOpen] = useState(false);
+  // 导师跳过「立课题」的记号，按人存——换个账号登录还得重新问一遍
+  const [skipThesis, setSkipThesis] = useState(false);
   const [saveErr, setSaveErr] = useState(null);
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
@@ -1682,6 +1730,11 @@ export default function MochiApp() {
   }, [authTok]);
   const memberById = useMemo(() => Object.fromEntries(members.map(m => [m.id, m])), [members]);
 
+  useEffect(() => {
+    try { setSkipThesis(!!localStorage.getItem("mochi_skip_thesis:" + (me?.id || ""))); }
+    catch { setSkipThesis(false); }
+  }, [me?.id]);
+
   // 能不能往这个项目里记：自己建的，或者被拉进了名单。
   // 别人的个人课题现在看得到，但那是他的本子，不该往里写。
   const canWriteProject = (pr) =>
@@ -1713,6 +1766,15 @@ export default function MochiApp() {
 
   // 导师在导师端建的组级项目：归他所有，成员名单跟着项目数据一起同步，
   // 学生端靠这份名单才拉得到这个项目。
+  // 新人的主课题：不设成员名单，所以是全组可见的（可见性规则见 server/README）
+  const createThesisProject = (name) => setData(d => ({ ...d, projects: [
+    { id:uid(), name, startedAt:Date.now(), color:NC[d.projects.length % NC.length], thesis:true },
+    ...d.projects] }));
+  const dismissThesis = () => {
+    try { localStorage.setItem("mochi_skip_thesis:" + (me?.id || ""), "1"); } catch {}
+    setSkipThesis(true);
+  };
+
   const createGroupProject = (name) => setData(d => ({ ...d, projects: [
     { id:uid(), name, startedAt:Date.now(), color:NC[d.projects.length % NC.length], members:[] },
     ...d.projects] }));
@@ -1763,8 +1825,10 @@ export default function MochiApp() {
     return d >= 0 && d <= 7;
   }).length;
 
-  // 自己的（含被拉进名单的）和别人的分开：这一页首先是「我的记录本」
-  const myProjects = data.projects.filter(canWriteProject);
+  // 自己的（含被拉进名单的）和别人的分开：这一页首先是「我的记录本」。
+  // 主课题置顶——它是这个人的主线，不该跟临时项目混在一起按创建顺序排。
+  const myProjects = data.projects.filter(canWriteProject)
+    .slice().sort((a, b) => (b.thesis ? 1 : 0) - (a.thesis ? 1 : 0));
   const otherProjects = data.projects.filter(pr => !canWriteProject(pr));
   const projCard = (pr) => {
     const rs = data.records.filter(r => r.projectId === pr.id);
@@ -1776,6 +1840,10 @@ export default function MochiApp() {
         <div style={{ fontSize:15.5, fontWeight:600, lineHeight:1.35 }}>{pr.name}</div>
         <div style={{ display:"flex", alignItems:"center", gap:7, marginTop:6,
           fontSize:11, color:"#B0A99B" }}>
+          {pr.thesis && (
+            <span style={{ fontSize:10, fontWeight:700, color:"#8B6AAF", background:"#F5F0FA",
+              padding:"2px 7px", borderRadius:5 }}>主课题</span>
+          )}
           {owner && (
             <span style={{ display:"inline-flex", alignItems:"center", gap:4, color:"#8C8478" }}>
               <Avatar user={owner} size={15}/>{owner.displayName}
@@ -2233,12 +2301,19 @@ export default function MochiApp() {
             </button>
             {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
 
+            {/* 登录了、还一个自己的项目都没有 → 先引导他把主课题立起来。
+                没登录的人不引导：课题是要给全组看的，还没账号谈不上。 */}
             {myProjects.length===0 && projForm!=="new" && (
-              <div style={S.empty}>
-                <div style={{fontSize:48}}>🔬</div>
-                <div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有项目</div>
-                <div style={{fontSize:13,color:"#CCC",marginTop:4}}>点右下角 + 开一个</div>
-              </div>
+              me && !skipThesis ? (
+                <ThesisOnboard canSkip={Sync.canReadGroup(me)}
+                  onCreate={createThesisProject} onSkip={dismissThesis}/>
+              ) : (
+                <div style={S.empty}>
+                  <div style={{fontSize:48}}>🔬</div>
+                  <div style={{fontSize:17,fontWeight:600,color:"#AAA",marginTop:8}}>还没有项目</div>
+                  <div style={{fontSize:13,color:"#CCC",marginTop:4}}>点右下角 + 开一个</div>
+                </div>
+              )
             )}
 
             <div className="proj-grid">{myProjects.map(projCard)}</div>
