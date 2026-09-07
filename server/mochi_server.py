@@ -87,18 +87,23 @@ SYNC_TABLES = ("projects", "records", "photos", "comments", "milestones", "todos
 # 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
-ADVISOR_VISIBLE = ("projects", "records", "photos", "comments", "milestones")
+ADVISOR_VISIBLE = ("projects", "records", "photos", "comments")
 # 重点节点是**组里的共同日程**（投稿截止、组会、答辩），跟「谁记的」无关：
 # 所有人都读得到，但只有导师和管理员写得了。学生各自能建的话，日历上就会
 # 冒出一堆只有本人看得见的私人条目，那就不是组日程了。
-GROUP_SHARED = ("milestones",)
+# 重点节点分两种，靠**建它的人是谁**区分，没有额外的字段：
+#   导师建的 = 全员节点（投稿截止、组会、答辩），所有人都看得到
+#   学生建的 = 私人节点，**只有他自己看得到，连导师也看不到**
+# 所以它不在 ADVISOR_VISIBLE 里：导师能看学生的科研记录，但个人日程不是科研
+# 产出，跟待办是一类。界面上明确告诉学生「你建的只有你自己看得到」，
+# 那就不能背地里给导师看。
+MILESTONE = "milestones"
 
 # 三种角色。admin 是 advisor 的超集：除了能看全组记录，还能审批导师申请。
 # 用导师码注册只是「申请」，在管理员点头之前一律按学生对待——否则导师码
 # 一旦外泄，拿到的人立刻就能读全组记录。
 ROLES = ("student", "advisor", "admin")
 GROUP_READERS = ("advisor", "admin")
-GROUP_WRITABLE_BY = GROUP_READERS      # 谁能写 GROUP_SHARED 里的表
 
 # 按人开放的功能。待办 / 专注计时是「个人时间管理」，跟实验记录本不是一回事——
 # 组里多数人只需要记录本，那一半摆在最显眼的第一个页签上只是干扰。所以默认关，
@@ -683,9 +688,13 @@ def pull(user, since):
             if not advisor:
                 veil = (lambda r: r["id"] not in hidden) if t == "projects" \
                     else (lambda r: can_see_record(r, hidden, uid))
-        elif t in GROUP_SHARED:
-            rows = c.execute(f"SELECT * FROM {t} WHERE seq > ? ORDER BY seq LIMIT ?",
-                             (since, PAGE)).fetchall()
+        elif t == MILESTONE:
+            # 自己的 + 所有导师的。导师走到这个分支也对：他看到的是自己的
+            # 加上全体导师的全员节点，同样看不到学生的私人节点。
+            rows = c.execute(
+                "SELECT * FROM milestones WHERE (owner_id = ?"
+                " OR owner_id IN (SELECT id FROM users WHERE role IN ('advisor','admin')))"
+                " AND seq > ? ORDER BY seq LIMIT ?", (uid, since, PAGE)).fetchall()
         elif t == "comments":
             rows = c.execute(
                 "SELECT * FROM comments WHERE (owner_id = ? OR target_owner = ?)"
@@ -740,11 +749,6 @@ def push(user, changes):
                         continue
 
                     cur = c.execute(f"SELECT * FROM {t} WHERE id = ?", (rid,)).fetchone()
-                    if t in GROUP_SHARED and user["role"] not in GROUP_WRITABLE_BY:
-                        reject("只有导师能设置重点节点", cur)
-                        continue
-                    # 组共享的东西谁定的都能改：换了导师之后，前一个导师定的
-                    # 组会日程不该就此冻在那儿没人动得了
                     if cur and updated_at <= cur["updated_at"]:
                         res["skipped"] += 1
                         continue
@@ -754,7 +758,24 @@ def push(user, changes):
                     data = json.dumps(payload, ensure_ascii=False)
 
                     # 这一段必须放在 deleted_at / payload / data 算完之后：它要用到它们
-                    if cur and cur["owner_id"] != user["id"] and t not in GROUP_SHARED:
+                    if cur and cur["owner_id"] != user["id"] and t == MILESTONE:
+                        # 导师之间可以互相维护全员节点——换了导师，前一任定的
+                        # 组会日程不该就此冻在那儿没人动得了。学生的私人节点
+                        # 谁也动不了，包括导师。
+                        peer = c.execute("SELECT role FROM users WHERE id = ?",
+                                         (cur["owner_id"],)).fetchone()
+                        group_node = bool(peer and peer["role"] in GROUP_READERS)
+                        if not (can_read_group(user) and group_node):
+                            # 回传 current 是为了让客户端回滚成服务器版本，但**只在
+                            # 他本来就看得到那一行时**才给：学生的私人节点原样发回去，
+                            # 等于从拒绝里把内容漏出去，刚说完是隐私的就自己破了。
+                            # 不给 current，客户端会把本地那条删掉——那正是对的。
+                            if group_node:
+                                reject("只有导师能改全员节点", cur)
+                            else:
+                                reject("这是别人的私人节点")
+                            continue
+                    elif cur and cur["owner_id"] != user["id"]:
                         # 导师可以调整**任何**项目的成员名单——组里谁参与哪个课题
                         # 本来就是导师在管。但只准动 members：项目名、颜色这些
                         # 仍然是建它那个人的。
@@ -2401,7 +2422,8 @@ th{color:var(--sub);font-size:12px;font-weight:700}
   <div class=note>装完之后回 app，在「记录」页最上面那条同步条里<b>注册</b>——
   需要邀请码，问组里要。注册后一律是学生身份，导师权限只能由管理员在服务器上授予。<br>
   注册完 app 会先让你<b>立一个自己的课题</b>（用你博士/硕士论文的题目），
-  之后的实验记录都归在它下面。</div>
+  之后的实验记录都归在它下面；接着提示你在日历上<b>给自己记一个要紧的日子</b>
+  ——那种节点只有你自己看得到。</div>
 
   <div class=nav>
     <button class="btn ghost" onclick="go(2)">上一步</button>
@@ -2503,7 +2525,9 @@ th{color:var(--sub);font-size:12px;font-weight:700}
   </div>
   <ul class=legend>
     <li><span class=pin>1</span><div><b>重点节点</b>的倒计时：投稿截止、组会、答辩。
-    <b>只有导师能设，但全组都看得到。</b></div></li>
+    分两种，卡片右上角标着：<b>「全员」</b>是导师设的，全组都看得到；
+    <b>「仅自己」</b>是你自己加的，<b>只有你看得到，导师也看不到</b>。
+    谁都可以给自己加，选中某一天后点「＋ 重点节点」。</div></li>
     <li><span class=pin>2</span><div>格子里的信号：<b>圆点</b>＝那天记了几条（按项目着色）；
     <b>顶上的色条</b>＝那天有重点节点。点任意一天，下面列出那天的全部内容。
     <br><span style="color:var(--sub)">开放了待办的人还会多两样：
@@ -2565,7 +2589,8 @@ th{color:var(--sub);font-size:12px;font-weight:700}
       <tr><td>导师建的项目</td><td>只有名单里的人 + 导师</td></tr>
       <tr><td>被导师加了名单的项目</td><td>同上</td></tr>
       <tr><td>导师给你的赞和点评</td><td>你 + 导师们</td></tr>
-      <tr><td>重点节点 / 积分榜</td><td>全组</td></tr>
+      <tr><td>导师设的全员节点 / 积分榜</td><td>全组</td></tr>
+      <tr><td>你自己加的重点节点</td><td><b>只有你自己</b>（导师也看不到）</td></tr>
     </table>
     <div class=warn>写记录时记着这一条：<b>你的个人课题是全组可见的</b>，
     照片和数据文件也一样。不想让人看到的，别放进来。</div>
@@ -2613,7 +2638,8 @@ th{color:var(--sub);font-size:12px;font-weight:700}
       <li><b>按项目</b> → 新建组级项目，进详情勾选成员。<b>任何导师都能调任何项目的成员</b>，
       但只能改成员，改不了项目名、也删不掉别人的项目。每次调整都写进项目详情下方的
       <b>管理记录</b>。</li>
-      <li><b>重点节点</b>在「日历」页里加，只有导师能加，全组可见。</li>
+      <li><b>重点节点</b>在「日历」页里加。<b>导师加的是全员节点</b>，全组可见；
+      学生加的只有他自己看得到，你也看不到。</li>
       <li><b>管理 → 成员</b>（管理员）：审批导师申请、改角色、离组归档，
       以及<b>给某个人开放「待办」页签</b>。收回不删任何数据。</li>
     </ul>

@@ -1326,6 +1326,35 @@ function ThesisOnboard({ canSkip, onCreate, onSkip }) {
   );
 }
 
+/* ── 立完课题之后的第二步：给自己记个要紧的日子 ──
+   日历那一页光看是看不出「我也能加」的：满屏都是导师设的全员节点，
+   加号在选中某一天之后才出现。所以在这儿点他一下，顺便把「你加的只有你
+   自己看得到」这句话说在他动手之前。 */
+function NodeOnboard({ onGo, onSkip }) {
+  return (
+    <div style={{ background:"#FFF", border:"1px solid #EDE8DE", borderRadius:16,
+      padding:"16px 17px", marginBottom:10, animation:"popIn .3s ease both" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+        <span style={{ fontSize:20 }}>🗓</span>
+        <span style={{ fontSize:15.5, fontWeight:700 }}>再给自己记一个要紧的日子</span>
+      </div>
+      <div style={{ fontSize:13, color:"#8C8478", lineHeight:1.75, marginTop:8 }}>
+        日历上可以标重要节点——组会汇报、开题、答辩、投稿截止。
+        <br/><b style={{color:"#3A3630"}}>你加的节点只有你自己看得到</b>，导师也看不到；
+        日历上那些全组都有的，是导师设的全员节点。
+      </div>
+      <div style={{ display:"flex", gap:9, marginTop:13 }}>
+        <button onClick={onSkip} style={{ ...S.btnGhost, padding:"11px 0", fontSize:14 }}>
+          以后再说
+        </button>
+        <button onClick={onGo} style={{ ...S.btnDark, flex:1.4, padding:"11px 0", fontSize:14 }}>
+          去日历加一个
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── 项目：一个名字就够 ── */
 function ProjectForm({ initial, onSave, onCancel }) {
   const [name, setName] = useState(initial?.name || "");
@@ -1388,6 +1417,8 @@ export default function MochiApp() {
   const [boardOpen, setBoardOpen] = useState(false);
   // 导师跳过「立课题」的记号，按人存——换个账号登录还得重新问一遍
   const [skipThesis, setSkipThesis] = useState(false);
+  const [skipNode, setSkipNode] = useState(false);
+  const [calNewNonce, setCalNewNonce] = useState(0);   // 加一次就让日历弹一次新建面板
   const [saveErr, setSaveErr] = useState(null);
   const dragFromRef = useRef(null);
   const dragOverRef = useRef(null);
@@ -1731,8 +1762,10 @@ export default function MochiApp() {
   const memberById = useMemo(() => Object.fromEntries(members.map(m => [m.id, m])), [members]);
 
   useEffect(() => {
-    try { setSkipThesis(!!localStorage.getItem("mochi_skip_thesis:" + (me?.id || ""))); }
-    catch { setSkipThesis(false); }
+    try {
+      setSkipThesis(!!localStorage.getItem("mochi_skip_thesis:" + (me?.id || "")));
+      setSkipNode(!!localStorage.getItem("mochi_skip_node:" + (me?.id || "")));
+    } catch { setSkipThesis(false); setSkipNode(false); }
   }, [me?.id]);
 
   // 能不能往这个项目里记：自己建的，或者被拉进了名单。
@@ -1751,17 +1784,18 @@ export default function MochiApp() {
     if (mine) dropComment(mine); else addComment(r.id, LIKE, "");
   };
 
-  // 重点节点是组里的共同日程（投稿截止、组会、答辩），只有导师能定，所有人都看得到。
-  // 界面上已经不给学生编辑入口，这里再挡一道：真让他改出去，服务端会永久拒绝，
-  // 而被拒的改动如果一直重试，就是每两分钟白发一次外加界面上永远的「待同步」。
-  const canEditMilestones = Sync.canReadGroup(me);
-  const saveMilestone = (ms) => canEditMilestones && setData(d => {
+  // 重点节点：导师建的是全员节点，学生建的只有他自己看得到。谁建的谁能改，
+  // 导师之间还能互相维护全员节点（服务端强制）。这里也挡一道——被拒的改动虽然
+  // 会自动回滚，但白跑一趟同步、界面上还闪一下错误，不如根本不发。
+  const canEditMs = (ms) => !ms?.id || !ms.ownerId || ms.ownerId === me?.id
+    || Sync.canReadGroup(me);
+  const saveMilestone = (ms) => canEditMs(ms) && setData(d => {
     const list = d.milestones || [];
     return ms.id
       ? { ...d, milestones: list.map(x => x.id === ms.id ? { ...x, ...ms } : x) }
       : { ...d, milestones: [...list, { ...ms, id: uid() }] };
   });
-  const deleteMilestone = (ms) => canEditMilestones &&
+  const deleteMilestone = (ms) => canEditMs(ms) &&
     setData(d => ({ ...d, milestones: (d.milestones || []).filter(x => x.id !== ms.id) }));
 
   // 导师在导师端建的组级项目：归他所有，成员名单跟着项目数据一起同步，
@@ -1770,6 +1804,12 @@ export default function MochiApp() {
   const createThesisProject = (name) => setData(d => ({ ...d, projects: [
     { id:uid(), name, startedAt:Date.now(), color:NC[d.projects.length % NC.length], thesis:true },
     ...d.projects] }));
+  // 立完课题、但还没给自己记过任何日子 → 引导第二步
+  const myMilestones = (data.milestones || []).filter(m => !m.ownerId || m.ownerId === me?.id);
+  const dismissNode = () => {
+    try { localStorage.setItem("mochi_skip_node:" + (me?.id || ""), "1"); } catch {}
+    setSkipNode(true);
+  };
   const dismissThesis = () => {
     try { localStorage.setItem("mochi_skip_thesis:" + (me?.id || ""), "1"); } catch {}
     setSkipThesis(true);
@@ -2266,7 +2306,7 @@ export default function MochiApp() {
             milestones={data.milestones || []}
             onSaveMilestone={saveMilestone} onDeleteMilestone={deleteMilestone}
             onOpenProject={(pid)=>{ if(pid){ setTab("lab"); setOpenProject(pid); } }}
-            canEdit={canEditMilestones}/>
+            meId={me?.id} isAdvisor={Sync.canReadGroup(me)} openNew={calNewNonce}/>
         ):tab==="todo"?(
           <>
             {showAdd && !addSubParent && <TaskForm onSave={info=>addTodo(info)} onCancel={()=>setShowAdd(false)} />}
@@ -2314,6 +2354,11 @@ export default function MochiApp() {
                   <div style={{fontSize:13,color:"#CCC",marginTop:4}}>点右下角 + 开一个</div>
                 </div>
               )
+            )}
+
+            {me && !skipNode && myProjects.length > 0 && myMilestones.length === 0 && (
+              <NodeOnboard onSkip={dismissNode}
+                onGo={()=>{ setTab("cal"); setCalNewNonce(n=>n+1); }}/>
             )}
 
             <div className="proj-grid">{myProjects.map(projCard)}</div>

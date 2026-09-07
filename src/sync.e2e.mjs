@@ -463,7 +463,7 @@ try {
       JSON.stringify((dGrpA2.comments || []).map((c) => c.id)));
   chk("回复不受取消赞影响", (dGrpA2.comments || []).some((c) => c.id === "cm1"));
 
-  console.log("\n── 重点节点：老师定，全组共享 ──");
+  console.log("\n── 重点节点：导师建的全员可见，学生建的只有自己看得到 ──");
   asDevice("P"); Sync.setServer(BASE);
   dP3 = Sync.stampChanges(dP3, { ...dP3, milestones: [
     { id: "ms1", at: 1780000000000, title: "Optica 投稿截止", kind: "deadline" }] }, 100000);
@@ -474,7 +474,7 @@ try {
   res = await syncDevice("A", dMsA, a.token); dMsA = res.data;
   let dMsB = base();
   res = await syncDevice("B", dMsB, b.token); dMsB = res.data;
-  chk("学生 A 看得到（全组共享，不看归属）",
+  chk("学生 A 看得到导师的全员节点",
       (dMsA.milestones || []).some((m) => m.id === "ms1"));
   chk("学生 B 也看得到", (dMsB.milestones || []).some((m) => m.id === "ms1"));
 
@@ -493,14 +493,26 @@ try {
       dMsA.milestones.find((m) => m.id === "ms1")?.title === "Optica 投稿截止",
       dMsA.milestones.find((m) => m.id === "ms1")?.title);
 
+  // 学生给自己加一个：能加，但那是私人的
   dMsA = Sync.stampChanges(dMsA, { ...dMsA, milestones: [...dMsA.milestones,
-    { id: "ms-own", at: 1780000000000, title: "学生自己加的", kind: "other" }] }, 102000);
+    { id: "ms-own", at: 1780000000000, title: "我的开题报告", kind: "other" }] }, 102000);
   res = await syncDevice("A", dMsA, a.token); dMsA = res.data;
-  chk("学生自己建不了", res.rejected?.some((r) => r.id === "ms-own"), JSON.stringify(res.rejected));
-  chk("这条也不会一直重试", Sync.pendingCount(res.data) === 0, String(Sync.pendingCount(res.data)));
-  chk("而且本地那条被清掉了——留着就是一份只有他自己看得见的假数据",
-      !(res.data.milestones || []).some((m) => m.id === "ms-own"),
-      JSON.stringify((res.data.milestones || []).map((m) => m.id)));
+  chk("学生能给自己加节点", !res.rejected?.length && Sync.pendingCount(dMsA) === 0,
+      JSON.stringify(res.rejected));
+  chk("加完还在本地", (dMsA.milestones || []).some((m) => m.id === "ms-own"));
+
+  let dMsB2 = base();
+  res = await syncDevice("B", dMsB2, b.token); dMsB2 = res.data;
+  chk("别的学生拉不到他的私人节点",
+      !(dMsB2.milestones || []).some((m) => m.id === "ms-own"),
+      JSON.stringify((dMsB2.milestones || []).map((m) => m.id)));
+
+  let dMsP = base();
+  res = await syncDevice("P", dMsP, prof.token); dMsP = res.data;
+  chk("**导师也拉不到**——界面上说了是隐私的，就不能背地里给看",
+      !(dMsP.milestones || []).some((m) => m.id === "ms-own"),
+      JSON.stringify((dMsP.milestones || []).map((m) => m.id)));
+  chk("但导师自己的全员节点还在", (dMsP.milestones || []).some((m) => m.id === "ms1"));
 
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {

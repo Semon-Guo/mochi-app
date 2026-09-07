@@ -87,7 +87,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（232 项）
+python3 server/test_server.py   # 服务端 API（252 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -172,7 +172,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 
 | 例外 | 为什么 | 怎么实现 |
 |---|---|---|
-| 重点节点 | 组里的日程（投稿截止、组会、答辩）是共同信息 | 在 `GROUP_SHARED` 里：**谁都读得到，只有导师写得了**（`GROUP_WRITABLE_BY`）。`owner_id` 只记「谁定的」，不影响谁看得到；换了导师之后前一任定的日程也改得动 |
+| 重点节点 | 分两种，靠**建它的人是谁**区分 | 导师建的 = 全员节点，所有人可见；学生建的 = 私人节点，**只有他自己看得到，连导师也看不到**（所以 milestones 不在 `ADVISOR_VISIBLE` 里——个人日程跟待办是一类，不是科研产出）。导师之间可以互相维护全员节点；学生的私人节点谁也改不了。**拒绝时不回传 `current`**，否则等于从拒绝里把私人内容漏出去 |
 | 个人课题和记录 | 组里互相看得到彼此在做什么 | 没有成员名单、且不是导师建的项目 → **全组可见**，连同里面的记录、照片、数据文件 |
 | 有名单的 / 导师建的项目 | 导师圈定了参与范围 | `hidden_projects()`：只给名单内的人 + 项目主人 + 导师。**导师建的项目从创建起就受限**，哪怕名单还空着——只看名单的话，加上第一个人的瞬间它会对所有人消失，这个跳变没法跟人解释 |
 | 项目成员 | 组里谁参与哪个课题本来就是导师在管 | 导师能改**任何**项目的 `members`，但服务端只取这一个字段合并（`merge_members`）——项目名、颜色仍归建它的人，导师也删不掉别人的项目。每次改动写进 `audit_log`，`/api/project-log` 供导师互查 |
@@ -321,8 +321,8 @@ extendedKeyUsage 含 serverAuth。
 
 ```bash
 node src/sync.test.mjs      # 同步引擎纯逻辑（61 项）
-node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（86 项）
-python3 server/test_server.py   # 服务端 API（244 项；服务器上多一项 scrypt，共 245）
+node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（88 项）
+python3 server/test_server.py   # 服务端 API（251 项；服务器上多一项 scrypt，共 252）
 ```
 
 ### 推送

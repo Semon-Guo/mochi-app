@@ -180,7 +180,10 @@ if (params.get("app")) {
     todos: MOCK_TODOS, notes: [],
     projects: params.get("fresh") ? [] : data.projects,
     records: params.get("fresh") ? [] : data.records,
-    comments: data.comments, milestones: data.milestones,
+    comments: data.comments,
+    // fresh 也要清节点：假数据里的节点归 u1，不清的话学生那边第二步引导
+    // 会以为「已经有自己的节点了」而不出现
+    milestones: params.get("fresh") ? [] : data.milestones,
   }));
   Promise.all([fakePhoto("ph1", 210), fakePhoto("ph2", 30), fakePhoto("ph3", 140), fakePhoto("ph4", 280)])
     .then(() => {

@@ -904,36 +904,63 @@ def main():
         chk("移出也记一笔", len(r.get("entries", [])) == 2 and "移出 stu2" in r["entries"][0]["detail"],
             str(r.get("entries", [{}])[0].get("detail")))
 
-        print("\n── 重点节点：老师定，全组共享 ──")
-        s, r = call("POST", "/api/sync", {"milestones": [
-            {"id": "ms-stu", "updatedAt": now + 70000,
-             "data": {"at": now + 86400000, "title": "学生自己加的", "kind": "other"}}]}, token=stu1)
-        chk("学生建不了重点节点", s == 200 and not r["applied"] and r["rejected"], str(r))
-
+        print("\n── 重点节点：导师建的全员可见，学生建的只有自己看得到 ──")
         s, r = call("POST", "/api/sync", {"milestones": [
             {"id": "ms1", "updatedAt": now + 70000,
              "data": {"at": now + 4 * 86400000, "title": "Optica 投稿截止",
-                      "kind": "deadline", "projectId": "p1"}}]}, token=admin)
-        chk("导师能建重点节点", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+                      "kind": "deadline"}}]}, token=admin)
+        chk("导师建全员节点", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        s, r = call("POST", "/api/sync", {"milestones": [
+            {"id": "ms-stu", "updatedAt": now + 70001,
+             "data": {"at": now + 86400000, "title": "我自己的组会准备", "kind": "other"}}]},
+            token=stu1)
+        chk("学生也能建节点（自己的）", s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
         for who, name in ((stu1, "学生甲"), (stu2, "学生乙"), (admin, "管理员")):
             s, r = call("GET", "/api/sync?since=0", token=who)
-            chk(f"{name}都看得到（组里的日程是共同信息）",
-                any(m["id"] == "ms1" for m in r.get("milestones", [])))
+            chk(f"{name}看得到导师的全员节点",
+                any(m["id"] == "ms1" and m["data"] for m in r.get("milestones", [])))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        chk("学生看得到自己的私人节点",
+            any(m["id"] == "ms-stu" and m["data"] for m in r.get("milestones", [])))
+
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("别的学生看不到他的私人节点",
+            not any(m["id"] == "ms-stu" for m in r.get("milestones", [])))
+
+        s, r = call("GET", "/api/sync?since=0", token=admin)
+        chk("**导师也看不到**学生的私人节点（界面上说了是隐私的，就不能背地里给看）",
+            not any(m["id"] == "ms-stu" for m in r.get("milestones", [])),
+            str([m["id"] for m in r.get("milestones", [])]))
 
         s, r = call("POST", "/api/sync", {"milestones": [
             {"id": "ms1", "updatedAt": now + 71000, "data": {"title": "学生改一下试试"}}]}, token=stu2)
-        chk("学生改不了", s == 200 and not r["applied"] and r["rejected"], str(r.get("rejected")))
+        chk("学生改不了导师的全员节点", s == 200 and not r["applied"] and r["rejected"],
+            str(r.get("rejected")))
+        chk("拒绝理由说的是全员节点，不是私人节点",
+            "全员" in r["rejected"][0]["why"], r["rejected"][0]["why"])
+        chk("这条回传了 current（他本来就看得到，好让本地回滚）",
+            "current" in r["rejected"][0], str(list(r["rejected"][0].keys())))
+
+        s, r = call("POST", "/api/sync", {"milestones": [
+            {"id": "ms-stu", "updatedAt": now + 71001, "data": {"title": "导师来改学生的"}}]},
+            token=admin)
+        chk("导师也改不了学生的私人节点", s == 200 and not r["applied"] and r["rejected"],
+            str(r.get("rejected")))
+        chk("**不回传 current**——回传就等于从拒绝里把私人内容漏出去",
+            "current" not in r["rejected"][0], str(r["rejected"][0]))
 
         s, r = call("GET", "/api/sync?since=0", token=stu1)
-        got = [m for m in r.get("milestones", []) if m["id"] == "ms1"][0]
-        chk("学生那边的内容没被改动", got["data"]["title"] == "Optica 投稿截止", got["data"]["title"])
+        got = [m for m in r.get("milestones", []) if m["id"] == "ms-stu"][0]
+        chk("学生那条内容没被动过", got["data"]["title"] == "我自己的组会准备", got["data"]["title"])
 
         s, r = call("POST", "/api/sync", {"milestones": [
             {"id": "ms1", "updatedAt": now + 72000,
              "data": {"at": now + 5 * 86400000, "title": "Optica 投稿截止（延期）",
                       "kind": "deadline"}}]}, token=admin)
-        chk("导师能改（换了导师之后，前一任定的日程不该冻在那儿）",
+        chk("导师能改全员节点（换了导师，前一任定的不该冻住）",
             s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
         print("\n── 导师回复与点赞 ──")

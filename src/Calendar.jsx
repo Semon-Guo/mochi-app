@@ -69,7 +69,7 @@ function useByDay({ records = [], todos = [], milestones = [] }) {
 }
 
 /* ── 编辑一个重点节点 ── */
-function MilestoneSheet({ initial, day, projects, onSave, onDelete, onClose }) {
+function MilestoneSheet({ initial, day, projects, onSave, onDelete, onClose, isAdvisor }) {
   const [title, setTitle] = useState(initial?.title || "");
   const [kind, setKind] = useState(initial?.kind || "milestone");
   const [projectId, setProjectId] = useState(initial?.projectId || "");
@@ -104,6 +104,16 @@ function MilestoneSheet({ initial, day, projects, onSave, onDelete, onClose }) {
         <div style={{ width: 38, height: 4, borderRadius: 2, background: C.edge, margin: "0 auto 16px" }} />
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>
           {initial ? "改重点节点" : `新的重点节点 · ${dayTitle(toBJ(day || Date.now()))}`}
+        </div>
+
+        <div style={{ fontSize: 12.5, lineHeight: 1.7, marginBottom: 12, padding: "10px 12px",
+          borderRadius: 11, background: isAdvisor ? "#FFF6E5" : "#F7F4EE",
+          border: `1px solid ${isAdvisor ? "#F0DFB4" : C.line}`,
+          color: isAdvisor ? "#8A6410" : C.sub }}>
+          {isAdvisor
+            ? <><b>你建的是全员节点</b>，全组都会看到（投稿截止、组会、答辩这类）。</>
+            : <><b>你建的节点只有你自己看得到</b>，导师也看不到。
+                日历上那些全组都有的节点，是导师设的。</>}
         </div>
 
         <input ref={ref} value={title} onChange={(e) => setTitle(e.target.value)}
@@ -174,13 +184,22 @@ function MilestoneSheet({ initial, day, projects, onSave, onDelete, onClose }) {
 }
 
 /* ── 月视图 ── */
+/* 谁建的节点谁能改。学生只看得到自己的 + 导师的全员节点，所以「不是我的」
+   对学生来说必然是全员节点；导师看到的全是全员节点（含他自己建的）。 */
 export function Calendar({ records = [], todos = [], projects = [], milestones = [],
-                           onSaveMilestone, onDeleteMilestone, onOpenProject, canEdit = false }) {
+                           onSaveMilestone, onDeleteMilestone, onOpenProject,
+                           meId, isAdvisor = false, openNew = 0 }) {
+  const isMine = (ms) => !ms.ownerId || ms.ownerId === meId;
+  const canEditMs = (ms) => isMine(ms) || isAdvisor;
+  const isGroupNode = (ms) => !isMine(ms) || isAdvisor;
   const [mode, setMode] = useState("month");        // month | week
   const [cursor, setCursor] = useState(() => { const d = bjNow(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [picked, setPicked] = useState(() => dayKeyOf(Date.now()));
   const [editing, setEditing] = useState(null);     // {ms} | {day} | null
   const [showAll, setShowAll] = useState(false);
+
+  // 从别处（新人引导）带过来的「直接开新建」信号。0 是初始值，不触发。
+  useEffect(() => { if (openNew) setEditing({ day: Date.now() }); }, [openNew]);
 
   const byDay = useByDay({ records, todos, milestones });
   const projColor = useMemo(() => {
@@ -271,8 +290,8 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
             const sub = [p?.name, ms.note].filter(Boolean).join(" · ");
             return (
               <button key={ms.id}
-                onClick={() => (canEdit ? setEditing({ ms }) : jumpTo(ms.at))}
-                title={canEdit ? "点一下编辑" : "点一下跳到那天"}
+                onClick={() => (canEditMs(ms) ? setEditing({ ms }) : jumpTo(ms.at))}
+                title={canEditMs(ms) ? "点一下编辑" : "点一下跳到那天"}
                 style={{
                   width: "100%", display: "flex", alignItems: "center", gap: 12,
                   padding: "13px 15px", marginBottom: 8, borderRadius: 16,
@@ -287,6 +306,13 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
                       padding: "2px 7px", borderRadius: 5 }}>{k.icon} {k.label}</span>
                     <span style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
                       {dayTitle(d)}
+                    </span>
+                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: "1px 6px",
+                      borderRadius: 4, marginLeft: "auto", flexShrink: 0,
+                      ...(isGroupNode(ms)
+                        ? { color: "#4A6FB5", background: "#EEF2FB" }
+                        : { color: C.sub, background: C.hair }) }}>
+                      {isGroupNode(ms) ? "全员" : "仅自己"}
                     </span>
                   </div>
                   <div style={{ fontSize: 15.5, fontWeight: 700, lineHeight: 1.3, color: C.ink,
@@ -381,11 +407,11 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
                   {e.miles.map((ms) => {
                     const k = kindOf(ms.kind);
                     return (
-                      <button key={ms.id} onClick={canEdit ? () => setEditing({ ms }) : undefined}
+                      <button key={ms.id} onClick={canEditMs(ms) ? () => setEditing({ ms }) : undefined}
                         style={{
                         display: "flex", alignItems: "center", gap: 6, width: "100%",
                         padding: "5px 9px", marginBottom: 5, borderRadius: 8,
-                        cursor: canEdit ? "pointer" : "default",
+                        cursor: canEditMs(ms) ? "pointer" : "default",
                         border: `1px solid ${C.line}`, borderLeft: `3px solid ${k.color}`,
                         background: "#FFF", fontFamily: "inherit", textAlign: "left",
                       }}>
@@ -511,7 +537,7 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
               {picked === todayKey && (
                 <span style={{ fontSize: 10.5, fontWeight: 700, color: "#5A9E4B" }}>今天</span>
               )}
-              {canEdit && (
+              {(
                 <button onClick={() => setEditing({ day: selDate.getTime() })} style={{
                   marginLeft: "auto", padding: "5px 11px", borderRadius: 999, cursor: "pointer",
                   border: `1px dashed ${C.dim}`, background: "transparent", color: C.sub,
@@ -524,11 +550,11 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
               const k = kindOf(ms.kind);
               const p = projects.find((x) => x.id === ms.projectId);
               return (
-                <button key={ms.id} onClick={canEdit ? () => setEditing({ ms }) : undefined}
+                <button key={ms.id} onClick={canEditMs(ms) ? () => setEditing({ ms }) : undefined}
                   style={{
                   width: "100%", display: "flex", alignItems: "flex-start", gap: 9,
                   padding: "9px 10px", marginBottom: 7, borderRadius: 10,
-                  cursor: canEdit ? "pointer" : "default",
+                  cursor: canEditMs(ms) ? "pointer" : "default",
                   border: `1px solid ${C.line}`, borderLeft: `3px solid ${k.color}`,
                   background: "#FFF", fontFamily: "inherit", textAlign: "left",
                 }}>
@@ -609,7 +635,7 @@ export function Calendar({ records = [], todos = [], projects = [], milestones =
 
       {editing && (
         <MilestoneSheet initial={editing.ms} day={editing.day} projects={projects}
-          onSave={onSaveMilestone} onDelete={onDeleteMilestone}
+          isAdvisor={isAdvisor} onSave={onSaveMilestone} onDelete={onDeleteMilestone}
           onClose={() => setEditing(null)} />
       )}
     </div>
