@@ -36,21 +36,6 @@ window.fetch = async (url) => {
   const body = u.includes("/api/overview") ? { members: MEMBERS }
     : u.includes("/api/members") ? { members: MEMBERS.map(
         ({ id, username, displayName, avatar }) => ({ id, username, displayName, avatar })) }
-    : u.includes("/api/leaderboard") ? {
-        period: "week", offset: 0, label: "8/31 — 9/6", totalPoints: 61,
-        rules: { record: 1, like: 5, reply: 0, dailyCap: 3 },
-        rows: [
-          { userId: "u1", username: "semon", displayName: "郭思蒙", rank: 1,
-            records: 3, likes: 3, replies: 2, points: 18, reward: "1 天事假额度 · 免一周值日" },
-          { userId: "u2", username: "wenqian", displayName: "李文倩", rank: 2,
-            records: 3, likes: 2, replies: 1, points: 18, reward: "免一周值日" },
-          { userId: "u4", username: "haoran", displayName: "陈浩然", rank: 3,
-            records: 3, likes: 1, replies: 0, points: 8, reward: "免一周值日" },
-          { userId: "u3", username: "yichi", displayName: "张亦弛", rank: 4,
-            records: 2, likes: 1, replies: 0, points: 7, reward: "" },
-          { userId: "u5", username: "mengqi", displayName: "周梦琪", rank: 5,
-            records: 0, likes: 0, replies: 0, points: 0, reward: "" },
-        ] }
     : u.includes("/api/project-log") ? { entries: [
         { at: Date.now() - 2 * 3600e3, actor: "dr.guo", detail: "双矩法实时公里级三维重建：加入 wenqian" },
         { at: Date.now() - 3 * 86400e3, actor: "prof2", detail: "双矩法实时公里级三维重建：加入 semon；移出 yichi" },
@@ -117,14 +102,31 @@ const data = {
     { id: "m4", ownerId: "u1", at: Date.now() + 11 * D, title: "设备年检", kind: "other" },
     { id: "m5", ownerId: "u2", at: Date.now() + 2 * D, title: "开题报告初稿", kind: "milestone" },
   ],
-  comments: [
-    { id: "c1", ownerId: "prof", recordId: "r4", kind: "reply", byName: "郭老师",
-      at: Date.now() - 2.8 * D, text: "振铃多半是正则化权重太小了，试试加一档 TV。" },
-    { id: "c2", ownerId: "u1", recordId: "r4", kind: "reply", byName: "郭思蒙",
-      at: Date.now() - 2.5 * D, text: "好，我今晚扫一遍 λ。" },
-    { id: "c3", ownerId: "prof", recordId: "r4", kind: "like", byName: "郭老师", at: Date.now() - 2.8 * D },
-  ],
 };
+
+/* 半年的历史记录。5 条假数据在成就墙上就是一小撮绿点，看不出那面墙排得对不对，
+   也看不出格子深浅、月份刻度、断档在版面里是什么份量。
+   写死的伪随机（不是 Math.random）——自检页每次刷新得长一个样，否则拿两张截图
+   对比改动时，噪声全是数据自己变出来的。 */
+const WALL_HISTORY = (() => {
+  let seed = 20260913;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const out = [];
+  for (let back = 1; back <= 180; back++) {
+    const day = new Date(); day.setHours(11, 0, 0, 0);
+    day.setDate(day.getDate() - back);
+    const weekend = day.getDay() === 0 || day.getDay() === 6;
+    // 中间空掉两周：断档也要看得见，不然验不了「墙上一片空白是什么样」
+    if (back > 96 && back < 110) continue;
+    const n = rnd() < (weekend ? 0.25 : 0.72) ? 1 + Math.floor(rnd() * 3) : 0;
+    for (let i = 0; i < n; i++) {
+      out.push({ id: `h${back}-${i}`, ownerId: "u1",
+        projectId: rnd() < 0.65 ? "p1" : "p2", at: day.getTime() + i * 3600e3,
+        text: `第 ${back} 天前的第 ${i + 1} 条`, photos: [], files: [] });
+    }
+  }
+  return out;
+})();
 
 /* 造几张假照片，好看清缩略图在版面里的实际份量 */
 function fakePhoto(id, hue) {
@@ -142,7 +144,7 @@ function fakePhoto(id, hue) {
   return new Promise((res) => cv.toBlob((b) => putPhoto(id, b).then(res), "image/jpeg", 0.85));
 }
 
-/* actions 要真的改数据——空桩的话点赞点了没反应，动效和计数都验不了 */
+/* actions 要真的改数据——空桩的话勾完成员名单没反应，那一段就验不了 */
 function Preview() {
   const [d, setD] = useState(data);
   const rid = () => "x" + Math.random().toString(36).slice(2, 8);
@@ -151,10 +153,6 @@ function Preview() {
       projects: [{ id: rid(), name, color: "#8B6AAF", ownerId: "prof", members: [] }, ...x.projects] })),
     setProjectMembers: (id, members) => setD((x) => ({ ...x,
       projects: x.projects.map((p) => (p.id === id ? { ...p, members } : p)) })),
-    addComment: (recordId, kind, text) => setD((x) => ({ ...x,
-      comments: [...x.comments, { id: rid(), ownerId: "prof", recordId, kind,
-        text: text || "", byName: "郭老师", at: Date.now() }] })),
-    dropComment: (c) => setD((x) => ({ ...x, comments: x.comments.filter((y) => y.id !== c.id) })),
   };
   return (
     <>
@@ -179,8 +177,8 @@ if (params.get("app")) {
     // ?fresh=1 装成刚注册的样子：一个项目都没有，看新人引导长什么样
     todos: MOCK_TODOS, notes: [],
     projects: params.get("fresh") ? [] : data.projects,
-    records: params.get("fresh") ? [] : data.records,
-    comments: data.comments,
+    // 成就墙要有半年的历史才看得出样子，见 WALL_HISTORY
+    records: params.get("fresh") ? [] : [...data.records, ...WALL_HISTORY],
     // fresh 也要清节点：假数据里的节点归 u1，不清的话学生那边第二步引导
     // 会以为「已经有自己的节点了」而不出现
     milestones: params.get("fresh") ? [] : data.milestones,

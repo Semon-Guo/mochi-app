@@ -3,7 +3,6 @@ import * as Sync from "./sync.js";
 import { avatarFallback } from "./avatar.js";
 import { downloadFile, fmtBytes } from "./files.js";
 import { Photo } from "./PhotoView.jsx";
-import { Thread, indexComments, threadOf, LIKE, REPLY } from "./Comments.jsx";
 import { loadSeen, persistSeen, freshRecords, FRESH_WINDOW } from "./seen.js";
 import { MS_KINDS } from "./Calendar.jsx";
 import { AdminPanel } from "./AdminPanel.jsx";
@@ -14,7 +13,11 @@ import { AdminPanel } from "./AdminPanel.jsx";
  * 少装饰多信息。导师是来看进展的，不是来看动效的。
  *
  * 学生的记录一律只读——服务端不接受导师改别人的记录，这里也不给编辑入口。
- * 导师能写的只有三样：自己建的项目、回复、点赞。
+ * 导师在这一屏上能写的只有一样：自己建的项目和它的成员名单。
+ *
+ * 点赞和点评已经整套删掉了。导师的一个赞曾经值 5 分，于是「谁被赞得多」
+ * 本身就成了一条隐形的榜——而反馈本来就不该是筹码。要说的话当面说、
+ * 组会上说，比在记录底下挂一行更管用。
  */
 
 const C = {
@@ -200,8 +203,7 @@ function FileLink({ f }) {
    「按成员」看的是一个人的时间线，作者是废话，项目标签才是信息；
    「按项目」看的是同一个项目下谁在推进，所以人要立得住——头像放大、
    名字加粗，一屏扫下来能立刻分清是谁写的。 */
-function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor = true,
-                    thread, meId, onLike, onReply, onDropComment }) {
+function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor = true }) {
   const withAuthor = showAuthor && author;
   return (
     <div style={{ display: "flex", gap: 10, padding: withAuthor ? "14px 0" : "11px 0",
@@ -263,10 +265,6 @@ function RecordRow({ r, author, projectName, projectColor, onPhoto, showAuthor =
           <div style={{ display: "flex", flexWrap: "wrap" }}>
             {r.files.map((f) => <FileLink key={f.id} f={f} />)}
           </div>
-        )}
-        {thread && (
-          <Thread thread={thread} meId={meId} onToggleLike={onLike}
-            onReply={onReply} onDelete={onDropComment} />
         )}
       </div>
     </div>
@@ -371,9 +369,9 @@ function ProjectLog({ projectId, nonce }) {
 
 /* ── 主页那一条「新记录」 ──
    导师打开 app 想知道的第一件事是「谁又干活了」，所以内容直接铺开：头像、
-   正文、缩略图、附件一次看全，赞和回复就地能点，不用点进去再点回来。 */
-function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
-                    onLike, onReply, onDropComment, onSeen, onOpenUser, read }) {
+   正文、缩略图、附件一次看全，不用点进去再点回来。 */
+function FeedCard({ r, author, projectName, projectColor, onPhoto,
+                    onSeen, onOpenUser, read }) {
   return (
     <div style={{ border: `1px solid ${C.line}`, borderRadius: 14, marginBottom: 10,
       padding: "13px 14px", background: read ? "#FBFAF7" : C.panel,
@@ -428,19 +426,16 @@ function FeedCard({ r, author, projectName, projectColor, onPhoto, thread, meId,
       )}
       </div>
 
-      <div style={{ borderTop: `1px solid ${C.hair}`, marginTop: 11, paddingTop: 4 }}>
-        <Thread thread={thread} meId={meId} onToggleLike={onLike}
-          onReply={onReply} onDelete={onDropComment}
-          trailing={
-            <button onClick={onSeen} title={read ? "点一下撤销" : "标为已读"}
-              style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 600,
-                cursor: "pointer", fontFamily: "inherit",
-                border: `1px solid ${read ? "transparent" : C.line}`,
-                background: read ? C.hair : "#FFF", color: read ? C.sub : C.dim,
-                transition: "background .25s ease, color .25s ease, border-color .25s ease" }}>
-              {read ? "已读 ↺" : "✓ 已读"}
-            </button>
-          } />
+      <div style={{ borderTop: `1px solid ${C.hair}`, marginTop: 11, paddingTop: 9,
+        display: "flex" }}>
+        <button onClick={onSeen} title={read ? "点一下撤销" : "标为已读"}
+          style={{ marginLeft: "auto", padding: "4px 10px", borderRadius: 999, fontSize: 12,
+            fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+            border: `1px solid ${read ? "transparent" : C.line}`,
+            background: read ? C.hair : "#FFF", color: read ? C.sub : C.dim,
+            transition: "background .25s ease, color .25s ease, border-color .25s ease" }}>
+          {read ? "已读 ↺" : "✓ 已读"}
+        </button>
       </div>
     </div>
   );
@@ -479,7 +474,6 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
   }, [projects]);
 
   const meId = auth?.user?.id;
-  const cmtIndex = useMemo(() => indexComments(data.comments), [data.comments]);
   const recordIds = useMemo(() => records.map((r) => r.id), [records]);
 
   // 已读状态只存本机：这是导师一个人的阅读进度，没理由让被看的学生知道
@@ -531,15 +525,6 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     && (r.at || 0) >= Date.now() - FRESH_WINDOW
     && (!seen.has(r.id) || pinned.has(r.id)));
 
-  // 点赞和回复都算「看过了」——都动手互动了，再让他手动点一下已读是多余的
-  const toggleLike = (r) => {
-    const mine = threadOf(cmtIndex, r.id).likes.find((c) => !c.ownerId || c.ownerId === meId);
-    if (mine) actions.dropComment?.(mine);
-    else actions.addComment?.(r.id, LIKE, "");
-    markSeen([r.id]);
-  };
-  const reply = (r, text) => { actions.addComment?.(r.id, REPLY, text); markSeen([r.id]); };
-
   // 导师能调**任何**项目的成员——组里谁参与哪个课题本来就是导师在管。
   // 服务端只接受 members 这一个字段的改动，项目名和颜色仍归建它的人。
   const ownsProject = (p) => p && (!p.ownerId || p.ownerId === meId);
@@ -551,11 +536,6 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
     // 记录是服务端在同步时写的，本地没法立刻知道，隔一会儿再去取一次
     setTimeout(() => setLogNonce((n) => n + 1), 2500);
   };
-  const rowProps = (r) => ({
-    thread: threadOf(cmtIndex, r.id), meId,
-    onLike: () => toggleLike(r), onReply: (t) => reply(r, t),
-    onDropComment: actions.dropComment,
-  });
 
   const weekAgo = Date.now() - 7 * DAY;
   const thisWeek = records.filter((r) => (r.at || 0) >= weekAgo).length;
@@ -606,7 +586,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
         <Panel title={`全部记录 · ${mine.length}`}>
           {mine.length === 0 && <Empty text="这位成员还没有记录" />}
           {mine.map((r) => (
-            <RecordRow key={r.id} r={r} showAuthor={false} onPhoto={onPhoto} {...rowProps(r)}
+            <RecordRow key={r.id} r={r} showAuthor={false} onPhoto={onPhoto}
               projectName={projects.find((p) => p.id === r.projectId)?.name}
               projectColor={projColor[r.projectId]} />
           ))}
@@ -735,7 +715,7 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
         <Panel title={`全部记录 · ${mine.length}`}>
           {mine.length === 0 && <Empty text="这个项目还没有记录" />}
           {mine.map((r) => (
-            <RecordRow key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto} {...rowProps(r)} />
+            <RecordRow key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto} />
           ))}
         </Panel>
       </Shell>
@@ -844,9 +824,6 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
                 <FeedCard key={r.id} r={r} author={byId[r.ownerId]} onPhoto={onPhoto}
                   projectName={projects.find((p) => p.id === r.projectId)?.name}
                   projectColor={projColor[r.projectId]}
-                  thread={threadOf(cmtIndex, r.id)} meId={meId}
-                  onLike={() => toggleLike(r)} onReply={(t) => reply(r, t)}
-                  onDropComment={actions.dropComment}
                   read={seen.has(r.id)}
                   onSeen={() => (seen.has(r.id) ? unmarkSeen(r.id) : markSeen([r.id]))}
                   onOpenUser={(id) => setFocus({ type: "user", id })} />

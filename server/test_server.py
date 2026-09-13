@@ -719,15 +719,16 @@ def main():
         chk("去掉名单又变回全组可见",
             any(p["id"] == "open1" and p["data"] for p in r.get("projects", [])))
 
+        # 点赞/点评整套删掉了：comments 不在 SYNC_TABLES 里，推上来直接被忽略
         s, r = call("POST", "/api/sync", {"comments": [
             {"id": "cm-peer", "updatedAt": now + 40004,
              "data": {"recordId": "or1", "kind": "like", "at": now}}]}, token=stu2)
-        chk("同学之间能互相点赞", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+        chk("点赞推不上去了（这张表已经不同步）", s == 200 and r["applied"] == 0, str(r))
+        s, r = call("GET", "/api/sync?since=0", token=stu1)
+        chk("拉取里也没有 comments 这一项", "comments" not in r, str(list(r.keys())))
 
         s, r = call("GET", "/api/leaderboard?period=week", token=stu2)
-        him = [x for x in r["rows"] if x["username"] == "stu1"]
-        chk("同学点的赞不计分（只有导师的算）",
-            him and him[0]["likes"] == 0, str(him[0] if him else None))
+        chk("积分榜的接口整个没了", s == 404, f"HTTP {s}")
 
         s, r = call("GET", "/api/members", token=stu2)
         chk("学生能取到全组名册（否则不知道记录是谁写的）",
@@ -779,14 +780,13 @@ def main():
         pj = [p for p in r.get("projects", []) if p["id"] == "shared1"]
         chk("移出名单后立刻收到墓碑", pj and pj[0]["data"] is None, str(pj))
 
-        print("\n── 积分与排行榜 ──")
+        print("\n── 一天最多 3 条 ──")
         DAY = 86400000
-        # 用一个干净的账号：前面的用例已经给 stu1/stu2 攒了记录，
-        # 混在一起就没法断言具体分数了
+        # 用一个干净的账号：前面的用例已经给 stu1/stu2 攒了记录，混在一起数不清
         s, r = call("POST", "/api/register", {"username": "pter", "password": "pter-passwd-1",
-                                              "displayName": "积分测试", "inviteCode": INVITE})
+                                              "displayName": "日限额测试", "inviteCode": INVITE})
         pter = r.get("token")
-        chk("注册计分用的账号", s == 200)
+        chk("注册测试账号", s == 200)
 
         # 全部落在「今天」，这样断言不依赖测试是哪天跑的
         for i in range(3):
@@ -811,50 +811,12 @@ def main():
              "data": {"projectId": "p1", "at": now, "text": "改个错别字"}}]}, token=pter)
         chk("改已有的记录不受日限额影响", s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
-        call("POST", "/api/sync", {"comments": [
-            {"id": "pt-like", "updatedAt": now + 96000,
-             "data": {"recordId": "pt-0", "kind": "like", "at": now}},
-            {"id": "pt-rep", "updatedAt": now + 96001,
-             "data": {"recordId": "pt-0", "kind": "reply", "text": "不错", "at": now}}]}, token=admin)
-        # 自己给自己评一条：不该算分，否则刷分太容易
-        call("POST", "/api/sync", {"comments": [
-            {"id": "pt-self", "updatedAt": now + 96002,
-             "data": {"recordId": "pt-0", "kind": "reply", "text": "自评", "at": now}}]}, token=pter)
-
-        s, r = call("GET", "/api/leaderboard?period=week", token=pter)
-        chk("学生也看得到榜单（看不见别人名次就没意义）", s == 200 and "rows" in r, f"HTTP {s}")
-        me = [x for x in r["rows"] if x["username"] == "pter"]
-        chk("榜上有这个人", len(me) == 1, str([x["username"] for x in r["rows"]]))
-        if me:
-            me = me[0]
-            chk("今天记录计 3 条（第 4 条根本没进来）", me["records"] == 3, str(me["records"]))
-            chk("赞记 1 个", me["likes"] == 1, str(me["likes"]))
-            chk("点评仍然统计，但不计分", me["replies"] == 1, str(me["replies"]))
-            chk("积分 = 3×1 + 1×5 = 8（点评不加分）", me["points"] == 8, str(me["points"]))
-            chk("有名次", me["rank"] >= 1, str(me["rank"]))
-
-        chk("导师不进榜（他不靠记录挣分）",
-            not any(x["username"] == "prof" for x in r["rows"]),
-            str([x["username"] for x in r["rows"]]))
-
-        s, ry = call("GET", "/api/leaderboard?period=year", token=pter)
-        chk("年榜按积分占比给激励", s == 200 and any("%" in (x["reward"] or "") for x in ry["rows"]),
-            str([x.get("reward") for x in ry["rows"]]))
-        s, rm = call("GET", "/api/leaderboard?period=month", token=pter)
-        chk("月榜前几名给事假天数",
-            s == 200 and any("事假" in (x["reward"] or "") for x in rm["rows"]),
-            str([x.get("reward") for x in rm["rows"]]))
-        top = [x for x in rm["rows"] if x["rank"] == 1 and x["points"]]
-        chk("周榜第一是事假 + 免值日",
-            not [x for x in r["rows"] if x["rank"] == 1 and x["points"]]
-            or "事假" in [x for x in r["rows"] if x["rank"] == 1][0]["reward"],
-            str([x.get("reward") for x in r["rows"]]))
-
-        s, rl = call("GET", "/api/leaderboard?period=week&offset=-1", token=pter)
-        chk("能翻到上周", s == 200 and rl["label"] != r["label"], f'{rl.get("label")} vs {r.get("label")}')
-        chk("上周这个新账号是 0 分",
-            all(x["points"] == 0 for x in rl["rows"] if x["username"] == "pter"),
-            str([(x["username"], x["points"]) for x in rl["rows"]]))
+        # 成就墙是客户端按本机记录算的，服务端不聚合任何跨人的数字——
+        # 这几条钉住的就是「服务器上没有一张谁比谁多的表」
+        for path in ("/api/leaderboard?period=week", "/api/leaderboard?period=month",
+                     "/api/leaderboard"):
+            s, _ = call("GET", path, token=pter)
+            chk(f"{path} 已经不存在", s == 404, f"HTTP {s}")
 
         print("\n── 导师管所有项目的成员，且留痕 ──")
         # 学生自建的项目，导师也要能调成员——组里谁参与哪个课题本来就是导师在管
@@ -963,45 +925,19 @@ def main():
         chk("导师能改全员节点（换了导师，前一任定的不该冻住）",
             s == 200 and r["applied"] == 1, str(r.get("rejected")))
 
-        print("\n── 导师回复与点赞 ──")
+        print("\n── 点赞和点评已经整套删掉 ──")
+        # 这一组钉的是「删干净了」，不是「还能用」。老客户端还会推 comments
+        # 上来（有人没更新 app），必须安静地忽略掉，而不是 500。
         s, r = call("POST", "/api/sync", {"comments": [
             {"id": "cm1", "updatedAt": now + 60000,
              "data": {"recordId": "r-ov", "kind": "reply", "text": "暗场校正做了吗？"}}]}, token=admin)
-        chk("导师能对学生的记录回复", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+        chk("老客户端推上来的评论被忽略，不报错",
+            s == 200 and r["applied"] == 0 and not r["rejected"], str(r))
 
         s, r = call("GET", "/api/sync?since=0", token=stu1)
-        mine = [x for x in r.get("comments", []) if x["id"] == "cm1"]
-        chk("回复能被记录的作者拉到（这条评论的 owner 是导师，不是他）", len(mine) == 1, str(r.get("comments")))
-        chk("回复内容正确", mine and mine[0]["data"]["text"] == "暗场校正做了吗？")
-
-        s, r = call("GET", "/api/sync?since=0", token=stu2)
-        chk("无关的学生拉不到别人记录下的回复",
-            not any(x["id"] == "cm1" for x in r.get("comments", [])))
-
-        s, r = call("POST", "/api/sync", {"comments": [
-            {"id": "cm2", "updatedAt": now + 61000,
-             "data": {"recordId": "r-ov", "kind": "like"}}]}, token=admin)
-        chk("点赞也是一条评论", s == 200 and r["applied"] == 1)
-
-        # 看得到就评得了——同学之间也能互相点赞（只是不计分）
-        s, r = call("POST", "/api/sync", {"comments": [
-            {"id": "cm3", "updatedAt": now + 62000,
-             "data": {"recordId": "r-ov", "kind": "like"}}]}, token=stu2)
-        chk("同学能给看得到的记录点赞", s == 200 and r["applied"] == 1, str(r.get("rejected")))
-
-        s, r = call("POST", "/api/sync", {"comments": [
-            {"id": "cm4", "updatedAt": now + 63000,
-             "data": {"recordId": "no-such-record", "kind": "reply", "text": "挂在不存在的记录上"}}]},
-            token=admin)
-        chk("挂在不存在的记录上被拒", s == 200 and r["rejected"] and not r["applied"], str(r))
-
-        s, r = call("POST", "/api/sync", {"comments": [
-            {"id": "cm2", "updatedAt": now + 64000, "deletedAt": now + 64000}]}, token=admin)
-        chk("能取消赞", s == 200 and r["applied"] == 1)
-        s, r = call("GET", "/api/sync?since=0", token=stu1)
-        tomb = [x for x in r.get("comments", []) if x["id"] == "cm2"]
-        chk("取消赞的墓碑作者也能拉到（否则赞会永远留在他屏幕上）",
-            len(tomb) == 1 and tomb[0]["data"] is None, str(tomb))
+        chk("拉取结果里没有 comments 这一项", "comments" not in r, str(list(r.keys())))
+        chk("该有的几张表还在", all(k in r for k in ("projects", "records", "photos", "milestones")),
+            str(list(r.keys())))
 
         print("\n── 数据文件：分块上传 ──")
         DATA = b"idx,psnr,ssim\n" + b"".join(

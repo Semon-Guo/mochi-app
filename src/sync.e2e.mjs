@@ -415,8 +415,9 @@ try {
   res = await syncDevice("B", dGrpB, b.token); dGrpB = res.data;
   chk("组里别的学生仍然拉不到", !(dGrpB.projects || []).some((x) => x.id === "gp1"));
 
-  console.log("\n── 导师回复与点赞：一路同步到学生那边 ──");
-  // 用一条新记录，免得受前面删除测试的影响
+  console.log("\n── 点赞和点评已经整套删掉 ──");
+  // 老设备上还攒着 comments，而 app 更新是各更各的。这里验的是「删干净了」：
+  // 那些行既不会被推上去，也不会从服务端流回任何人。
   dGrpA2 = Sync.stampChanges(dGrpA2, { ...dGrpA2, records: [...dGrpA2.records,
     { id: "rc1", projectId: "gp1", at: 90000, text: "在组级项目里跑了第一轮", photos: [] }] }, 90000);
   res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
@@ -426,42 +427,16 @@ try {
 
   dP3 = Sync.stampChanges(dP3, { ...dP3, comments: [
     { id: "cm1", recordId: "rc1", kind: "reply", text: "暗场校正做了吗？", byName: "导师", at: 91000 },
-    { id: "cm2", recordId: "rc1", kind: "like", byName: "导师", at: 91000 },
   ] }, 91000);
   res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
-  chk("回复和赞都推上去了", res.pushed >= 2, `pushed=${res.pushed}`);
+  chk("本地遗留的评论根本不打戳，也就推不上去", res.pushed === 0, `pushed=${res.pushed}`);
+  chk("它也不会被算进「待同步」，否则那个数字永远清不掉",
+      Sync.pendingCount(dP3) === 0, String(Sync.pendingCount(dP3)));
 
   res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
-  const got = (dGrpA2.comments || []).filter((c) => c.recordId === "rc1");
-  chk("学生拉到了导师的回复（这条评论的 owner 是导师，不是他）",
-      got.some((c) => c.kind === "reply" && c.text === "暗场校正做了吗？"),
-      JSON.stringify(got));
-  chk("赞也拉到了", got.some((c) => c.kind === "like"));
-  chk("带着作者名字，学生不至于只看到一串 id",
-      got.find((c) => c.kind === "reply")?.byName === "导师");
-
-  const ix = (await import("./comments.js")).indexComments(dGrpA2.comments);
-  const th = (await import("./comments.js")).threadOf(ix, "rc1");
-  chk("索引出来就是 1 条回复 + 1 个赞", th.replies.length === 1 && th.likes.length === 1);
-
-  // 学生回一句，导师要能看到——单向的回复没法用
-  dGrpA2 = Sync.stampChanges(dGrpA2, { ...dGrpA2, comments: [...dGrpA2.comments,
-    { id: "cm3", recordId: "rc1", kind: "reply", text: "做了，暗场是前一天测的", byName: "爱丽丝", at: 92000 },
-  ] }, 92000);
-  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
-  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
-  chk("学生的回复导师也收得到（对话得能来回）",
-      (dP3.comments || []).some((c) => c.id === "cm3" && c.text.startsWith("做了")));
-
-  // 取消赞：墓碑必须传到学生那边，否则赞永远留在他屏幕上
-  dP3 = Sync.stampChanges(dP3, { ...dP3,
-    comments: dP3.comments.filter((c) => c.id !== "cm2") }, 93000);
-  res = await syncDevice("P", dP3, prof.token); dP3 = res.data;
-  res = await syncDevice("A", dGrpA2, a.token); dGrpA2 = res.data;
-  chk("取消赞会传播到学生那边，不会永远挂着",
-      !(dGrpA2.comments || []).some((c) => c.id === "cm2"),
+  chk("学生那边一条评论也拉不到", !(dGrpA2.comments || []).length,
       JSON.stringify((dGrpA2.comments || []).map((c) => c.id)));
-  chk("回复不受取消赞影响", (dGrpA2.comments || []).some((c) => c.id === "cm1"));
+  chk("comments 不再是同步类型", !Sync.ALL_KINDS.includes("comments"), Sync.ALL_KINDS.join(","));
 
   console.log("\n── 重点节点：导师建的全员可见，学生建的只有自己看得到 ──");
   asDevice("P"); Sync.setServer(BASE);

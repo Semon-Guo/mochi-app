@@ -3,6 +3,9 @@
  * 只同步实验记录（projects / records / 照片）——待办、专注计时、timeline 全部
  * 留在本机，服务器上连表都没有。
  *
+ * comments 曾经也在这份名单里（导师的赞和点评）。整套机制已经删掉，老设备上
+ * 攒下的那些行原样留在本地和服务器上，只是不再同步、也不再显示。
+ *
  * 设计要点：业务代码里那 23 处 setData 一个都不用改。所有同步元数据由
  * stampChanges() 在状态更新那一层自动 diff 出来，塞进 data._sync，
  * 渲染代码看不见它，也就不会被它影响。
@@ -19,8 +22,8 @@ const TODOS_SK = "mochi_sync_todos";
 
 // 实验记录始终同步（课题组共用）；待办是可选项，而且**只在自己的设备之间**
 // 同步——服务端不会把它给导师或任何其他人看。
-export const LAB_KINDS = ["projects", "records", "comments", "milestones"];
-export const ALL_KINDS = ["projects", "records", "comments", "milestones", "todos"];
+export const LAB_KINDS = ["projects", "records", "milestones"];
+export const ALL_KINDS = ["projects", "records", "milestones", "todos"];
 
 export function getSyncTodos() {
   try { return localStorage.getItem(TODOS_SK) !== "0"; } catch { return true; }
@@ -78,7 +81,7 @@ export function setDataOwner(id) {
 export async function resetLocalData() {
   await clearPhotos().catch(() => {});
   return {
-    todos: [], notes: [], projects: [], records: [], comments: [], milestones: [],
+    todos: [], notes: [], projects: [], records: [], milestones: [],
     _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
   };
 }
@@ -101,7 +104,7 @@ export async function switchAccount(data, prevOwnerId, nextOwnerId) {
 
   await clearPhotos().catch(() => {});
   return {
-    todos: [], notes: [], projects: [], records: [], comments: [], milestones: [],
+    todos: [], notes: [], projects: [], records: [], milestones: [],
     _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
   };
 }
@@ -130,8 +133,6 @@ export const fetchMe = (token) => api("/api/me", { token });
 export const fetchUsers = (token) => api("/api/users", { token });
 export const fetchOverview = (token) => api("/api/overview", { token });
 export const fetchMembers = (token) => api("/api/members", { token });
-export const fetchLeaderboard = (token, period = "week", offset = 0) =>
-  api(`/api/leaderboard?period=${period}&offset=${offset}`, { token });
 export const fetchProjectLog = (token, id) =>
   api(`/api/project-log?id=${encodeURIComponent(id)}`, { token });
 export const fetchRequests = (token) => api("/api/admin/requests", { token });

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mochi 实验记录同步服务。
 
-只同步实验记录（projects / records / photos / comments / milestones / 数据文件），
+只同步实验记录（projects / records / photos / milestones / 数据文件），
 个人待办和计时数据留在设备本地。
 学生读写自己的，导师只读全组的。
 
@@ -30,7 +30,6 @@ import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote as urlquote
 
@@ -61,13 +60,11 @@ except Exception as _e:
     PUSH_OK = False
     _PUSH_ERR = str(_e)
 
-# 积分：一条记录 1 分，导师的每个赞 / 每条点评各 5 分。
-# 每天最多 3 条记录——防的是「为了刷分把一条拆成十条」。
+# 每天最多 3 条记录。原来是为了防「为了刷分把一条拆成十条」——积分和排行榜
+# 已经整套删掉了，这条限制留着的理由换成了它本来就该有的那个：一天的活儿
+# 拆成十条流水账，记录本就没法读了。三条够写完「上午做了什么、下午做了什么、
+# 晚上跑的结果」，再多基本是在凑数。
 MAX_RECORDS_PER_DAY = int(os.environ.get("MOCHI_MAX_RECORDS_PER_DAY") or 3)
-# 只有导师的**点赞**计分。点评不计分：那是给学生的反馈，不该变成筹码——
-# 总不该让导师在「要不要多写一句」时先想想给不给分。
-# 同学之间也能互相点赞，同样不计分，否则互刷就是几分钟的事。
-PT_RECORD, PT_LIKE = 1, 5
 
 MAX_PHOTO = 8 * 1024 * 1024
 
@@ -83,11 +80,11 @@ IO_CHUNK = 1 << 16
 ORPHAN_GRACE = int(os.environ.get("MOCHI_ORPHAN_GRACE_H") or 24) * 3600 * 1000
 TICKET_TTL = 5 * 60 * 1000
 SESSION_TTL = 90 * 24 * 3600
-SYNC_TABLES = ("projects", "records", "photos", "comments", "milestones", "todos")
+SYNC_TABLES = ("projects", "records", "photos", "milestones", "todos")
 # 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
-ADVISOR_VISIBLE = ("projects", "records", "photos", "comments")
+ADVISOR_VISIBLE = ("projects", "records", "photos")
 # 重点节点是**组里的共同日程**（投稿截止、组会、答辩），跟「谁记的」无关：
 # 所有人都读得到，但只有导师和管理员写得了。学生各自能建的话，日历上就会
 # 冒出一堆只有本人看得见的私人条目，那就不是组日程了。
@@ -201,9 +198,11 @@ CREATE TABLE IF NOT EXISTS photos (
 CREATE INDEX IF NOT EXISTS idx_photos_seq ON photos(seq);
 CREATE INDEX IF NOT EXISTS idx_photos_owner ON photos(owner_id, seq);
 
-/* 导师的回复和点赞。owner_id 是发言人，而拉取是按 owner_id 过滤的——
-   所以必须冗余存一份「被评论记录的作者」，否则导师写的回复学生根本拉不到。
-   record_id 单独成列是为了删记录时能连带清掉。 */
+/* 导师的回复和点赞——**整套机制已下线**，不在 SYNC_TABLES 里，谁也读不到、
+   写不进。表和里面的行原样留着：删掉界面不该顺手把人写过的东西烧了，而且
+   新老库的表结构保持一致，备份、恢复、老库升级那条路径才不用分两种情况。
+   （owner_id 是发言人，拉取按 owner_id 过滤，所以当年必须冗余存一份
+   target_owner——被评论记录的作者，否则导师写的回复学生根本拉不到。） */
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   data TEXT NOT NULL, record_id TEXT, target_owner TEXT,
@@ -314,7 +313,7 @@ def init_db():
 
 def bj_day(ts_ms):
     """时间戳归到北京时间的哪一天。全组按同一时区分天，否则同一条记录在
-    不同人的界面上会落在不同日期，日限额和排行榜也就对不上了。"""
+    不同人的界面上会落在不同日期，日限额和成就墙上的格子也就对不上了。"""
     try:
         t = time.gmtime((int(ts_ms) + 8 * 3600 * 1000) / 1000)
         return time.strftime("%Y-%m-%d", t)
@@ -695,10 +694,6 @@ def pull(user, since):
                 "SELECT * FROM milestones WHERE (owner_id = ?"
                 " OR owner_id IN (SELECT id FROM users WHERE role IN ('advisor','admin')))"
                 " AND seq > ? ORDER BY seq LIMIT ?", (uid, since, PAGE)).fetchall()
-        elif t == "comments":
-            rows = c.execute(
-                "SELECT * FROM comments WHERE (owner_id = ? OR target_owner = ?)"
-                " AND seq > ? ORDER BY seq LIMIT ?", (uid, uid, since, PAGE)).fetchall()
         else:
             rows = c.execute(f"SELECT * FROM {t} WHERE owner_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                              (uid, since, PAGE)).fetchall()
@@ -721,8 +716,7 @@ def push(user, changes):
     """
     c = conn()
     res = {"applied": 0, "skipped": 0, "rejected": []}
-    notices = []          # 落库之后再发，不能占着写锁做网络 I/O
-    audits = []           # 同理：audit() 会去抢同一把写锁，攒到提交后再写
+    audits = []           # audit() 会去抢同一把写锁，攒到提交后再写
     with _write_lock:
         try:
             for t in SYNC_TABLES:
@@ -792,12 +786,6 @@ def push(user, changes):
                             reject("不能修改别人的记录", cur)
                             continue
 
-                    if t == "comments" and not deleted_at:
-                        why = comment_target_error(c, user, payload)
-                        if why:
-                            reject(why, cur)
-                            continue
-
                     # 每天最多 3 条记录。只拦新增：已有记录的编辑照常，
                     # 否则改个错别字都会因为「今天满了」而被拒。
                     if t == "records" and not deleted_at and not cur:
@@ -835,25 +823,6 @@ def push(user, changes):
                     # 成员名单跟着项目 data 同步过来，这里同步进倒排索引
                     if t == "projects":
                         reindex_members(c, rid, payload)
-                    # 评论要记下它挂在哪条记录、那条记录是谁的——学生靠这个才拉得到。
-                    # 删除时不能碰这两列：墓碑的 data 是空的，跟着清掉的话学生就
-                    # 再也拉不到这条墓碑，取消的赞会永远留在他屏幕上。
-                    if t == "comments" and not deleted_at:
-                        rec = c.execute("SELECT owner_id, data FROM records WHERE id = ?",
-                                        (str(payload.get("recordId") or ""),)).fetchone()
-                        c.execute("UPDATE comments SET record_id = ?, target_owner = ? WHERE id = ?",
-                                  (payload.get("recordId"), rec["owner_id"] if rec else None, rid))
-                        # 只在这条评论是**新增**时通知：客户端偶尔会把同一条重推
-                        # （比如推送记账丢了），按 updatedAt 判断的话对方会被
-                        # 同一个赞反复吵醒。
-                        if rec and not cur and rec["owner_id"] != user["id"]:
-                            try:
-                                rec_text = json.loads(rec["data"]).get("text")
-                            except Exception:
-                                rec_text = ""
-                            notices.append((rec["owner_id"], comment_notice(
-                                user, payload.get("kind"), payload.get("text"),
-                                rec_text, payload.get("recordId"))))
                     res["applied"] += 1
             c.commit()
         except Exception:
@@ -861,9 +830,6 @@ def push(user, changes):
             raise
     for a in audits:
         audit(*a)
-    # 推送要等事务提交完再发：发到一半回滚的话，对方会收到一条不存在的点评
-    if notices:
-        threading.Thread(target=deliver, args=(notices,), daemon=True).start()
     res["seq"] = current_seq(c)
     return res
 
@@ -916,25 +882,6 @@ def reindex_members(c, project_id, data):
                       (project_id, uid))
         except sqlite3.IntegrityError:
             pass
-
-
-def comment_target_error(c, user, data):
-    """评论只能挂在自己看得到的记录上。
-
-    不查的话，知道（或猜中）一个记录 id 就能往别人的记录下面塞东西——
-    而那条评论会因为 target_owner 的关系直接出现在对方界面上。
-    """
-    rid = data.get("recordId")
-    if not isinstance(rid, str) or not rid:
-        return "评论缺少 recordId"
-    rec = c.execute("SELECT owner_id, deleted_at, project_id FROM records WHERE id = ?",
-                    (rid,)).fetchone()
-    if not rec or rec["deleted_at"]:
-        return "这条记录不存在"
-    # 看得到就评得了：同学之间也能互相点赞（只是不计分）
-    if not can_see_record(rec, hidden_projects(user), user["id"]):
-        return "看不到这条记录"
-    return None
 
 
 def claim_photo(user, pid, mime, size):
@@ -1503,102 +1450,6 @@ def decide_request(user, target_id, approve):
     return {"user": public_user(fresh), "approved": bool(approve)}
 
 
-BJ = timezone(timedelta(hours=8))
-
-# 奖励规则集中放这儿，改这一处、界面和接口一起变
-WEEK_REWARDS = {1: "1 天事假额度 · 免一周值日", 2: "免一周值日", 3: "免一周值日"}
-MONTH_REWARDS = {1: "2 天事假", 2: "1 天事假", 3: "0.5 天事假"}
-YEAR_POOL_NOTE = "年终激励按积分占比分配"
-
-
-def period_range(period, offset=0):
-    """返回 (起, 止, 标题)，都按北京时间算。"""
-    today = datetime.now(BJ).date()
-    if period == "month":
-        m = today.month - 1 + offset
-        y, m = today.year + m // 12, m % 12 + 1
-        start = date(y, m, 1)
-        end = date(y + (m // 12), m % 12 + 1, 1) - timedelta(days=1)
-        return start.isoformat(), end.isoformat(), f"{y} 年 {m} 月"
-    if period == "year":
-        y = today.year + offset
-        return date(y, 1, 1).isoformat(), date(y, 12, 31).isoformat(), f"{y} 年"
-    start = today - timedelta(days=today.weekday()) + timedelta(weeks=offset)
-    end = start + timedelta(days=6)
-    return start.isoformat(), end.isoformat(), f"{start.month}/{start.day} — {end.month}/{end.day}"
-
-
-def leaderboard(user, period="week", offset=0):
-    """积分榜。一条记录 1 分（每天封顶 3 条），导师的每个赞 / 每条点评各 5 分。
-
-    只算导师给的赞和点评：学生之间互相点，分数就没有意义了。
-    """
-    if period not in ("week", "month", "year"):
-        period = "week"
-    offset = max(-60, min(0, int(offset or 0)))     # 只往回看，不预支未来
-    c = conn()
-    lo, hi, label = period_range(period, offset)
-
-    people = {r["id"]: r for r in c.execute("SELECT * FROM users WHERE archived_at IS NULL")}
-    advisors = {uid for uid, r in people.items() if r["role"] in GROUP_READERS}
-    stat = {uid: {"records": 0, "likes": 0, "replies": 0}
-            for uid, r in people.items() if uid not in advisors}
-
-    for r in c.execute(
-            "SELECT owner_id, day, COUNT(*) AS n FROM records"
-            " WHERE deleted_at IS NULL AND day >= ? AND day <= ? GROUP BY owner_id, day",
-            (lo, hi)):
-        if r["owner_id"] in stat:
-            # 再封一次顶：日限额是后加的，之前攒下的老数据可能一天不止 3 条
-            stat[r["owner_id"]]["records"] += min(r["n"], MAX_RECORDS_PER_DAY)
-
-    for r in c.execute("SELECT owner_id, target_owner, data, updated_at FROM comments"
-                       " WHERE deleted_at IS NULL"):
-        tgt = r["target_owner"]
-        if tgt not in stat or r["owner_id"] not in advisors or r["owner_id"] == tgt:
-            continue
-        try:
-            d = json.loads(r["data"]) or {}
-        except Exception:
-            d = {}
-        day = bj_day(d.get("at") or r["updated_at"])
-        if not day or day < lo or day > hi:
-            continue
-        stat[tgt]["likes" if d.get("kind") == "like" else "replies"] += 1
-
-    rows = []
-    for uid, e in stat.items():
-        u = people[uid]
-        rows.append({
-            "userId": uid, "username": u["username"], "displayName": u["display_name"],
-            "avatar": u["avatar"], **e,
-            "points": e["records"] * PT_RECORD + e["likes"] * PT_LIKE,
-        })
-    rows.sort(key=lambda x: (-x["points"], x["displayName"]))
-
-    total = sum(x["points"] for x in rows) or 1
-    rank = 0
-    for i, x in enumerate(rows):
-        # 同分同名次
-        if i == 0 or x["points"] != rows[i - 1]["points"]:
-            rank = i + 1
-        x["rank"] = rank
-        if not x["points"]:
-            x["reward"] = ""
-        elif period == "week":
-            x["reward"] = WEEK_REWARDS.get(rank, "")
-        elif period == "month":
-            x["reward"] = MONTH_REWARDS.get(rank, "")
-        else:
-            x["reward"] = f"年终激励 {round(x['points'] * 100 / total)}%"
-
-    return {"period": period, "offset": offset, "label": label, "from": lo, "to": hi,
-            "rows": rows, "totalPoints": sum(x["points"] for x in rows),
-            "rules": {"record": PT_RECORD, "like": PT_LIKE, "reply": 0,
-                      "dailyCap": MAX_RECORDS_PER_DAY,
-                      "week": WEEK_REWARDS, "month": MONTH_REWARDS, "year": YEAR_POOL_NOTE}}
-
-
 def member_list(user):
     """全组的名字和头像。学生现在看得到彼此的记录，就得知道那一条是谁写的。
 
@@ -1749,25 +1600,6 @@ def send_to_user(user_id, payload):
                 c.commit()
             print(f"[push] 发送失败 {sub['id'][:8]}: {e}", flush=True)
     return sent
-
-
-def comment_notice(actor, kind, text, rec_text, record_id):
-    """导师点赞/点评之后，学生手机上看到的那条通知。"""
-    who = (actor or {}).get("displayName") or "组里有人"
-    trim = lambda t, n: " ".join(str(t or "").split())[:n]
-    if kind == "like":
-        return {"title": f"👍 {who} 赞了你的记录",
-                "body": trim(rec_text, 40) or "（无正文）", "tag": f"mochi-cm-{record_id}"}
-    return {"title": f"💬 {who} 点评了你的记录",
-            "body": trim(text, 80) or "（空）", "tag": f"mochi-cm-{record_id}"}
-
-
-def deliver(notices):
-    for uid, payload in notices:
-        try:
-            send_to_user(uid, payload)
-        except Exception as e:
-            print(f"[push] 评论通知发送出错: {e}", flush=True)
 
 
 def push_due_reminders():
@@ -2066,12 +1898,6 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/api/members":
                 return self._json(member_list(self._need_user()))
 
-            if method == "GET" and path == "/api/leaderboard":
-                # 榜单全组可见——看不见别人的名次，排行榜就没有意义
-                return self._json(leaderboard(
-                    self._need_user(), query.get("period", ["week"])[0],
-                    int(query.get("offset", ["0"])[0] or 0)))
-
             if method == "GET" and path == "/api/overview":
                 return self._json(group_overview(self._need_user()))
 
@@ -2272,6 +2098,32 @@ display:flex;align-items:center;justify-content:center;font-size:19px;flex-shrin
 .legend{margin:0;padding:0;list-style:none}
 .legend li{display:flex;gap:9px;margin:9px 0;font-size:13.5px;line-height:1.6;align-items:flex-start}
 .legend .pin{margin-top:2px}
+.wall{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,9px);
+  grid-auto-columns:9px;gap:3px;margin-top:8px}
+.wall i,.wall u{display:block;border-radius:2px;background:#F0ECE2}
+.wall i.l1{background:#C9E2C0}.wall i.l2{background:#8FC47F}.wall i.l3{background:#4E8F3F}
+.wall u{background:transparent}
+.wall i.now{box-shadow:0 0 0 1.5px var(--green)}
+/* 主页那张卡在 app 里是量宽度、能放几周放几周，右边永远是本周。静态页做不到量，
+   就多画几周、靠右对齐、左边溢出的裁掉——窄屏宽屏看到的都是「塞满、最新的在右边」 */
+.fit{display:flex;justify-content:flex-end;overflow:hidden;margin-top:8px}
+.fit .wall{margin-top:0;flex-shrink:0}
+.wallbox{display:flex;gap:4px}
+.wd{display:grid;grid-template-rows:repeat(7,9px);gap:3px;padding-top:15px;flex-shrink:0}
+.wd b{font-size:8px;line-height:9px;font-weight:400;color:var(--dim);font-family:"SF Mono",Menlo,monospace}
+.mo{position:relative;height:12px;margin-bottom:3px}
+.mo span{position:absolute;top:0;font-size:8.5px;line-height:12px;color:var(--dim);white-space:nowrap;
+font-family:"SF Mono",Menlo,monospace}
+.lg{display:inline-flex;align-items:center;gap:2px}
+.lg i{display:inline-block;width:7px;height:7px;border-radius:2px;background:#F0ECE2}
+.lg i.l1{background:#C9E2C0}.lg i.l2{background:#8FC47F}.lg i.l3{background:#4E8F3F}
+.nums{display:flex;gap:8px}
+.nums div{flex:1;min-width:0;font-size:10.5px;color:var(--sub)}
+.nums b{display:block;font-size:17px;line-height:1.25;color:var(--ink);font-family:"SF Mono",Menlo,monospace}
+.badges{display:flex;flex-wrap:wrap;gap:5px}
+.badges span{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+background:#FBF9F5;color:var(--dim);filter:grayscale(1);opacity:.7}
+.badges span.got{border-color:#D6E8CE;background:#F1F7EE;color:#3F7A33;filter:none;opacity:1}
 .grid7{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
 .day{aspect-ratio:1/1;border-radius:6px;background:#FFF;box-shadow:inset 0 0 0 1px var(--hair);
 display:flex;align-items:center;justify-content:center;font-size:10px;
@@ -2291,6 +2143,7 @@ details[open] summary::after{content:"−"}
 table{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0}
 th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--sub);font-size:12px;font-weight:700}
+table.k td:first-child{white-space:nowrap}
 .hide{display:none}
 </style>
 
@@ -2325,8 +2178,9 @@ th{color:var(--sub);font-size:12px;font-weight:700}
       <li>点底部中间的<b>分享</b>按钮（方框向上箭头）</li>
       <li>往下翻，选<b>「添加到主屏幕」</b> → 添加</li>
     </ol>
-    <div class=warn><b>这一步不能省。</b>iOS 只给「添加到主屏幕」的 app 推送权限——
-    从 Safari 标签页里打开的话，导师给你点赞、待办到点，都不会有通知。</div>
+    <div class=note><b>建议装上。</b>装了是独立图标、全屏打开，用起来就是个普通 app。
+    被开放了待办的人<b>必须装</b>：iOS 只给「添加到主屏幕」的 app 推送权限，
+    不装的话提醒在 app 关着时不会响。</div>
   </div>
 
   <div class="dev-android hide">
@@ -2462,7 +2316,48 @@ th{color:var(--sub);font-size:12px;font-weight:700}
     <div class=row><span class=pin>1</span>
       <div class=card><div class=t style="font-weight:600;color:var(--sub)">● 已同步 · 刚刚</div></div></div>
     <div class=row><span class=pin>2</span>
-      <div class=card><div class=t>🏆 积分榜　　　　今天 1/3 ›</div></div></div>
+      <div class=card><div class=t style="display:flex;align-items:center">🌳 我的成就树<span
+        style="margin-left:auto;color:var(--green);font-size:12px">今天亮了 1/3</span><span
+        style="color:var(--dim);margin-left:6px">›</span></div>
+        <div class=fit><div class=wall>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i class=l3></i><i></i><i class=l3></i><i class=l2></i><i class=l2></i><i></i><i></i>
+          <i class=l3></i><i class=l1></i><i class=l2></i><i class=l2></i><i></i><i></i><i></i>
+          <i class=l1></i><i></i><i class=l3></i><i></i><i class=l3></i><i class=l1></i><i></i>
+          <i class=l1></i><i class=l2></i><i class=l1></i><i class=l3></i><i></i><i class=l1></i><i class=l1></i>
+          <i class=l1></i><i class=l2></i><i></i><i class=l2></i><i></i><i></i><i></i>
+          <i class=l3></i><i></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l1></i><i></i>
+          <i class=l3></i><i class=l1></i><i class=l3></i><i></i><i class=l3></i><i></i><i></i>
+          <i></i><i></i><i></i><i class=l3></i><i class=l2></i><i class=l1></i><i></i>
+          <i></i><i class=l2></i><i></i><i></i><i class=l2></i><i></i><i></i>
+          <i class=l1></i><i class=l3></i><i class=l2></i><i></i><i></i><i></i><i></i>
+          <i class=l3></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l2></i><i class=l3></i><i class=l1></i>
+          <i class=l3></i><i class=l3></i><i class=l3></i><i class=l3></i><i class=l2></i><i class=l3></i><i class=l1></i>
+          <i class=l2></i><i class=l3></i><i class=l2></i><i class=l3></i><i class=l2></i><i class=l3></i><i class=l2></i>
+          <i></i><i class=l3></i><i class=l1></i><i></i><i class=l1></i><i></i><i></i>
+          <i class=l3></i><i class=l3></i><i class=l1></i><i class=l2></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i class=l1></i><i></i><i class=l3></i><i></i><i class=l3></i><i class=l1></i><i></i>
+          <i class=l3></i><i class=l2></i><i></i><i></i><i class=l3></i><i></i><i></i>
+          <i class=l2></i><i></i><i class=l3></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l1></i>
+          <i></i><i></i><i class=l3></i><i class=l1></i><i class=l2></i><i class=l2></i><i class=l1></i>
+          <i class=l2></i><i class=l2></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l2></i><i class="l1 now"></i>
+        </div></div>
+        <div class=s>连续 12 天 · 本月 6 天有记录</div></div></div>
     <div class=row><span class=pin>3</span>
       <div class=card><div class=t>双矩法实时公里级三维重建</div>
         <div class=s>12 条记录 · 最后 今天</div></div></div>
@@ -2474,12 +2369,15 @@ th{color:var(--sub);font-size:12px;font-weight:700}
   </div>
   <ul class=legend>
     <li><span class=pin>1</span><div>同步状态。点开可以登录/注册、开推送、退出。</div></li>
-    <li><span class=pin>2</span><div>积分榜入口。右边 <code>1/3</code> 是今天已经记了几条
-    —— <b>一天最多 3 条</b>。</div></li>
+    <li><span class=pin>2</span><div><b>你自己的贡献墙</b>，一格是一天、一列是一周。
+    今天记了一条，最右边一列里<b>描了边的那一格</b>（就是今天）就亮起来；
+    记得越多颜色越深。它<b>只算你自己的记录</b>，组里不排名次、也没有分数——
+    只回答「我这个月有没有虚度」。点它进<b>成就树</b>。
+    右上角 <code>1/3</code> 是今天记了几条，<b>一天最多 3 条</b>。</div></li>
     <li><span class=pin>3</span><div><b>你自己的课题</b>（含被导师拉进名单的组级项目）。点进去记录。
     第一次登录时 app 会先让你立<b>主课题</b>——用论文题目那个，它排在最上面、
     标着「主课题」，<b>全组可见</b>。</div></li>
-    <li><span class=pin>4</span><div><b>组里其他人的课题</b>。可以看、可以点赞，
+    <li><span class=pin>4</span><div><b>组里其他人的课题</b>。可以看，
     但不能往人家本子里写。</div></li>
   </ul>
 
@@ -2495,14 +2393,13 @@ th{color:var(--sub);font-size:12px;font-weight:700}
     <div class=row style="margin-top:10px"><span class=pin>2</span>
       <div class=card><div class=s>9月5日 18:27 ☀️ 晴</div>
         <div class=t style="font-weight:400;margin-top:3px">第三轮扫描，NA 0.42，PSNR 28.3</div>
-        <div style="margin-top:7px"><span class=chip>★ 赞 1</span><span class=chip>💬 回复 2</span></div></div></div>
+        </div></div>
   </div>
   <ul class=legend>
     <li><span class=pin>1</span><div>选天气 → 写正文 → 加附件 → <b>记下</b>。
     右上角 <code>1/3</code> 是今天的额度，记满了「记下」会变灰。</div></li>
     <li><span class=pin>2</span><div>记下的内容<b>只能追加不能推翻</b>，但正文可以改、
-    附件可以后补——分析常常是隔天才跑完的。
-    导师的<b>赞和点评</b>会出现在这里。</div></li>
+    附件可以后补——分析常常是隔天才跑完的。</div></li>
   </ul>
   <div class=note><b>📷 照片</b>会自动压缩，每台设备各存一份，离线也能加，回头自动传。<br>
   <b>📎 数据</b>是原始文件（csv / mat / npy / tif），原样不动，只在服务器上存一份，
@@ -2534,22 +2431,79 @@ th{color:var(--sub);font-size:12px;font-weight:700}
     <b>背景越绿</b>＝那天专注越久，<b>右上角小黄点</b>＝那天有待办到期。</span></div></li>
   </ul>
 
-  <h3>积分榜</h3>
+  <h3>成就树</h3>
+  <p style="color:var(--sub);font-size:14px;margin-top:-2px">点主页上那面墙进来。</p>
   <div class=shot>
     <div class=row><span class=pin>1</span>
       <div class=card style="background:var(--ink);color:#fff;border-color:var(--ink)">
-        <div class=t>① 我　　　　　　　　18 分</div>
-        <div class=s style="color:rgba(255,255,255,.6)">记录 3 · 导师赞 3</div></div></div>
-    <div class=row><span class=pin>2</span>
-      <div class=card><div class=t>② 李文倩　　　　　　13 分</div>
-        <div class=s>🎁 免一周值日</div></div></div>
+        <div class=s style="display:flex;margin-top:0;color:rgba(255,255,255,.6);font-weight:700">
+          连续记录<span style="margin-left:auto;color:#9FD98F;font-weight:400">今天已亮 1/3</span></div>
+        <div style="font-size:26px;font-weight:800;line-height:1.15;margin-top:2px">12<span
+          style="font-size:13px;font-weight:700;margin-left:4px">天</span></div>
+        <div class=s style="color:rgba(255,255,255,.72)">这个月已经有 6 天留下了记录，
+        不是虚度的一个月。</div></div></div>
+    <div class=row style="align-items:flex-start"><span class=pin style="margin-top:11px">2</span>
+      <div class=card>
+        <div class=wallbox>
+          <div class=wd><b>一</b><b></b><b>三</b><b></b><b>五</b><b></b><b>日</b></div>
+          <div style="min-width:0;overflow:hidden">
+          <div class=mo><span style="left:0px">5 月</span><span style="left:36px">6 月</span><span style="left:96px">7 月</span><span style="left:144px">8 月</span></div>
+          <div class=wall style="margin-top:0">
+          <i class=l1></i><i class=l2></i><i></i><i class=l2></i><i></i><i></i><i></i>
+          <i class=l3></i><i></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l1></i><i></i>
+          <i class=l3></i><i class=l1></i><i class=l3></i><i></i><i class=l3></i><i></i><i></i>
+          <i></i><i></i><i></i><i class=l3></i><i class=l2></i><i class=l1></i><i></i>
+          <i></i><i class=l2></i><i></i><i></i><i class=l2></i><i></i><i></i>
+          <i class=l1></i><i class=l3></i><i class=l2></i><i></i><i></i><i></i><i></i>
+          <i class=l3></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l2></i><i class=l3></i><i class=l1></i>
+          <i class=l3></i><i class=l3></i><i class=l3></i><i class=l3></i><i class=l2></i><i class=l3></i><i class=l1></i>
+          <i class=l2></i><i class=l3></i><i class=l2></i><i class=l3></i><i class=l2></i><i class=l3></i><i class=l2></i>
+          <i></i><i class=l3></i><i class=l1></i><i></i><i class=l1></i><i></i><i></i>
+          <i class=l3></i><i class=l3></i><i class=l1></i><i class=l2></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i class=l1></i><i></i><i class=l3></i><i></i><i class=l3></i><i class=l1></i><i></i>
+          <i class=l3></i><i class=l2></i><i></i><i></i><i class=l3></i><i></i><i></i>
+          <i class=l2></i><i></i><i class=l3></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l1></i>
+          <i></i><i></i><i class=l3></i><i class=l1></i><i class=l2></i><i class=l2></i><i class=l1></i>
+          <i class=l2></i><i class=l2></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l2></i><i class="l1 now"></i>
+          </div></div>
+        </div>
+        <div class=s style="display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:6px;
+          border-top:1px solid var(--hair)">过去一年 · 182 条 · 91 天有记录
+          <span class=lg style="margin-left:auto">少<i></i><i class=l1></i><i class=l2></i><i
+          class=l3></i>多</span></div></div></div>
+    <div class=row><span class=pin>3</span>
+      <div class=card><div class=nums>
+        <div><b>91</b>累计天数</div><div><b>182</b>累计条数</div>
+        <div><b>21</b>最长连续</div><div><b>6</b>本月天数</div></div></div></div>
+    <div class=row style="align-items:flex-start"><span class=pin style="margin-top:11px">4</span>
+      <div class=card><div class=badges>
+        <span class=got>🌱 破土</span><span class=got>🍃 一周</span><span>🌿 满月</span><span>🌳 百日</span>
+        <span class=got>📅 十天</span><span class=got>🗓 五十天</span><span>📆 两百天</span>
+        <span class=got>📗 五十条</span><span>📚 两百条</span></div>
+        <div class=s style="margin-top:7px">下一级：<b style="color:var(--ink)">满月</b> · 连续 30 天有记录</div>
+      </div></div>
   </div>
   <ul class=legend>
-    <li><span class=pin>1</span><div>你自己钉在最上面。分数＝<b>记录 1 分</b>（每天最多 3 条）
-    ＋ <b>导师点赞 5 分</b>。</div></li>
-    <li><span class=pin>2</span><div>周 / 月 / 年三个榜，<b>‹ ›</b> 能翻到上一期看结算结果。
-    奖励见下面「积分和奖励」。</div></li>
+    <li><span class=pin>1</span><div><b>连续多少天</b>。今天还没记<b>不算断</b>——一天还没过完，
+    从昨天开始往回数。真断了也只是从 1 重新开始，没有任何惩罚。右上角是今天记了几条。</div></li>
+    <li><span class=pin>2</span><div><b>一整年的墙</b>，周一在上，描了绿边的那格是今天。
+    手机上一屏放不下一年，默认停在最近这几个月，<b>更早的在左边，拖一下就能看到</b>。
+    有跨年的数据时，墙上面会多出<b>年份按钮</b>，能翻回去看前几年。</div></li>
+    <li><span class=pin>3</span><div>四个数，主语都是你自己：有记录的<b>天数</b>、记了多少<b>条</b>、
+    历史上<b>最长</b>连了几天、<b>这个月</b>有几天有记录。</div></li>
+    <li><span class=pin>4</span><div><b>成长台阶</b>。亮着的是走到了的，灰着的还没到，
+    下面写着下一级要什么（全部台阶见下面「成就树是怎么算的」）。
+    <b>够到了不发任何奖励</b>——一给奖励，人就开始算怎么用最少的力气够到它，
+    这一页就又变成了刷分。</div></li>
   </ul>
+  <p style="font-size:13.5px;color:var(--sub)">再往下是<b>按课题分布</b>：
+  你的记录落在哪几个课题里、各多少条。</p>
+  <div class=key><b>这一页只算你自己的记录，没有名次、没有分数、也没有奖励。</b>
+  你看不到别人的成就树，别人也打不开你的——它不是用来跟同门比的，是用来回头看的。</div>
+  <div class=note><b>但它不是隐私开关。</b>墙是从你的记录算出来的，而记录本身照常可见：
+  个人课题全组看得到；导师在导师端点进某个人，还能看到一张<b>按天的活跃热力图</b>，
+  跟你这面墙是同一份数据。详见下面「谁能看到什么」。</div>
 
   <h3>再深入一点</h3>
   <p style="color:var(--sub);font-size:13.5px;margin-top:-2px">下面这些用到了再看，不着急。</p>
@@ -2586,41 +2540,66 @@ th{color:var(--sub);font-size:12px;font-weight:700}
       <tr><th>东西</th><th>谁看得到</th></tr>
       <tr><td>待办 / 计时 / timeline</td><td><b>只有你自己</b>（服务端强制）</td></tr>
       <tr><td>你的个人课题和记录</td><td><b>全组</b>——含照片和数据文件</td></tr>
+      <tr><td>你每天记了几条（活跃热力图）</td><td><b>导师们</b>——导师端点进某个人就有，
+      跟你的成就墙是同一份数据</td></tr>
+      <tr><td>你的成就树页面（连续天数、成长台阶）</td><td>在你自己设备上现算，
+      <b>没有「看别人的成就树」的入口</b></td></tr>
       <tr><td>导师建的项目</td><td>只有名单里的人 + 导师</td></tr>
       <tr><td>被导师加了名单的项目</td><td>同上</td></tr>
-      <tr><td>导师给你的赞和点评</td><td>你 + 导师们</td></tr>
-      <tr><td>导师设的全员节点 / 积分榜</td><td>全组</td></tr>
+      <tr><td>导师设的全员节点</td><td>全组</td></tr>
       <tr><td>你自己加的重点节点</td><td><b>只有你自己</b>（导师也看不到）</td></tr>
     </table>
     <div class=warn>写记录时记着这一条：<b>你的个人课题是全组可见的</b>，
     照片和数据文件也一样。不想让人看到的，别放进来。</div>
   </details>
 
-  <details><summary>积分和奖励</summary>
-    <table>
-      <tr><th>行为</th><th>分数</th></tr>
-      <tr><td>写一条实验记录</td><td><b>1 分</b>（每天最多 3 条）</td></tr>
-      <tr><td>被<b>导师</b>点赞</td><td><b>5 分</b></td></tr>
-      <tr><td>导师的点评</td><td>0 分</td></tr>
-      <tr><td>同学之间的点赞</td><td>0 分</td></tr>
+  <details><summary>成就树是怎么算的</summary>
+    <table class=k>
+      <tr><th>格子</th><th>意思</th></tr>
+      <tr><td>看不见</td><td>还没到的日子（本周剩下的几天）</td></tr>
+      <tr><td><span class=lg><i></i></span> 浅灰</td><td>那天没有记录</td></tr>
+      <tr><td><span class=lg><i class=l1></i></span> 浅绿</td><td>那天记了 <b>1 条</b></td></tr>
+      <tr><td><span class=lg><i class=l2></i></span> 中绿</td><td>那天记了 <b>2 条</b></td></tr>
+      <tr><td><span class=lg><i class=l3></i></span> 深绿</td><td>那天记<b>满 3 条</b></td></tr>
+      <tr><td>描了边</td><td>今天。<b>绿边</b>＝今天已经亮了，<b>灰边</b>＝今天还没记</td></tr>
     </table>
-    <p style="font-size:13.5px;color:var(--sub)">点评不计分是刻意的：那是给你的反馈，
-    不该变成筹码。同学互赞不计分，否则互刷就是几分钟的事。</p>
-    <table>
-      <tr><th>榜单</th><th>奖励</th></tr>
-      <tr><td>周榜第 1</td><td>1 天事假额度 + 免一周值日</td></tr>
-      <tr><td>周榜前 3</td><td>免一周值日</td></tr>
-      <tr><td>月榜 1 / 2 / 3</td><td>2 天 / 1 天 / 0.5 天事假</td></tr>
-      <tr><td>年榜</td><td>按积分占比分配年终激励</td></tr>
+    <p style="font-size:13.5px;color:var(--sub)">按<b>北京时间</b>分天，跟「一天最多 3 条」
+    是同一套算法，全组一致。人在别的时区时要留意：比如在欧洲晚上 11 点记的，
+    会落在北京时间的<b>第二天</b>那一格。</p>
+    <table class=k>
+      <tr><th>数字</th><th>怎么算</th></tr>
+      <tr><td>连续 N 天</td><td>从今天往回数到断掉那天。<b>今天还没记不算断</b>，从昨天开始数</td></tr>
+      <tr><td>累计天数</td><td>按<b>天</b>算，一天记三条也只算一天</td></tr>
+      <tr><td>累计条数</td><td>按<b>条</b>算</td></tr>
+      <tr><td>最长连续</td><td>历史上最长的那一段</td></tr>
+      <tr><td>本月天数</td><td>这个自然月里有几天有记录</td></tr>
     </table>
+    <table class=k>
+      <tr><th>台阶</th><th>走到的条件</th></tr>
+      <tr><td>🌱 破土</td><td>写下第一条记录</td></tr>
+      <tr><td>🍃 一周</td><td>连续 7 天有记录</td></tr>
+      <tr><td>🌿 满月</td><td>连续 30 天有记录</td></tr>
+      <tr><td>🌳 百日</td><td>连续 100 天有记录</td></tr>
+      <tr><td>📅 十天</td><td>累计 10 天有记录</td></tr>
+      <tr><td>🗓 五十天</td><td>累计 50 天有记录</td></tr>
+      <tr><td>📆 两百天</td><td>累计 200 天有记录</td></tr>
+      <tr><td>📗 五十条</td><td>累计 50 条记录</td></tr>
+      <tr><td>📚 两百条</td><td>累计 200 条记录</td></tr>
+    </table>
+    <p style="font-size:13.5px;color:var(--sub)">「连续」那三级看的是<b>最长连续</b>，
+    走到了之后再断也不会掉。</p>
+    <div class=key>这些数都在<b>你自己设备上</b>现算，一个接口都不调。服务器上也不再有
+    积分、名次这类东西——积分榜、点赞和点评都已经整个删掉了。
+    记录本是给自己看的，不是用来跟同门争的。</div>
   </details>
 
   <details><summary>打开推送通知</summary>
-    <p>同步面板里打开「到点推送通知」。会推：</p>
+    <p>同步面板里打开「到点推送通知」。现在只推一样：</p>
     <ul>
-      <li><b>导师给你的记录点赞或写了点评</b></li>
-      <li>你设的待办提醒到点了（需要开放了待办）</li>
+      <li>你设的<b>待办提醒</b>到点了</li>
     </ul>
+    <div class=note>待办默认不开放，所以<b>没被开放待办的话，开了推送也收不到任何通知</b>，
+    这个开关可以不管。以前导师点赞、点评也会推——那套机制已经整个删掉了。</div>
     <div class=warn>iPhone 必须先<b>「添加到主屏幕」</b>，从 Safari 标签页里打开的话
     系统连推送 API 都不提供。</div>
     <p style="font-size:13.5px;color:var(--sub)">开了推送后，待办标题会上传到服务器
@@ -2630,7 +2609,7 @@ th{color:var(--sub);font-size:12px;font-weight:700}
   <details><summary>导师专用</summary>
     <p>导师登录后，「记录」页顶部会多一个 <b>🔬 查看全组记录</b> 的入口，带未读角标。</p>
     <ul>
-      <li><b>新记录</b>：谁写的、写了什么、缩略图、附件一次铺开，就地能赞和点评。
+      <li><b>新记录</b>：谁写的、写了什么、缩略图、附件一次铺开。
       点「✓ 已读」那条会<b>就地变灰但留在原位</b>，下次再进这个页签才清掉——
       刚点完列表就跳一格最容易点错。点错了再点一下撤销。</li>
       <li><b>今日活跃 › / 本周活跃 ›</b> 可以点开，是一张两段名单：有记录的、

@@ -5,11 +5,10 @@ import { AdvisorView, Avatar } from "./src/AdvisorView.jsx";
 import { putPhoto, delPhoto } from "./src/photos.js";
 import { Photo, FullPhoto } from "./src/PhotoView.jsx";
 import { uploadFile, dropFile, downloadFile, fmtBytes } from "./src/files.js";
-import { Thread, indexComments, threadOf, LIKE, REPLY } from "./src/Comments.jsx";
 import { NC, uid, migrateLab } from "./src/migrate.js";
 import { bjNow, toBJ, dayKeyOf } from "./src/time.js";
 import { Calendar } from "./src/Calendar.jsx";
-import { Leaderboard } from "./src/Leaderboard.jsx";
+import { WallCard, AchievementTree } from "./src/Achievements.jsx";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -53,6 +52,15 @@ function clearTimerSession(...todoIds) {
   writeSessions(map);
   if (!Object.keys(map).length) { try { localStorage.removeItem(BG_TS_SK); } catch {} }
 }
+/* 点赞/点评下线后，本机 _sync 里还留着它们的戳和墓碑。这些行再也推不上去了
+   （comments 已经不在同步类型里），而同步条上的「N 条待同步」是数戳的——
+   不清掉的话那个数字会永远挂在那儿，谁也点不动。数据本身一条不删。 */
+function dropDeadStamps(sync) {
+  const live = new Set(Sync.ALL_KINDS);
+  const keep = (o) => Object.fromEntries(
+    Object.entries(o || {}).filter(([, v]) => live.has(v?.t)));
+  return { ...sync, stamps: keep(sync.stamps), tombs: keep(sync.tombs) };
+}
 function loadAll() {
   let data = { todos: [], notes: [], projects: [], records: [], comments: [], milestones: [] };
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
@@ -64,10 +72,11 @@ function loadAll() {
     projects: data.projects || [],
     experiments: data.experiments || [],
     records: data.records || [],
+    // 点赞和点评已下线，数据跟散记一样原样留着（见上）。不再渲染、也不再同步。
     comments: data.comments || [],
     milestones: data.milestones || [],
   });
-  if (keptSync) data._sync = keptSync;
+  if (keptSync) data._sync = dropDeadStamps(keptSync);
   // Every live session keeps counting while the app is closed — fold the time back in,
   // and drop sessions whose task is gone or already finished.
   const sessions = loadTimerSessions();
@@ -1204,8 +1213,7 @@ function Compose({ lastWeather, onSave, todayCount = 0 }) {
 }
 
 /* ── 已经记下的一条 ── */
-function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, author,
-                     onReply, onDropComment, onLike }) {
+function RecordCard({ r, onSave, onDelete, onOpenPhoto, author }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(r.text);
   const [weather, setWeather] = useState(r.weather || "");
@@ -1265,15 +1273,6 @@ function RecordCard({ r, onSave, onDelete, onOpenPhoto, thread, meId, author,
             </div>
           )}
           {r.files?.map(f => <FileChip key={f.id} f={f}/>)}
-          {/* 只有真有人点评或点赞时才出现——每条记录底下都挂一排按钮，
-              自己的记录本就吵了。有人搭话时输入框自然会长出来。
-              也不给自己的记录点赞的按钮，但导师点的赞要看得见。
-              按钮写「回复」不写「点评」：学生是在回导师，不是点评自己。 */}
-          {/* 自己的记录不给自己点赞的按钮；别人的记录可以点（不计分，就是个鼓励） */}
-          {thread && (author || thread.replies.length > 0 || thread.likes.length > 0) && (
-            <Thread thread={thread} meId={meId} canLike={!!author} onToggleLike={onLike}
-              replyLabel="回复" onReply={onReply} onDelete={onDropComment}/>
-          )}
         </>
       )}
     </div>
@@ -1414,7 +1413,7 @@ export default function MochiApp() {
   const [openProject, setOpenProject] = useState(null);
   const [projForm, setProjForm] = useState(null);   // "new" | project id
   const [viewPhoto, setViewPhoto] = useState(null);
-  const [boardOpen, setBoardOpen] = useState(false);
+  const [treeOpen, setTreeOpen] = useState(false);
   // 导师跳过「立课题」的记号，按人存——换个账号登录还得重新问一遍
   const [skipThesis, setSkipThesis] = useState(false);
   const [skipNode, setSkipNode] = useState(false);
@@ -1459,7 +1458,7 @@ export default function MochiApp() {
         // 从最上层往下逐层关闭，一次 Esc 只关一层
         if (bgAlert) return;                                  // 这个必须明确选择，不能靠 Esc 糊弄过去
         if (viewPhoto) { setViewPhoto(null); return; }
-        if (boardOpen) { setBoardOpen(false); return; }
+        if (treeOpen) { setTreeOpen(false); return; }
         if (remindFor) { setRemindFor(null); return; }
         if (advisorOpen) { setAdvisorOpen(false); return; }
         if (showAdd) { setShowAdd(false); return; }
@@ -1487,7 +1486,7 @@ export default function MochiApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [desktop, bgAlert, viewPhoto, boardOpen, remindFor, advisorOpen, showAdd, addSubParent,
+  }, [desktop, bgAlert, viewPhoto, treeOpen, remindFor, advisorOpen, showAdd, addSubParent,
       editingTodo, projForm, view, openProject, tab, todoOn]);
 
   // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
@@ -1746,8 +1745,6 @@ export default function MochiApp() {
     setTimeout(() => setCanceledTimer(false), 3000);
   };
 
-  // 导师的回复和点赞。作者名字要跟着一起存——对面拿不到成员名单，
-  // 不存的话他只会看到一串 user id。
   const me = auth?.user;
   // 现在看得到别人的记录了，就得知道那一条是谁写的。名册是轻量接口，
   // 只有名字和头像。
@@ -1772,17 +1769,6 @@ export default function MochiApp() {
   // 别人的个人课题现在看得到，但那是他的本子，不该往里写。
   const canWriteProject = (pr) =>
     !!pr && (!pr.ownerId || pr.ownerId === me?.id || (pr.members || []).includes(me?.id));
-  const cmtIndex = useMemo(() => indexComments(data.comments), [data.comments]);
-  const addComment = (recordId, kind, text) => setData(d => ({ ...d, comments: [
-    ...(d.comments || []),
-    { id: uid(), recordId, kind, text: text || "", byName: me?.displayName || "", at: Date.now() },
-  ] }));
-  const dropComment = (c) => setData(d => ({ ...d, comments: (d.comments || []).filter(x => x.id !== c.id) }));
-  // 谁都能给看得到的记录点赞；只有导师的赞计分，这条规则在服务端
-  const toggleLike = (r) => {
-    const mine = threadOf(cmtIndex, r.id).likes.find(c => !c.ownerId || c.ownerId === me?.id);
-    if (mine) dropComment(mine); else addComment(r.id, LIKE, "");
-  };
 
   // 重点节点：导师建的是全员节点，学生建的只有他自己看得到。谁建的谁能改，
   // 导师之间还能互相维护全员节点（服务端强制）。这里也挡一道——被拒的改动虽然
@@ -1831,20 +1817,21 @@ export default function MochiApp() {
   const deleteProject = (id) => {
     const gone = data.records.filter(r => r.projectId === id);
     const token = Sync.getAuth()?.token;
-    const goneIds = new Set(gone.map(r => r.id));
     gone.forEach(r => {
       (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
       (r.files || []).forEach(f => dropFile(f.id, token));
     });
     setData(d => ({ ...d, projects: d.projects.filter(x=>x.id!==id),
-      records: d.records.filter(r=>r.projectId!==id),
-      comments: (d.comments || []).filter(c => !goneIds.has(c.recordId)) }));
+      records: d.records.filter(r=>r.projectId!==id) }));
     setOpenProject(null);
   };
-  // 今天我自己记了几条。导师端本地存着全组的记录，所以必须按归属过滤，
-  // 否则别人记满了会把导师自己也挡住。
-  const myTodayRecords = data.records.filter(r =>
-    (!r.ownerId || r.ownerId === me?.id) && dayKeyOf(r.at) === dayKeyOf(Date.now())).length;
+  /* 我自己写的那些。导师端本地存着全组的记录，所以必须按归属过滤——
+     否则别人记满了会把导师自己也挡住，成就墙上也会长出别人的绿格子。
+     没有 ownerId 的是本机刚写、还没同步上去的，那也是我的。 */
+  const myRecords = useMemo(
+    () => data.records.filter(r => !r.ownerId || r.ownerId === me?.id), [data.records, me?.id]);
+  const myTodayRecords = myRecords.filter(r =>
+    dayKeyOf(r.at) === dayKeyOf(Date.now())).length;
 
   const addRecord = (projectId, info) =>
     setData(d => ({ ...d, records: [...d.records, { id:uid(), projectId, at:Date.now(), ...info }] }));
@@ -1853,10 +1840,7 @@ export default function MochiApp() {
   const deleteRecord = (r) => {
     (r.photos || []).forEach(pid => delPhoto(pid).catch(()=>{}));
     (r.files || []).forEach(f => dropFile(f.id, Sync.getAuth()?.token));
-    setData(d => ({ ...d,
-      records: d.records.filter(x => x.id !== r.id),
-      // 记录没了，挂在它下面的回复和赞也该走——留着就是服务器上一堆孤儿
-      comments: (d.comments || []).filter(c => c.recordId !== r.id) }));
+    setData(d => ({ ...d, records: d.records.filter(x => x.id !== r.id) }));
   };
 
   // 日历页签的角标：一周内要到的重点节点。过期的不算，那已经是历史了
@@ -2141,19 +2125,16 @@ export default function MochiApp() {
             <Compose lastWeather={lastWeather} onSave={info => addRecord(pr.id, info)}
               todayCount={myTodayRecords}/>
           ) : (
-            /* 别人的个人课题：看得到、能点赞，但不往人家本子里写 */
+            /* 别人的个人课题：看得到，但不往人家本子里写 */
             <div style={{ background:"#F7F4EE", border:"1px solid #EDE8DE", borderRadius:14,
               padding:"11px 13px", marginBottom:18, fontSize:12.5, color:"#8C8478", lineHeight:1.6 }}>
-              这是 {memberById[pr.ownerId]?.displayName || "同学"} 的课题，你可以看和点赞，
+              这是 {memberById[pr.ownerId]?.displayName || "同学"} 的课题，你可以看，
               但不能往里记。
             </div>
           )}
           {recs.map(r => (
             <RecordCard key={r.id} r={r} onSave={saveRecord} onDelete={deleteRecord} onOpenPhoto={setViewPhoto}
-              thread={threadOf(cmtIndex, r.id)} meId={me?.id}
-              author={r.ownerId && r.ownerId !== me?.id ? memberById[r.ownerId] : null}
-              onLike={()=>toggleLike(r)}
-              onReply={(text)=>addComment(r.id, REPLY, text)} onDropComment={dropComment}/>
+              author={r.ownerId && r.ownerId !== me?.id ? memberById[r.ownerId] : null}/>
           ))}
           {recs.length === 0 && (
             <div style={{ padding:"20px 0", textAlign:"center", color:"#C5BEB0", fontSize:13 }}>还没有记录</div>
@@ -2250,9 +2231,10 @@ export default function MochiApp() {
     );
   }
 
-  if (boardOpen) {
+  if (treeOpen) {
     return (<>
-      <Leaderboard onClose={()=>setBoardOpen(false)}/>
+      <AchievementTree records={myRecords} projects={data.projects} todayCount={myTodayRecords}
+        dailyCap={DAILY_CAP} onClose={()=>setTreeOpen(false)}/>
       <style>{CSS}</style>
     </>);
   }
@@ -2263,7 +2245,7 @@ export default function MochiApp() {
   if (advisorOpen) {
     return (<>
       <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} onPhoto={setViewPhoto}
-        actions={{ createProject: createGroupProject, setProjectMembers, addComment, dropComment }} />
+        actions={{ createProject: createGroupProject, setProjectMembers }} />
       {photoUI}
       <style>{CSS}</style>
     </>);
@@ -2326,19 +2308,11 @@ export default function MochiApp() {
           <>
             <SyncBar data={data} applySync={applySync} onOpenAdvisor={()=>setAdvisorOpen(true)} />
 
-            <button onClick={()=>setBoardOpen(true)} style={{
-              width:"100%", display:"flex", alignItems:"center", gap:9, marginBottom:10,
-              padding:"12px 13px", borderRadius:13, cursor:"pointer", fontFamily:"inherit",
-              border:"1px solid #E8E4DA", background:"#FFF", textAlign:"left",
-            }}>
-              <span style={{ fontSize:15 }}>🏆</span>
-              <span style={{ fontSize:14, fontWeight:700, color:"#2C2C2C", flex:1 }}>积分榜</span>
-              <span style={{ fontSize:11.5, fontWeight:700, fontFamily:MONO,
-                color: myTodayRecords >= DAILY_CAP ? "#C02556" : "#B0A99B" }}>
-                今天 {myTodayRecords}/{DAILY_CAP}
-              </span>
-              <span style={{ color:"#C0B8A8", fontSize:15, lineHeight:1 }}>›</span>
-            </button>
+            {/* 自己的贡献墙。摆在主页第一屏是刻意的——「今天亮了没有」得一眼看见，
+                藏在二级页面里的话，这个机制一天也用不上。它读的全是本机数据，
+                也只画自己的格子：这一页上没有任何一个别人的数字。 */}
+            <WallCard records={myRecords} todayCount={myTodayRecords} dailyCap={DAILY_CAP}
+              onOpen={()=>setTreeOpen(true)}/>
             {projForm === "new" && <ProjectForm onSave={saveProject} onCancel={()=>setProjForm(null)}/>}
 
             {/* 登录了、还一个自己的项目都没有 → 先引导他把主课题立起来。
@@ -2586,11 +2560,15 @@ export const CSS = `
   @keyframes sheetUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
   @keyframes flashFade { from{opacity:0} to{opacity:1} }
 
-  /* 点赞：弹一下再落回。回弹曲线比线性有"手感"，但幅度压在 1.4 倍以内——
-     这是个每天点几十次的按钮，动静太大会烦。 */
-  @keyframes likePop { 0%{transform:scale(1)} 35%{transform:scale(1.4)}
-    62%{transform:scale(.92)} 100%{transform:scale(1)} }
-  .like-pop { display:inline-block; animation: likePop .42s cubic-bezier(.34,1.56,.64,1) both; }
+  /* 成就墙上「今天」那一格亮起来：一次呼吸就停，不循环。
+     这个格子会在主页上待一整天，闪个不停的话它就从「今天记过了」
+     变成了一个催命的东西——而这一页的全部意思正好相反。 */
+  @keyframes wallLit {
+    0%   { transform:scale(.4); opacity:.2 }
+    55%  { transform:scale(1.18); opacity:1 }
+    100% { transform:scale(1); opacity:1 }
+  }
+  .wall-today { animation: wallLit .5s cubic-bezier(.34,1.4,.64,1) both; }
   /* 标已读：整条淡下去，不是消失。手还停在那儿，列表却跳一格是最容易点错的。 */
   .read-fade { transition: opacity .38s ease, filter .38s ease; }
 

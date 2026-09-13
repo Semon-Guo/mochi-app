@@ -168,8 +168,9 @@ def main():
         time.sleep(35)
         chk("已发过的提醒不会重复推送", len(received) == before, f"{len(received)} vs {before}")
 
-        print("\n── 导师点赞/点评，学生收到通知 ──")
-        # 学生先写一条记录
+        print("\n── 点赞/点评删掉之后，推送只剩待办提醒 ──")
+        # 点赞和点评曾经是第二个推送来源。整套机制删掉了，这里钉住两件事：
+        # 老客户端推 comments 上来不会报错，也不会再把谁吵醒。
         now2 = int(time.time() * 1000)
         s, r = call("/api/sync", {"records": [
             {"id": "rec-1", "updatedAt": now2,
@@ -189,49 +190,13 @@ def main():
         s, r = call("/api/sync", {"comments": [
             {"id": "cm-like", "updatedAt": now2 + 1000,
              "data": {"recordId": "rec-1", "kind": "like"}}]}, prof)
-        chk("导师点赞被接受", s == 200 and r.get("applied") == 1, str(r.get("rejected")))
-        for _ in range(40):
-            if received:
-                break
-            time.sleep(0.1)
-        chk("学生设备收到了点赞通知", len(received) == 1, f"{len(received)} 条")
-        if received:
-            payload = json.loads(decrypt(received[0]["body"], ua_priv, auth_secret))
-            chk("标题写清楚是谁赞的", "郭老师" in payload.get("title", "") and "赞" in payload.get("title", ""),
-                payload.get("title"))
-            chk("正文带上记录摘要，不用点开就知道是哪条",
-                "PSNR" in payload.get("body", ""), payload.get("body"))
+        chk("老客户端推上来的赞被安静忽略",
+            s == 200 and r.get("applied") == 0 and not r.get("rejected"), str(r))
+        time.sleep(1.5)
+        chk("没有人因此被推送吵醒", len(received) == 0, f"{len(received)} 条")
 
-        received.clear()
-        s, r = call("/api/sync", {"comments": [
-            {"id": "cm-reply", "updatedAt": now2 + 2000,
-             "data": {"recordId": "rec-1", "kind": "reply", "text": "暗场校正做了吗？"}}]}, prof)
-        chk("导师点评被接受", s == 200 and r.get("applied") == 1)
-        for _ in range(40):
-            if received:
-                break
-            time.sleep(0.1)
-        chk("学生设备收到了点评通知", len(received) == 1, f"{len(received)} 条")
-        if received:
-            payload = json.loads(decrypt(received[0]["body"], ua_priv, auth_secret))
-            chk("标题说明是点评", "点评" in payload.get("title", ""), payload.get("title"))
-            chk("正文就是点评原文", "暗场校正" in payload.get("body", ""), payload.get("body"))
-
-        # 同一条重推不该再吵一次——客户端偶尔会因为推送记账丢失而重发
-        received.clear()
-        call("/api/sync", {"comments": [
-            {"id": "cm-reply", "updatedAt": now2 + 3000,
-             "data": {"recordId": "rec-1", "kind": "reply", "text": "暗场校正做了吗？"}}]}, prof)
-        time.sleep(1.2)
-        chk("同一条评论重推不会重复通知", len(received) == 0, f"{len(received)} 条")
-
-        # 自己给自己写的东西不该给自己发通知
-        received.clear()
-        call("/api/sync", {"comments": [
-            {"id": "cm-self", "updatedAt": now2 + 4000,
-             "data": {"recordId": "rec-1", "kind": "reply", "text": "做了，前一天测的"}}]}, token)
-        time.sleep(1.2)
-        chk("学生回自己的记录不会给自己发通知", len(received) == 0, f"{len(received)} 条")
+        s, r = call("/api/sync?since=0", token=prof)
+        chk("导师也拉不到 comments 了", "comments" not in r, str(list(r.keys())))
 
         print(f"\n{'=' * 46}\n通过 {passed} 项，失败 {failed} 项\n{'=' * 46}")
         return 1 if failed else 0

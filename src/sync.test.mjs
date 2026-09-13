@@ -5,7 +5,7 @@
  */
 import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_AFTER,
          LAB_KINDS, ALL_KINDS, canUseTodo, setAuth, onAuthChange } from "./sync.js";
-import { indexComments, threadOf, myLike } from "./comments.js";
+import { countByDay, buildWall, streaks, monthStats, yearsWith, badgeState } from "./achievements.js";
 import { migrateLab } from "./migrate.js";
 import { freshRecords, FRESH_WINDOW } from "./seen.js";
 
@@ -169,48 +169,6 @@ console.log("\n── 未读判定（导师端和同步条上的角标共用）�
   chk("已读集合还没初始化时一条都不算", freshRecords(rs, null, "prof", now).length === 0);
 }
 
-console.log("\n── 评论索引 ──");
-{
-  const cs = [
-    { id: "c1", recordId: "r1", kind: "reply", text: "第二条", at: 200, ownerId: "prof" },
-    { id: "c2", recordId: "r1", kind: "reply", text: "第一条", at: 100, ownerId: "prof" },
-    { id: "c3", recordId: "r1", kind: "like", ownerId: "prof" },
-    { id: "c4", recordId: "r2", kind: "like", ownerId: "other" },
-    { id: "c5", kind: "reply", text: "没挂在任何记录上" },
-  ];
-  const ix = indexComments(cs);
-  const t1 = threadOf(ix, "r1");
-  chk("回复和赞分开归类", t1.replies.length === 2 && t1.likes.length === 1);
-  chk("回复按时间正序", t1.replies[0].text === "第一条" && t1.replies[1].text === "第二条");
-  chk("没有 recordId 的评论被忽略，不会污染任何一条记录", !ix.has(undefined) && ix.size === 2);
-  chk("没有评论的记录拿到空线程", threadOf(ix, "r9").replies.length === 0);
-  chk("认得出自己点的赞", myLike(t1, "prof")?.id === "c3");
-  chk("别人的赞不算自己点的", myLike(threadOf(ix, "r2"), "prof") === undefined);
-  // 本机刚点的赞还没同步，服务器还没回填 ownerId
-  const local = indexComments([{ id: "c6", recordId: "r3", kind: "like" }]);
-  chk("本机新点、还没同步的赞也算自己的", myLike(threadOf(local, "r3"), "prof")?.id === "c6");
-}
-
-console.log("\n── 评论走同步 ──");
-{
-  const prev = { ...base(), comments: [] };
-  const next = { ...prev, comments: [{ id: "c1", recordId: "r1", kind: "reply", text: "问一句" }] };
-  const out = stampChanges(prev, next, 7000, ALL_KINDS);
-  chk("新回复会打戳，能被推上去", out._sync.stamps.c1?.t === "comments",
-      JSON.stringify(out._sync.stamps.c1));
-  const gone = stampChanges(out, { ...out, comments: [] }, 8000, ALL_KINDS);
-  chk("取消赞/删回复留下墓碑", gone._sync.tombs.c1?.t === "comments");
-}
-{
-  const d = { ...base(), comments: [] };
-  const out = mergeIncoming(d, freshSync(d), {
-    comments: [{ id: "c1", ownerId: "prof", updatedAt: 100,
-                 data: { recordId: "r1", kind: "reply", text: "暗场校正做了吗？", byName: "郭老师" } }],
-  });
-  chk("导师的回复能合并进本地", out.comments.length === 1 && out.comments[0].text === "暗场校正做了吗？");
-  chk("合并后带上作者 id", out.comments[0].ownerId === "prof");
-}
-
 console.log("\n── planPhotoSync ──");
 // 这一组钉的是一个真上过线的 bug：管理员那台设备把学生的照片当成自己的
 // 往上传，服务端每次 403，客户端什么都不记，于是每 2 分钟重试一次，
@@ -316,6 +274,55 @@ console.log("\n── 待办的开放权限 ──");
   setAuth({ token: "t", user: { id: "u1", features: { todo: true } } });
   chk("登录态一变就广播，退订后不再收到", seen.length === 2 && seen[0] === true && seen[1] === false,
       JSON.stringify(seen));
+}
+
+console.log("\n── 成就墙：按天数格子 ──");
+// 主页那面墙的每一格都来自这几个函数。算错一天，人看到的就是「我明明记了
+// 却没亮」——这比少一个功能更伤，因为它直接否定了人当天干过的事。
+{
+  const D = 86400000;
+  // 固定一个时刻当「现在」，不然这组断言是哪天跑的就出哪天的结果。
+  // 取北京时间的正午，离两边的午夜都够远，时区怎么跳都落在同一天里。
+  const noon = (daysAgo) => Date.UTC(2026, 8, 13, 4, 0, 0) - daysAgo * D;
+  const NOW = noon(0);
+  const at = (daysAgo, n = 1) => Array.from({ length: n },
+    (_, i) => ({ id: `r${daysAgo}-${i}`, at: noon(daysAgo), projectId: "p1" }));
+
+  const counts = countByDay([...at(0), ...at(0), ...at(2)]);
+  chk("同一天的记录归到一格", [...counts.values()].sort().join(",") === "1,2");
+  chk("没有 at 的记录不算进任何一天", countByDay([{ id: "x" }]).size === 0);
+
+  const cols = buildWall(at(0), { weeks: 4, now: NOW, endTs: NOW });
+  chk("一列一周、一周七天", cols.length === 4 && cols.every((c) => c.length === 7));
+  chk("最后一列是本周", cols[3].some((c) => c.today));
+  const flat = cols.flat();
+  chk("今天那一格亮着", flat.find((c) => c.today)?.n === 1);
+  chk("还没到的日子标成 future，不画成灰格子", flat.filter((c) => c.future).every((c) => c.n === 0));
+  chk("过去的日子一律不是 future", flat.filter((c) => !c.future && !c.today).every((c) => c.ms <= flat.find((x) => x.today).ms));
+
+  const deep = buildWall([...at(0), ...at(0), ...at(0), ...at(0)], { weeks: 1, now: NOW, endTs: NOW });
+  chk("一天记满（3 条以上）就是最深那档", deep.flat().find((c) => c.today)?.level === 3);
+
+  // 连续天数：今天空着不算断，否则每天 00:01 都要被清一次零
+  chk("连着三天就是 3", streaks([...at(0), ...at(1), ...at(2)], NOW).current === 3);
+  chk("今天还没记，从昨天往回数", streaks([...at(1), ...at(2)], NOW).current === 2);
+  chk("昨天也没记才算断", streaks([...at(2), ...at(3)], NOW).current === 0);
+  chk("一条都没有时是 0，不是 NaN", streaks([], NOW).current === 0);
+
+  const s2 = streaks([...at(1), ...at(2), ...at(3), ...at(10), ...at(10)], NOW);
+  chk("最长连续认的是历史上最长的那一段", s2.longest === 3, String(s2.longest));
+  chk("有记录的天数按天算，一天记两条也只算一天", s2.activeDays === 4, String(s2.activeDays));
+  chk("累计条数按条算", s2.total === 5, String(s2.total));
+
+  const mo = monthStats([...at(0), ...at(1)], NOW);
+  chk("本月小结只数本月的天", mo.days === 2 && mo.total === 2, JSON.stringify(mo));
+  chk("本月的分母是「到今天为止过了几天」", mo.elapsed === 13, String(mo.elapsed));
+
+  chk("年份从新到旧", yearsWith([{ at: noon(0) }, { at: noon(400) }]).join(",") === "2026,2025");
+
+  const b = badgeState(streaks(at(0), NOW));
+  chk("写了第一条就有第一级", b.find((x) => x.key === "first").got);
+  chk("没够到的台阶也返回，只是没达成", b.find((x) => x.key === "d100").got === false);
 }
 
 console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
