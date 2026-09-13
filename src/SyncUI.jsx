@@ -361,7 +361,13 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                 </span>
               </label>
               )}
-              {/* 推送：app 关着也能收到提醒，代价是任务标题要上传 */}
+              {/* 推送：app 关着也能收到提醒，代价是任务标题要上传。
+                  跟上面「同步待办」一样只给开放了待办的人：点赞和点评删掉之后，推的
+                  只剩待办提醒，没开放待办的人开了也永远收不到一条——摆一个按了没有
+                  任何效果的开关，只会让人以为推送坏了。
+                  已经订阅过的不替他退订：服务器上的提醒本来就按 todoOn 清空了，
+                  什么都不会推；等哪天开放了待办，开关回来时还是开着的。 */}
+              {todoOn && (
               <div style={{ padding: "10px 11px", borderRadius: 12, border: `1px solid ${C.line}`,
                 background: "#FCFAF6", marginTop: 8 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -414,6 +420,7 @@ export function SyncBar({ data, applySync, onOpenAdvisor }) {
                     color: /失败|拒绝|不支持|未启用|没有/.test(pushMsg) ? C.red : C.green }}>{pushMsg}</div>
                 )}
               </div>
+              )}
 
               {/* 恢复手段：本机数据和服务器对不上时（比如从旧版本升级过来、
                   或者曾经换过账号），清空重拉是最直接的办法 */}

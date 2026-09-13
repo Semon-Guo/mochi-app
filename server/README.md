@@ -39,6 +39,9 @@
 - **收回不动任何数据。** 任务和计时存在本人设备上，服务器这边只是不再显示；再开放回来一条不少。
   客户端那边会跟着停掉提醒调度，并把服务器上那份推送提醒清空——看不到的任务半夜推一条通知过来，
   人只会以为 app 坏了。
+- **推送开关也跟着藏。** 点赞和点评删掉之后，推送只剩待办提醒，没开放待办的人看见
+  「到点推送通知」、开了也永远收不到一条，只会以为推送坏了。已经订阅过的**不替他退订**：
+  提醒已经按上一条清空，什么都不会推；开放回来时开关还是开着的。
 - **管理员能改自己的。** 角色不让改自己是怕把自己锁在门外，而这个开关随时点得回来。
 - **升级老库时**：所有人一律关（这正是这个改动的本意），唯独 `admin` 先开着——他是唯一能再
   打开的人，把他自己也关在外面只会让人以为升级把功能弄丢了。
@@ -87,7 +90,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（252 项）
+python3 server/test_server.py   # 服务端 API（237 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -426,7 +429,7 @@ node dev/shot.mjs "http://localhost:5173/mochi-app/dev/preview.html?view=按项�
 
 ```bash
 python3 server/test_webpush.py    # 用 RFC 8291 官方测试向量逐字节比对加密结果（16 项）
-python3 server/test_push_e2e.py   # 全链路：服务器真推一条 → 本地假端点接收 → 解密还原（28 项）
+python3 server/test_push_e2e.py   # 全链路：服务器真推一条 → 本地假端点接收 → 解密还原（21 项）
 ```
 
 `test_push_e2e.py` 自己扮演浏览器（生成 P-256 订阅密钥、按 RFC 解密），

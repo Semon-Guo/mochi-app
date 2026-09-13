@@ -2284,7 +2284,7 @@ table.k td:first-child{white-space:nowrap}
     <button class=btn onclick="go(4)">装好了，看怎么用</button>
   </div>
   <div style="text-align:center">
-    <button class=link onclick="go(4)">我只想先用待办，暂时不同步 →</button>
+    <button class=link onclick="go(4)">先不装证书，只看看怎么用 →</button>
   </div>
 </section>
 
@@ -2368,7 +2368,8 @@ table.k td:first-child{white-space:nowrap}
         <div class=s>张亦弛 · 3 条记录</div></div></div>
   </div>
   <ul class=legend>
-    <li><span class=pin>1</span><div>同步状态。点开可以登录/注册、开推送、退出。</div></li>
+    <li><span class=pin>1</span><div>同步状态。点开可以登录/注册、退出；
+    开放了待办的人还能在这里开推送。</div></li>
     <li><span class=pin>2</span><div><b>你自己的贡献墙</b>，一格是一天、一列是一周。
     今天记了一条，最右边一列里<b>描了边的那一格</b>（就是今天）就亮起来；
     记得越多颜色越深。它<b>只算你自己的记录</b>，组里不排名次、也没有分数——
@@ -2593,13 +2594,13 @@ table.k td:first-child{white-space:nowrap}
     记录本是给自己看的，不是用来跟同门争的。</div>
   </details>
 
-  <details><summary>打开推送通知</summary>
-    <p>同步面板里打开「到点推送通知」。现在只推一样：</p>
+  <details><summary>打开推送通知（开放了待办才有）</summary>
+    <p>被开放了待办之后，同步面板里会多出「到点推送通知」这个开关。打开后会推：</p>
     <ul>
-      <li>你设的<b>待办提醒</b>到点了</li>
+      <li>你设的<b>待办提醒</b>到点了——app 关着也会响</li>
     </ul>
-    <div class=note>待办默认不开放，所以<b>没被开放待办的话，开了推送也收不到任何通知</b>，
-    这个开关可以不管。以前导师点赞、点评也会推——那套机制已经整个删掉了。</div>
+    <div class=note><b>没被开放待办的人看不到这个开关。</b>现在推的只有待办提醒，
+    没有待办也就没有东西可推。以前导师点赞、点评也会推——那套机制已经整个删掉了。</div>
     <div class=warn>iPhone 必须先<b>「添加到主屏幕」</b>，从 Safari 标签页里打开的话
     系统连推送 API 都不提供。</div>
     <p style="font-size:13.5px;color:var(--sub)">开了推送后，待办标题会上传到服务器
