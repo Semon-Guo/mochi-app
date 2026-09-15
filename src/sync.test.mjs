@@ -8,6 +8,7 @@ import { stampChanges, mergeIncoming, pendingCount, planPhotoSync, PHOTO_RETRY_A
 import { countByDay, buildWall, streaks, monthStats, yearsWith, badgeState } from "./achievements.js";
 import { migrateLab } from "./migrate.js";
 import { freshRecords, FRESH_WINDOW } from "./seen.js";
+import * as L from "./leave.js";
 
 let passed = 0, failed = 0;
 const chk = (name, cond, info = "") => {
@@ -323,6 +324,120 @@ console.log("\n── 成就墙：按天数格子 ──");
   const b = badgeState(streaks(at(0), NOW));
   chk("写了第一条就有第一级", b.find((x) => x.key === "first").got);
   chk("没够到的台阶也返回，只是没达成", b.find((x) => x.key === "d100").got === false);
+}
+
+console.log("\n── 报备与请假 ──");
+{
+  const D = (d) => L.dayStart(d);                 // 那天 00:00（北京时间）
+  const at = (d, h, m = 0) => D(d) + h * 3600000 + m * 60000;
+
+  chk("dayStr / dayStart 互为逆运算", L.dayStr(D("2026-09-16")) === "2026-09-16");
+  chk("归日按北京时间，不跟着本机时区跑",
+      L.dayStr(at("2026-09-16", 23, 59)) === "2026-09-16" &&
+      L.dayStr(at("2026-09-16", 0, 1)) === "2026-09-16");
+
+  // ── 通知第二节（一）：10:00 前到岗的自动通过 ──
+  chk("9:45 到岗 → 自动通过", L.statusFor({ kind: "late", arriveMin: 585 }) === "auto");
+  chk("9:59 到岗 → 自动通过", L.statusFor({ kind: "late", arriveMin: 599 }) === "auto");
+  chk("10:00 整到岗 → 要导师批（「10:00 前」不含 10:00）",
+      L.statusFor({ kind: "late", arriveMin: 600 }) === "pending");
+  chk("没填到岗时间不会误判成自动通过", L.statusFor({ kind: "late" }) === "pending");
+
+  // ── （二）病假：口头报备为主，系统只留痕 ──
+  chk("病假是备案，不是审批", L.statusFor({ kind: "sick" }) === "filed");
+  // ── （三）事假 / 补休：一律要批 ──
+  chk("事假要导师批", L.statusFor({ kind: "personal" }) === "pending");
+  chk("补休要导师批", L.statusFor({ kind: "comp" }) === "pending");
+
+  // ── 跨几天：含头含尾，跟人嘴里说的「请两天」一致 ──
+  chk("当天来回算一天", L.spanDays(at("2026-09-16", 9), at("2026-09-16", 18)) === 1);
+  chk("跨到第三天算三天", L.spanDays(at("2026-09-16", 9), at("2026-09-18", 10)) === 3);
+  chk("只跨一夜、不到 24 小时也算两天",
+      L.spanDays(at("2026-09-16", 20), at("2026-09-17", 9)) === 2);
+  chk("返回早于离开算 0，不是负数", L.spanDays(at("2026-09-18", 9), at("2026-09-16", 9)) === 0);
+
+  // ── 病假超过 2 天要补病历 ──
+  const sick2 = { kind: "sick", fromAt: at("2026-09-16", 9), toAt: at("2026-09-17", 18) };
+  const sick3 = { kind: "sick", fromAt: at("2026-09-16", 9), toAt: at("2026-09-18", 18) };
+  chk("2 天的病假不用补病历", !L.needsProof(sick2));
+  chk("3 天的病假要补病历", L.needsProof(sick3));
+  chk("事假再长也不要病历",
+      !L.needsProof({ kind: "personal", fromAt: at("2026-09-16", 9), toAt: at("2026-09-30", 9) }));
+  chk("还没回来就不算欠着病历", !L.proofDue(sick3, at("2026-09-17", 12)));
+  chk("回来了还没传就是欠着", L.proofDue(sick3, at("2026-09-19", 12)));
+  chk("传了就不欠了",
+      !L.proofDue({ ...sick3, proof: { photos: ["p1"] } }, at("2026-09-19", 12)));
+
+  // ── 标记：都不拦提交，只标出来给导师看 ──
+  const keys = (l, sub_) => L.flagsOf(l, sub_).map((f) => f.key).join(",");
+  chk("事假提前 48 小时提交：没有标记",
+      keys({ kind: "personal", fromAt: at("2026-09-18", 9), toAt: at("2026-09-18", 18) },
+           at("2026-09-16", 9)) === "");
+  chk("事假提前 2 小时提交：标「未提前 24 小时」",
+      keys({ kind: "personal", fromAt: at("2026-09-16", 11), toAt: at("2026-09-16", 18) },
+           at("2026-09-16", 9)) === "rush");
+  chk("事假 4 天：标「超过 3 天」",
+      keys({ kind: "personal", fromAt: at("2026-09-18", 9), toAt: at("2026-09-21", 18) },
+           at("2026-09-16", 9)) === "long");
+  chk("当晚提交的晚到报备：没有标记",
+      keys({ kind: "late", day: "2026-09-17", arriveMin: 570 }, at("2026-09-16", 23)) === "");
+  chk("当天 9:00 之后才补的条子：标出来",
+      keys({ kind: "late", day: "2026-09-16", arriveMin: 570 }, at("2026-09-16", 9, 30)) === "after");
+  chk("晚于 10:00 到岗：标出来",
+      keys({ kind: "late", day: "2026-09-17", arriveMin: 630 }, at("2026-09-16", 23)) === "beyond");
+
+  // ── 提交前自检 ──
+  chk("9:00 前到岗不用报备",
+      /不用报备/.test(L.checkDraft({ kind: "late", day: "2026-09-17", arriveMin: 520 },
+                                   at("2026-09-16", 22))));
+  chk("晚到报备缺日期拦下来",
+      L.checkDraft({ kind: "late", arriveMin: 600 }, at("2026-09-16", 22)) !== "");
+  chk("事假不写事由拦下来",
+      /事由/.test(L.checkDraft({ kind: "personal", fromAt: at("2026-09-18", 9),
+                                 toAt: at("2026-09-18", 18), reason: "  " }, at("2026-09-16", 9))));
+  chk("正常的事假过得去",
+      L.checkDraft({ kind: "personal", fromAt: at("2026-09-18", 9), toAt: at("2026-09-18", 18),
+                     reason: "家里有事" }, at("2026-09-16", 9)) === "");
+  chk("返回早于离开拦下来",
+      L.checkDraft({ kind: "personal", fromAt: at("2026-09-18", 9), toAt: at("2026-09-17", 9),
+                     reason: "x" }, at("2026-09-16", 9)) !== "");
+
+  // ── 覆盖的日子（日历标记用）──
+  chk("三天的假覆盖三个日子",
+      L.daysCovered({ kind: "personal", fromAt: at("2026-09-16", 9), toAt: at("2026-09-18", 9) })
+        .join(",") === "2026-09-16,2026-09-17,2026-09-18");
+  chk("晚到报备只占当天",
+      L.daysCovered({ kind: "late", day: "2026-09-16" }).join(",") === "2026-09-16");
+
+  // ── 统计：数的是「报备过的晚到」，不是迟到 ──
+  const ls = [
+    { id: "a", kind: "late", ownerId: "u1", day: "2026-09-02", status: "auto" },
+    { id: "b", kind: "late", ownerId: "u1", day: "2026-09-09", status: "auto" },
+    { id: "c", kind: "late", ownerId: "u1", day: "2026-09-11", status: "canceled" },
+    { id: "d", kind: "late", ownerId: "u1", day: "2026-08-30", status: "auto" },
+    { id: "e", kind: "late", ownerId: "u2", day: "2026-09-03", status: "pending" },
+    { id: "f", kind: "personal", ownerId: "u1", fromAt: at("2026-09-20", 9),
+      toAt: at("2026-09-20", 18), status: "pending" },
+  ];
+  chk("本月晚到只数本月的", L.lateCount(ls, "u1", "2026-09") === 2, String(L.lateCount(ls, "u1", "2026-09")));
+  chk("撤回的不算", !ls.filter((l) => l.status === "canceled").some((l) => L.lateCount([l], "u1", "2026-09")));
+  chk("别人的不算进我的", L.lateCount(ls, "u2", "2026-09") === 1);
+
+  chk("导师待处理 = 待批的 + 该补病历没补的",
+      L.needsAdvisor([...ls, { ...sick3, id: "g", ownerId: "u3", status: "filed" }],
+                     at("2026-09-19", 12)).map((l) => l.id).sort().join(",") === "e,f,g");
+  chk("我这边没了结的只算我自己的",
+      L.myOpen(ls, "u1", at("2026-09-19", 12)).map((l) => l.id).join(",") === "f");
+
+  // ── 工作时间（通知第二节开头）──
+  chk("周一三段工时", L.WORK_HOURS[1].length === 3);
+  chk("周六两段、晚上休息", L.WORK_HOURS[6].length === 2);
+  chk("周日全天休息", L.WORK_HOURS[0].length === 0);
+  chk("周日算休息日", L.isRestDay(D("2026-09-20")));
+  chk("周三不算休息日", !L.isRestDay(D("2026-09-16")));
+
+  chk("条子跟着实验记录一起同步，不受「同步待办」开关影响",
+      LAB_KINDS.includes("leaves") && ALL_KINDS.includes("leaves"));
 }
 
 console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);

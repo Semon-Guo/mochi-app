@@ -1045,6 +1045,144 @@ def main():
         chk("状态页报出数据文件占用", s == 200 and r.get("fileBytes", 0) >= len(DATA),
             str(r.get("fileBytes")))
 
+        print("\n── 报备与请假 ──")
+        # 规则出自 2026-09-13 通知第二节。服务端是这套规则的权威实现：
+        # 客户端报上来的 status 一个字都不采信，否则填个 approved 就是自己批自己。
+        lv = lambda rows, token: call("POST", "/api/sync", {"leaves": rows}, token=token)
+        one = lambda token, lid: next(
+            (x for x in call("GET", "/api/sync?since=0", token=token)[1].get("leaves", [])
+             if x["id"] == lid), None)
+        t0 = int(time.time() * 1000) + 100000
+
+        # （一）晚到报备：10:00 前到岗的自动通过
+        s, r = lv([{"id": "lv-early", "updatedAt": t0, "data": {
+            "kind": "late", "day": "2026-09-16", "arriveMin": 585}}], stu1)
+        chk("学生提交晚到报备", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+        row = one(stu1, "lv-early")
+        chk("9:45 到岗由系统自动通过", row and row["data"]["status"] == "auto",
+            str(row and row["data"].get("status")))
+        chk("提交时刻由服务端定", row and row["data"].get("submittedAt", 0) > 0)
+
+        s, r = lv([{"id": "lv-late", "updatedAt": t0, "data": {
+            "kind": "late", "day": "2026-09-16", "arriveMin": 630}}], stu1)
+        row = one(stu1, "lv-late")
+        chk("10:30 到岗要导师批", row and row["data"]["status"] == "pending",
+            str(row and row["data"].get("status")))
+
+        # 自己批自己：填什么 status 都没用
+        s, r = lv([{"id": "lv-cheat", "updatedAt": t0, "data": {
+            "kind": "personal", "fromAt": t0, "toAt": t0 + 86400000, "reason": "回家",
+            "status": "approved", "decidedBy": stu1_id, "decidedAt": t0}}], stu1)
+        row = one(stu1, "lv-cheat")
+        chk("学生自报 approved 被服务端改回 pending",
+            row and row["data"]["status"] == "pending", str(row and row["data"].get("status")))
+        chk("学生塞的审批人被丢掉", row and "decidedBy" not in row["data"])
+
+        # （二）病假：口头报备为主，系统留痕
+        s, r = lv([{"id": "lv-sick", "updatedAt": t0, "data": {
+            "kind": "sick", "fromAt": t0, "toAt": t0 + 3 * 86400000, "reason": "发烧"}}], stu1)
+        row = one(stu1, "lv-sick")
+        chk("病假是备案不是审批", row and row["data"]["status"] == "filed",
+            str(row and row["data"].get("status")))
+
+        # （三）事假：一律要导师批
+        s, r = lv([{"id": "lv-pers", "updatedAt": t0, "data": {
+            "kind": "personal", "fromAt": t0 + 3 * 86400000, "toAt": t0 + 4 * 86400000,
+            "reason": "家里有事"}}], stu1)
+        chk("学生提交事假", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+
+        # 可见性：同门看不到，导师看得到
+        s, r = call("GET", "/api/sync?since=0", token=stu2)
+        chk("同门看不到别人的条子", not [x for x in r.get("leaves", []) if x["id"] == "lv-pers"],
+            f"leaves={len(r.get('leaves', []))}")
+        s, r = call("GET", "/api/sync?since=0", token=advisor)
+        chk("导师看得到全组的条子",
+            len([x for x in r.get("leaves", []) if x["id"].startswith("lv-")]) >= 4,
+            f"leaves={len(r.get('leaves', []))}")
+
+        # 别人的条子谁也批不了
+        s, r = lv([{"id": "lv-pers", "updatedAt": t0 + 1000,
+                    "data": {"status": "approved"}}], stu2)
+        chk("学生批不了同门的条子", r["rejected"] and "别人" in r["rejected"][0]["why"],
+            str(r.get("rejected")))
+
+        # 导师批准
+        s, r = lv([{"id": "lv-pers", "updatedAt": t0 + 2000, "data": {
+            "kind": "personal", "status": "approved", "decisionNote": "准了，回来补记录"}}], advisor)
+        chk("导师批准", s == 200 and r["applied"] == 1, str(r.get("rejected")))
+        row = one(stu1, "lv-pers")
+        chk("批准后学生那边看到 approved", row and row["data"]["status"] == "approved",
+            str(row and row["data"].get("status")))
+        chk("审批人由服务端填，不是导师端报的", row and row["data"].get("decidedBy"))
+        chk("批复留下来了", row and row["data"].get("decisionNote") == "准了，回来补记录")
+        chk("导师整推也盖不掉学生的正文", row and row["data"].get("reason") == "家里有事",
+            str(row and row["data"].get("reason")))
+
+        # 导师只能批准 / 不批准，不能改成别的状态
+        s, r = lv([{"id": "lv-late", "updatedAt": t0 + 3000,
+                    "data": {"status": "auto"}}], advisor)
+        chk("导师不能把条子改成「自动通过」",
+            r["rejected"] and "批准" in r["rejected"][0]["why"], str(r.get("rejected")))
+
+        # 改了实质内容就要重新批
+        s, r = lv([{"id": "lv-pers", "updatedAt": t0 + 4000, "data": {
+            "kind": "personal", "fromAt": t0 + 3 * 86400000, "toAt": t0 + 20 * 86400000,
+            "reason": "家里有事，要久一点"}}], stu1)
+        row = one(stu1, "lv-pers")
+        chk("批完再改天数，批条作废、退回待批",
+            row and row["data"]["status"] == "pending", str(row and row["data"].get("status")))
+
+        # 只动附件不算改实质内容，批条保留
+        s, r = lv([{"id": "lv-pers2", "updatedAt": t0, "data": {
+            "kind": "personal", "fromAt": t0 + 5 * 86400000, "toAt": t0 + 6 * 86400000,
+            "reason": "开会"}}], stu1)
+        s, r = lv([{"id": "lv-pers2", "updatedAt": t0 + 1000,
+                    "data": {"status": "approved", "decisionNote": "去吧"}}], advisor)
+        s, r = lv([{"id": "lv-pers2", "updatedAt": t0 + 2000, "data": {
+            "kind": "personal", "fromAt": t0 + 5 * 86400000, "toAt": t0 + 6 * 86400000,
+            "reason": "开会", "proof": {"photos": ["ph-x"]}}}], stu1)
+        row = one(stu1, "lv-pers2")
+        chk("只加附件不影响已经批下来的条子",
+            row and row["data"]["status"] == "approved", str(row and row["data"].get("status")))
+        chk("批复也还在", row and row["data"].get("decisionNote") == "去吧")
+
+        # 撤回：本人随时可以，但那一行留着
+        s, r = lv([{"id": "lv-pers2", "updatedAt": t0 + 3000,
+                    "data": {"kind": "personal", "fromAt": t0 + 5 * 86400000,
+                             "toAt": t0 + 6 * 86400000, "reason": "开会", "status": "canceled"}}], stu1)
+        row = one(stu1, "lv-pers2")
+        chk("本人可以撤回自己的条子", row and row["data"]["status"] == "canceled",
+            str(row and row["data"].get("status")))
+
+        # 留痕备查：谁都删不掉
+        s, r = lv([{"id": "lv-pers2", "updatedAt": t0 + 5000, "deletedAt": t0 + 5000}], stu1)
+        chk("本人也删不掉自己的条子",
+            r["rejected"] and "不能删除" in r["rejected"][0]["why"], str(r.get("rejected")))
+        chk("拒绝时回传当前版本，客户端能把本地那条捞回来",
+            r["rejected"] and r["rejected"][0].get("current", {}).get("data"),
+            str(r.get("rejected")))
+        s, r = lv([{"id": "lv-pers2", "updatedAt": t0 + 6000, "deletedAt": t0 + 6000}], advisor)
+        chk("导师也删不掉学生的条子", r["rejected"], str(r.get("rejected")))
+        chk("那一行还在库里", one(stu1, "lv-pers2") is not None)
+
+        # 格式校验
+        bad = [
+            ("kind 不对", {"kind": "vacation", "fromAt": t0, "toAt": t0 + 1, "reason": "x"}),
+            ("晚到没日期", {"kind": "late", "arriveMin": 600}),
+            ("晚到时间在 9:00 之前", {"kind": "late", "day": "2026-09-16", "arriveMin": 500}),
+            ("事假没事由", {"kind": "personal", "fromAt": t0, "toAt": t0 + 1, "reason": "   "}),
+            ("返回早于离开", {"kind": "personal", "fromAt": t0 + 86400000, "toAt": t0, "reason": "x"}),
+        ]
+        for i, (why, d) in enumerate(bad):
+            s, r = lv([{"id": f"lv-bad{i}", "updatedAt": t0, "data": d}], stu1)
+            chk(f"挡掉：{why}", r["rejected"] and r["applied"] == 0,
+                str(r.get("rejected")))
+
+        s, r = call("GET", "/api/admin/audit", token=admin)
+        chk("批条子写进审计日志",
+            any(e.get("action", "").startswith("leave.") for e in r.get("entries", [])),
+            str([e.get("action") for e in r.get("entries", [])][:8]))
+
         # 放在最后：限速按 IP 计数，而测试里所有请求都来自 127.0.0.1，
         # 一旦锁定就会把后面每个需要登录的用例都连坐掉
         print("\n── 暴力破解防护（放最后，会锁住本机 IP）──")

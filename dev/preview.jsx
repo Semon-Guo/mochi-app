@@ -102,6 +102,31 @@ const data = {
     { id: "m4", ownerId: "u1", at: Date.now() + 11 * D, title: "设备年检", kind: "other" },
     { id: "m5", ownerId: "u2", at: Date.now() + 2 * D, title: "开题报告初稿", kind: "milestone" },
   ],
+  /* 报备与请假：每种状态各来一条，否则那一页只能验到「待批准」长什么样。
+     日期按北京时间算（跟 app 一致），全部相对今天，截图不会随日子失效。 */
+  leaves: (() => {
+    const bjDay = (off) => new Date(Date.now() + off * D + 8 * 3600e3).toISOString().slice(0, 10);
+    const at = (off, h) => { const t = new Date(Date.now() + off * D + 8 * 3600e3);
+      return Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate(), h) - 8 * 3600e3; };
+    return [
+      { id: "lv1", ownerId: "u1", kind: "late", day: bjDay(1), arriveMin: 585,
+        submittedAt: Date.now() - 2 * H, status: "auto" },
+      { id: "lv2", ownerId: "u1", kind: "personal", fromAt: at(3, 9), toAt: at(4, 18),
+        reason: "家里有事，回去一趟", submittedAt: Date.now() - 20 * H, status: "approved",
+        decidedBy: "prof", decidedAt: Date.now() - 18 * H, decisionNote: "准了，回来把这几天的补上" },
+      { id: "lv3", ownerId: "u2", kind: "personal", fromAt: at(0, 14), toAt: at(1, 18),
+        reason: "同学婚礼，需要回一趟合肥市区", submittedAt: Date.now() - 1 * H, status: "pending" },
+      { id: "lv4", ownerId: "u3", kind: "sick", fromAt: at(-5, 9), toAt: at(-2, 18),
+        reason: "发烧 38.9，去省立医院挂了水", submittedAt: Date.now() - 5 * D, status: "filed" },
+      { id: "lv5", ownerId: "u1", kind: "late", day: bjDay(-3), arriveMin: 630,
+        submittedAt: Date.now() - 3 * D - 3 * H, status: "rejected",
+        decidedBy: "prof", decidedAt: Date.now() - 3 * D, decisionNote: "10:30 太晚了，明天正常到" },
+      { id: "lv6", ownerId: "u2", kind: "comp", fromAt: at(6, 9), toAt: at(6, 18),
+        reason: "上周六值守了一整天", submittedAt: Date.now() - 30 * 60e3, status: "pending" },
+      { id: "lv7", ownerId: "u1", kind: "late", day: bjDay(-9), arriveMin: 570,
+        submittedAt: Date.now() - 9 * D - 5 * H, status: "auto" },
+    ];
+  })(),
 };
 
 /* 半年的历史记录。5 条假数据在成就墙上就是一小撮绿点，看不出那面墙排得对不对，
@@ -182,6 +207,7 @@ if (params.get("app")) {
     // fresh 也要清节点：假数据里的节点归 u1，不清的话学生那边第二步引导
     // 会以为「已经有自己的节点了」而不出现
     milestones: params.get("fresh") ? [] : data.milestones,
+    leaves: params.get("fresh") ? [] : data.leaves,
   }));
   Promise.all([fakePhoto("ph1", 210), fakePhoto("ph2", 30), fakePhoto("ph3", 140), fakePhoto("ph4", 280)])
     .then(() => {
@@ -196,7 +222,13 @@ if (params.get("app")) {
         setTimeout(() => {
           const open = params.get("open");
           if (open) click(".pcard", open);
-          setTimeout(() => { document.title = "READY"; }, 600);
+          // ?leave=1 直接进报备那一屏；?leave=<类型> 再把那种类型的表单点开
+          const lv = params.get("leave");
+          if (lv) click("button", "报备与请假");
+          setTimeout(() => {
+            if (lv && lv !== "1") click("button", lv);
+            setTimeout(() => { document.title = "READY"; }, 500);
+          }, 400);
         }, 400);
       }, 500);
     });
@@ -214,6 +246,9 @@ Promise.all([fakePhoto("ph1", 210), fakePhoto("ph2", 30), fakePhoto("ph3", 140),
         if (b) b.click();
       };
       if (want) click(want);
+      // ?sub= 再点一层：页签里面还有页签时（假条 → 待处理 / 全部 / 本月晚到）
+      const sub = params.get("sub");
+      if (sub) setTimeout(() => click(sub), 120);
       const open = params.get("open");
       setTimeout(() => {
         if (open) {

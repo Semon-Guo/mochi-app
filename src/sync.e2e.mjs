@@ -489,6 +489,58 @@ try {
       JSON.stringify((dMsP.milestones || []).map((m) => m.id)));
   chk("但导师自己的全员节点还在", (dMsP.milestones || []).some((m) => m.id === "ms1"));
 
+  console.log("\n── 报备与请假：学生交、导师批、原路回到学生手里 ──");
+  const T = Date.now() + 5 * 86400000;      // 五天后出发，是一条正常的事假
+  let dLA = base();
+  res = await syncDevice("A", dLA, a.token); dLA = res.data;
+  dLA = Sync.stampChanges(dLA, { ...dLA, leaves: [{
+    id: "lv1", kind: "personal", fromAt: T, toAt: T + 86400000, reason: "家里有事",
+    // 客户端先斩后奏：自己填 approved 推上去。服务端必须改回来。
+    status: "approved", submittedAt: 1, decidedBy: "me",
+  }] }, 110000);
+  res = await syncDevice("A", dLA, a.token); dLA = res.data;
+  chk("学生交得上条子", !res.rejected?.length, JSON.stringify(res.rejected));
+  chk("同一轮里就被服务端的版本盖回来——自己批自己不作数",
+      dLA.leaves?.[0]?.status === "pending", dLA.leaves?.[0]?.status);
+  chk("自己塞的审批人没留下", !dLA.leaves?.[0]?.decidedBy);
+  chk("提交时刻换成服务端的，不是客户端那个 1",
+      dLA.leaves?.[0]?.submittedAt > 1e12, String(dLA.leaves?.[0]?.submittedAt));
+  chk("盖回来之后不再挂着待同步", Sync.pendingCount(dLA) === 0, String(Sync.pendingCount(dLA)));
+
+  let dLB = base();
+  res = await syncDevice("B", dLB, b.token); dLB = res.data;
+  chk("同门拉不到别人的条子——事由里写的是家里的事",
+      !(dLB.leaves || []).some((l) => l.id === "lv1"),
+      JSON.stringify((dLB.leaves || []).map((l) => l.id)));
+
+  let dLP = base();
+  res = await syncDevice("P", dLP, prof.token); dLP = res.data;
+  chk("导师拉得到全组的条子", (dLP.leaves || []).some((l) => l.id === "lv1"));
+
+  // 导师端推的是他本地那整份对象。服务端只取审批那几个字段——
+  // 学生可能刚改过事由而他还没同步到，整推就会把人家的正文盖回旧的。
+  dLP = Sync.stampChanges(dLP, { ...dLP, leaves: dLP.leaves.map((l) =>
+    l.id === "lv1" ? { ...l, reason: "导师顺手改的", status: "approved",
+                       decisionNote: "准了" } : l) }, 111000);
+  res = await syncDevice("P", dLP, prof.token); dLP = res.data;
+  chk("导师批得下去", !res.rejected?.length, JSON.stringify(res.rejected));
+  chk("导师改不动学生写的事由", dLP.leaves.find((l) => l.id === "lv1")?.reason === "家里有事",
+      dLP.leaves.find((l) => l.id === "lv1")?.reason);
+
+  res = await syncDevice("A", dLA, a.token); dLA = res.data;
+  const mine = dLA.leaves.find((l) => l.id === "lv1");
+  chk("批复原路回到学生手里", mine?.status === "approved", mine?.status);
+  chk("带着批语", mine?.decisionNote === "准了", mine?.decisionNote);
+  chk("审批人是导师", mine?.decidedBy === prof.user.id, mine?.decidedBy);
+
+  // 留痕备查：本地删掉会被服务端顶回来，那一行必须还在
+  dLA = Sync.stampChanges(dLA, { ...dLA, leaves: [] }, 112000);
+  res = await syncDevice("A", dLA, a.token); dLA = res.data;
+  chk("删条子被拒", res.rejected?.length === 1, JSON.stringify(res.rejected));
+  chk("被拒之后本地那条自己回来了（回传的 current 顶上）",
+      dLA.leaves.some((l) => l.id === "lv1"), JSON.stringify(dLA.leaves.map((l) => l.id)));
+  chk("删不掉也不挂着待同步", Sync.pendingCount(dLA) === 0, String(Sync.pendingCount(dLA)));
+
   console.log(`\n${"=".repeat(46)}\n通过 ${passed} 项，失败 ${failed} 项\n${"=".repeat(46)}`);
 } finally {
   proc.kill();

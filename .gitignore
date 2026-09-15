@@ -4,3 +4,8 @@ dist
 
 # 凭据文件，绝不能进版本库
 .git-credentials
+
+# CA 私钥。README 里写明了它只该待在 ~/.mochi-ca/，一旦进了这个仓库就是
+# 公开的——这个仓库推 GitHub Pages。根目录里躺着一份，先在这儿挡住。
+ca.key
+*.key

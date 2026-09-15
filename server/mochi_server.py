@@ -19,6 +19,7 @@
     MOCHI_USER_QUOTA_MB 每人数据文件总量上限，默认 10240
     MOCHI_ORPHAN_GRACE_H 数据文件多久没被记录引用就回收，默认 24 小时
 """
+import calendar
 import hashlib
 import hmac
 import json
@@ -80,11 +81,14 @@ IO_CHUNK = 1 << 16
 ORPHAN_GRACE = int(os.environ.get("MOCHI_ORPHAN_GRACE_H") or 24) * 3600 * 1000
 TICKET_TTL = 5 * 60 * 1000
 SESSION_TTL = 90 * 24 * 3600
-SYNC_TABLES = ("projects", "records", "photos", "milestones", "todos")
+SYNC_TABLES = ("projects", "records", "photos", "milestones", "todos", "leaves")
 # 实验记录是科研产出，导师有正当理由查看；待办里带着专注计时和 timeline
 # （几点开始、暂停几次、有没有在玩手机），那是行为数据，性质完全不同——
 # 同步只是为了本人多设备互通，导师一律看不到，由服务端强制。
-ADVISOR_VISIBLE = ("projects", "records", "photos")
+# 请假报备也在这里：导师得看得到全组的条子才批得了，而这正是通知要求
+# 「统一在系统内办理、留痕备查」的那一半。学生只看得到自己的——事由里
+# 写的是家里的事、身体的事，没有理由摊给同门看。
+ADVISOR_VISIBLE = ("projects", "records", "photos", "leaves")
 # 重点节点是**组里的共同日程**（投稿截止、组会、答辩），跟「谁记的」无关：
 # 所有人都读得到，但只有导师和管理员写得了。学生各自能建的话，日历上就会
 # 冒出一堆只有本人看得见的私人条目，那就不是组日程了。
@@ -218,6 +222,18 @@ CREATE TABLE IF NOT EXISTS milestones (
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_ms_seq ON milestones(seq);
 CREATE INDEX IF NOT EXISTS idx_ms_owner ON milestones(owner_id, seq);
+
+/* 报备与请假（2026-09-13 通知第二节）。一行就是一张条子：晚到报备、病假、
+   事假、补休。审批结果存在同一行的 data 里，只有导师写得进（push() 里的
+   merge_decision），学生推上来的 status 一律由服务端重算。
+
+   新表，索引可以直接写在 SCHEMA 里——CREATE TABLE IF NOT EXISTS 对老库也会
+   真的建表，列是齐的。这跟 records.day 那次不一样，那是往已存在的表上加列。 */
+CREATE TABLE IF NOT EXISTS leaves (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  data TEXT NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, seq INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_leaves_seq ON leaves(seq);
+CREATE INDEX IF NOT EXISTS idx_leaves_owner ON leaves(owner_id, seq);
 
 /* 项目成员的倒排索引。成员名单本身存在项目 data 里跟着同步走，这张表只是
    为了让「拉取我参与的项目」能走索引，而不是每次去解析每行 JSON。 */
@@ -616,6 +632,155 @@ def current_user(headers):
 
 # ─────────────────────────── 同步 ───────────────────────────
 
+# ─────────────────────── 报备与请假 ───────────────────────
+#
+# 规则出自 2026-09-13《关于启用课题组实验记录与科研数据管理系统的通知》第二节。
+# 前端 src/leave.js 里有同一套规则的另一份实现，**以这一份为准**：那一份只
+# 决定界面上显示成什么，客户端推上来的 status 一个字都不采信。
+#
+#   （一）晚到报备：10:00 前到岗的系统自动通过，不需要导师批；晚于 10:00 的要批。
+#   （二）病假：口头报备为主，系统这边只留痕（filed）；超过 2 天的返回后补传病历。
+#   （三）事假：一律要导师批准；至少提前 24 小时提交，单次原则上不超过 3 天。
+#
+# 「至少提前 24 小时」和「不超过 3 天」都**不在服务端拦**：拦下来的结果是这条假
+# 根本不进系统，人退回去口头请假——那恰恰是这套系统要取消的东西。所以照收，
+# 由前端按 submittedAt 算出标记摆给导师看，批不批是导师的事，不是服务器的事。
+
+LEAVE_KINDS = ("late", "sick", "personal", "comp")
+WORK_START = 540              # 9:00
+AUTO_LATE_BY = 600            # 10:00，晚到报备自动通过的界线
+SICK_PROOF_DAYS = 2
+# 已经了结的状态。实质内容没改动时原样保留，不重算——否则学生那边改一次
+# 附件、同步一轮，导师批过的条子就自己变回「待批准」了。
+LEAVE_KEEP = ("approved", "rejected", "canceled")
+LEAVE_DECIDED = ("approved", "rejected")
+LEAVE_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 实质内容。这几项一改就得重新批：「去开会两小时」批完改成「出国两周」，
+# 那张批条不能还挂在上面。
+LEAVE_CORE = ("kind", "day", "arriveMin", "fromAt", "toAt", "reason")
+
+
+def day_start(day):
+    """"YYYY-MM-DD" → 那天 00:00（北京时间）的时间戳。bj_day 的逆运算。"""
+    try:
+        y, m, d = (int(x) for x in str(day).split("-"))
+        return calendar.timegm((y, m, d, 0, 0, 0, 0, 0, 0)) * 1000 - 8 * 3600 * 1000
+    except Exception:
+        return 0
+
+
+def leave_span_days(f, t):
+    """跨了几个自然日（含头含尾）。请到当天下午也算一天——这跟人嘴里说的
+    「请两天」一致，按时长除以 86400000 算出来的 1.2 天没法跟通知里的
+    「超过 2 天」「不超过 3 天」对上。"""
+    if not f or not t or t < f:
+        return 0
+    return round((day_start(bj_day(t)) - day_start(bj_day(f))) / 86400000) + 1
+
+
+def leave_status(d):
+    """这条报备该是什么状态。客户端报什么都不算数，以这里算的为准——
+    否则把 arriveMin 填成 9:30、status 填成 auto 推上来，就是自己批了自己。"""
+    k = d.get("kind")
+    if k == "late":
+        try:
+            am = int(d.get("arriveMin"))
+        except (TypeError, ValueError):
+            am = 1440
+        return "auto" if am < AUTO_LATE_BY else "pending"
+    if k == "sick":
+        return "filed"
+    return "pending"
+
+
+def leave_valid(d):
+    """格式校验。返回错误原因，没问题返回 None。这里只挡「填错了」，
+    不挡「不合规」——不合规的照收，标给导师看。"""
+    if not isinstance(d, dict):
+        return "报备格式不对"
+    if d.get("kind") not in LEAVE_KINDS:
+        return "报备类型不对"
+    if d["kind"] == "late":
+        if not LEAVE_DAY_RE.match(str(d.get("day") or "")):
+            return "日期格式不对"
+        try:
+            am = int(d.get("arriveMin"))
+        except (TypeError, ValueError):
+            return "缺少预计到岗时间"
+        if not WORK_START < am < 1440:
+            return "预计到岗时间不对"
+        return None
+    try:
+        f, t = int(d.get("fromAt") or 0), int(d.get("toAt") or 0)
+    except (TypeError, ValueError):
+        return "离返时间不对"
+    if not f or not t or t < f:
+        return "离返时间不对"
+    if leave_span_days(f, t) > 60:
+        return "时间跨度太长，分几次报备"
+    if not str(d.get("reason") or "").strip():
+        return "缺少事由"
+    return None
+
+
+def leave_core(d):
+    return tuple(json.dumps(d.get(k), ensure_ascii=False, sort_keys=True) for k in LEAVE_CORE)
+
+
+def leave_sanitize(payload, cur, now):
+    """本人推上来的条子：审批字段一概剥掉，状态服务端重算。
+
+    submittedAt 也由服务端定、且只定一次——「事假至少提前 24 小时」这条规则
+    全靠它，让客户端自己填等于让它自己证明自己提前交了。
+    """
+    prev = {}
+    if cur:
+        try:
+            prev = json.loads(cur["data"]) or {}
+        except Exception:
+            prev = {}
+    out = {k: v for k, v in payload.items()
+           if k not in ("status", "decidedBy", "decidedAt", "decisionNote")}
+    out["reason"] = str(payload.get("reason") or "")[:1000]
+    out["submittedAt"] = int(prev.get("submittedAt") or now)
+
+    # 本人撤回自己的条子，什么状态下都可以：计划变了就是变了。撤回不是删除，
+    # 那一行还在库里，只是不再占着导师的待办。
+    if payload.get("status") == "canceled":
+        out["status"] = "canceled"
+        return out
+    if prev.get("status") in LEAVE_KEEP and leave_core(prev) == leave_core(out):
+        out["status"] = prev["status"]
+        for k in ("decidedBy", "decidedAt", "decisionNote"):
+            if k in prev:
+                out[k] = prev[k]
+        return out
+    out["status"] = leave_status(out)
+    return out
+
+
+def merge_decision(cur, payload, user, audits, now):
+    """导师批条子：以库里那份为底，只换审批那几个字段。
+
+    只取这几个字段而不是整份覆盖，跟 merge_members 是同一个道理——导师端推的
+    是他本地那份，学生可能刚改过事由而他还没同步到，整推就把人家的正文盖回
+    旧的了。返回 (payload, 错误原因)。
+    """
+    try:
+        base = json.loads(cur["data"]) or {}
+    except Exception:
+        base = {}
+    if payload.get("status") not in LEAVE_DECIDED:
+        return None, "导师只能批准或不批准这条报备"
+    base["status"] = payload["status"]
+    base["decidedBy"] = user["id"]
+    base["decidedAt"] = now
+    base["decisionNote"] = str(payload.get("decisionNote") or "")[:500]
+    audits.append((user["id"], "leave." + base["status"], cur["id"],
+                   f"{base.get('kind')} {str(base.get('reason') or '')[:60]}"))
+    return base, None
+
+
 def hidden_projects(user):
     """这个人看不到的项目 id。
 
@@ -751,6 +916,14 @@ def push(user, changes):
                     payload = {} if deleted_at else (row.get("data") or {})
                     data = json.dumps(payload, ensure_ascii=False)
 
+                    # 报备记录一概不许删。通知要的是「留痕备查」，而能被当事人
+                    # 删掉的痕迹等于没有痕迹。不去的假用「撤回」（status=canceled），
+                    # 那一行仍旧留在库里。回传 current 让客户端把它捞回来——
+                    # 本地已经删掉了，不回传的话这条在他设备上就此消失。
+                    if t == "leaves" and deleted_at:
+                        reject("报备记录要留痕备查，不能删除；不去的话请撤回", cur)
+                        continue
+
                     # 这一段必须放在 deleted_at / payload / data 算完之后：它要用到它们
                     if cur and cur["owner_id"] != user["id"] and t == MILESTONE:
                         # 导师之间可以互相维护全员节点——换了导师，前一任定的
@@ -782,9 +955,28 @@ def push(user, changes):
                         if t == "projects" and can_read_group(user) and not deleted_at:
                             payload = merge_members(c, cur, payload, user, audits)
                             data = json.dumps(payload, ensure_ascii=False)
+                        elif t == "leaves" and can_read_group(user):
+                            # 导师批条子。只动审批那几个字段，正文仍归提交的人。
+                            # 走不到自己批自己：这个分支的前提就是这行不是他的。
+                            payload, why = merge_decision(cur, payload, user, audits,
+                                                          int(time.time() * 1000))
+                            if why:
+                                reject(why, cur)
+                                continue
+                            data = json.dumps(payload, ensure_ascii=False)
                         else:
                             reject("不能修改别人的记录", cur)
                             continue
+
+                    # 本人提交的报备：格式先校验，状态由服务端算。
+                    # 导师那条路走的是上面的 merge_decision，不进这里。
+                    if t == "leaves" and (not cur or cur["owner_id"] == user["id"]):
+                        why = leave_valid(payload)
+                        if why:
+                            reject(why, cur)
+                            continue
+                        payload = leave_sanitize(payload, cur, int(time.time() * 1000))
+                        data = json.dumps(payload, ensure_ascii=False)
 
                     # 每天最多 3 条记录。只拦新增：已有记录的编辑照常，
                     # 否则改个错别字都会因为「今天满了」而被拒。
@@ -2316,6 +2508,11 @@ table.k td:first-child{white-space:nowrap}
     <div class=row><span class=pin>1</span>
       <div class=card><div class=t style="font-weight:600;color:var(--sub)">● 已同步 · 刚刚</div></div></div>
     <div class=row><span class=pin>2</span>
+      <div class=card><div class=t style="display:flex;align-items:center">🗓 报备与请假<span
+        style="margin-left:auto;background:#C08A1E;color:#fff;border-radius:999px;padding:1px 8px;
+        font-size:11px;font-weight:700">1 条未了</span><span
+        style="color:var(--dim);margin-left:6px">›</span></div></div></div>
+    <div class=row><span class=pin>3</span>
       <div class=card><div class=t style="display:flex;align-items:center">🌳 我的成就树<span
         style="margin-left:auto;color:var(--green);font-size:12px">今天亮了 1/3</span><span
         style="color:var(--dim);margin-left:6px">›</span></div>
@@ -2358,10 +2555,10 @@ table.k td:first-child{white-space:nowrap}
           <i class=l2></i><i class=l2></i><i class=l2></i><i class=l1></i><i class=l1></i><i class=l2></i><i class="l1 now"></i>
         </div></div>
         <div class=s>连续 12 天 · 本月 6 天有记录</div></div></div>
-    <div class=row><span class=pin>3</span>
+    <div class=row><span class=pin>4</span>
       <div class=card><div class=t>双矩法实时公里级三维重建</div>
         <div class=s>12 条记录 · 最后 今天</div></div></div>
-    <div class=row style="margin-top:12px"><span class=pin>4</span>
+    <div class=row style="margin-top:12px"><span class=pin>5</span>
       <div style="font-size:11px;font-weight:700;color:var(--dim);letter-spacing:.8px">组里的课题 · 2</div></div>
     <div class=row><span></span>
       <div class=card><div class=t>湍流退化建模</div>
@@ -2370,15 +2567,17 @@ table.k td:first-child{white-space:nowrap}
   <ul class=legend>
     <li><span class=pin>1</span><div>同步状态。点开可以登录/注册、退出；
     开放了待办的人还能在这里开推送。</div></li>
-    <li><span class=pin>2</span><div><b>你自己的贡献墙</b>，一格是一天、一列是一周。
+    <li><span class=pin>2</span><div><b>报备与请假</b>。晚到、病假、事假、补休都在这里交，
+    橙色角标是你还没了结的条数（等导师批的、该补病历没补的）。详见下面「报备与请假」。</div></li>
+    <li><span class=pin>3</span><div><b>你自己的贡献墙</b>，一格是一天、一列是一周。
     今天记了一条，最右边一列里<b>描了边的那一格</b>（就是今天）就亮起来；
     记得越多颜色越深。它<b>只算你自己的记录</b>，组里不排名次、也没有分数——
     只回答「我这个月有没有虚度」。点它进<b>成就树</b>。
     右上角 <code>1/3</code> 是今天记了几条，<b>一天最多 3 条</b>。</div></li>
-    <li><span class=pin>3</span><div><b>你自己的课题</b>（含被导师拉进名单的组级项目）。点进去记录。
+    <li><span class=pin>4</span><div><b>你自己的课题</b>（含被导师拉进名单的组级项目）。点进去记录。
     第一次登录时 app 会先让你立<b>主课题</b>——用论文题目那个，它排在最上面、
     标着「主课题」，<b>全组可见</b>。</div></li>
-    <li><span class=pin>4</span><div><b>组里其他人的课题</b>。可以看，
+    <li><span class=pin>5</span><div><b>组里其他人的课题</b>。可以看，
     但不能往人家本子里写。</div></li>
   </ul>
 
@@ -2431,6 +2630,63 @@ table.k td:first-child{white-space:nowrap}
     <br><span style="color:var(--sub)">开放了待办的人还会多两样：
     <b>背景越绿</b>＝那天专注越久，<b>右上角小黄点</b>＝那天有待办到期。</span></div></li>
   </ul>
+
+  <h3>报备与请假</h3>
+  <p style="color:var(--sub);font-size:14px;margin-top:-2px">从记录页的
+  <b>🗓 报备与请假</b> 进去。晚到、病假、事假、补休统一在这里办、留痕备查，
+  <b>不再口头请假或托人转告</b>。</p>
+
+  <div class=shot>
+    <div class=row><span class=pin>1</span>
+      <div class=card><div class=s style="margin-top:0;font-weight:700;color:var(--sub)">常规工作时间</div>
+        <div class=t style="font-weight:400;margin-top:5px;font-size:13px;line-height:1.9">
+        周一至周五　9:00–11:30　14:00–17:30　19:00–21:30<br>
+        周六　　　　9:00–11:30　14:00–17:30<br>
+        周六晚至周日　休息</div></div></div>
+    <div class=row style="margin-top:10px"><span class=pin>2</span>
+      <div style="flex:1;display:flex;gap:6px;flex-wrap:wrap">
+        <span class=chip>🌅 晚到报备</span><span class=chip>🩺 病假</span>
+        <span class=chip>🧳 事假</span><span class=chip>🌙 补休</span></div></div>
+    <div class=row style="margin-top:10px"><span class=pin>3</span>
+      <div class=card><div class=t style="display:flex;align-items:center;font-size:13px">
+        🌅 晚到报备<span style="margin-left:auto;font-size:11px;font-weight:700;color:var(--green)">自动通过</span></div>
+        <div class=s>9月16日（周三） 09:45 到岗</div></div></div>
+    <div class=row><span class=pin>4</span>
+      <div class=card><div class=t style="display:flex;align-items:center;font-size:13px">
+        🧳 事假<span style="margin-left:auto;font-size:11px;font-weight:700;color:#C08A1E">待批准</span></div>
+        <div class=s>9月20日 09:00 — 9月21日 18:00（2 天）</div>
+        <div class=s style="color:var(--ink)">家里有事，回去一趟</div>
+        <div style="margin-top:7px"><span class=chip
+          style="color:#C08A1E;border-color:#C08A1E55">⚠ 未提前 24 小时提交</span></div></div></div>
+  </div>
+  <ul class=legend>
+    <li><span class=pin>1</span><div>课题组的<b>常规工作时间</b>。「晚到」是相对每天
+    <b>9:00</b> 说的。</div></li>
+    <li><span class=pin>2</span><div>选一种，填表提交。表里会实时提示这条合不合规。</div></li>
+    <li><span class=pin>3</span><div><b>10:00 前到岗的晚到报备，系统自动通过</b>，
+    不用等导师批——但<b>仍然留记录</b>。别把 10:00 当成常规到岗时间：
+    导师那边有一张「本月谁报备了几次晚到」的表。</div></li>
+    <li><span class=pin>4</span><div>不合规的地方<b>不拦你提交</b>，标出来给导师看。
+    拦下来的结果只会是这条假根本不进系统，人又回去发微信了——那正是这套东西要取消的。</div></li>
+  </ul>
+
+  <table>
+    <tr><th>类型</th><th>怎么办</th></tr>
+    <tr><td>🌅 晚到报备</td><td>前一晚工作较晚、次日 9:00 到不了的，<b>当晚</b>提交。
+    <b>10:00 前到岗的自动通过</b>，晚于 10:00 的要导师批。</td></tr>
+    <tr><td>🩺 病假</td><td><b>仍须先口头报备导师</b>，系统这条只是留痕。
+    <b>超过 2 天</b>的，返回后在那张条子下面<b>补传病历或就诊票据</b>（拍照即可）。</td></tr>
+    <tr><td>🧳 事假</td><td><b>至少提前 24 小时</b>提交，写明事由和离返时间，
+    <b>经导师批准后方可离开</b>。单次原则上不超过 3 天。</td></tr>
+    <tr><td>🌙 补休</td><td>写明事由和离返时间，经导师批准。</td></tr>
+  </table>
+
+  <div class=key><b>交上去的条子删不掉，只能「撤回」。</b>通知要的是留痕备查，
+  而能被当事人删掉的痕迹等于没有痕迹。计划变了就点撤回——那一行还在，
+  只是不再占着导师的待办。</div>
+  <div class=note><b>迟到不等于晚到报备。</b>报了备、按报备的时间到岗，是合规的。
+  通知里要数的「迟到」是<b>没报备</b>、或者<b>比报备的时间还晚到</b>——
+  系统没有打卡，看不见那件事，那是导师和在场的人的判断。</div>
 
   <h3>成就树</h3>
   <p style="color:var(--sub);font-size:14px;margin-top:-2px">点主页上那面墙进来。</p>
@@ -2549,6 +2805,9 @@ table.k td:first-child{white-space:nowrap}
       <tr><td>被导师加了名单的项目</td><td>同上</td></tr>
       <tr><td>导师设的全员节点</td><td>全组</td></tr>
       <tr><td>你自己加的重点节点</td><td><b>只有你自己</b>（导师也看不到）</td></tr>
+      <tr><td>你交的报备和请假条</td><td><b>你自己 + 导师们</b>——<b>同门看不到</b>，
+      事由里写的是家里的事、身体的事</td></tr>
+      <tr><td>你补传的病历 / 就诊票据</td><td>同上，<b>同门看不到</b>（服务端强制）</td></tr>
     </table>
     <div class=warn>写记录时记着这一条：<b>你的个人课题是全组可见的</b>，
     照片和数据文件也一样。不想让人看到的，别放进来。</div>
@@ -2620,6 +2879,12 @@ table.k td:first-child{white-space:nowrap}
       <b>管理记录</b>。</li>
       <li><b>重点节点</b>在「日历」页里加。<b>导师加的是全员节点</b>，全组可见；
       学生加的只有他自己看得到，你也看不到。</li>
+      <li><b>假条</b>：等你批的条子（事假、补休、晚于 10:00 的晚到报备），
+      以及<b>该补病历而没补的病假</b>，都排在这个页签里，角标就是这个数。
+      批准 / 不批准都可以附一句批复，学生那边看得到。<b>你改不动学生写的事由</b>，
+      只能批；批完学生又改了天数或事由的，那张批条自动作废、退回待批。
+      「本月晚到」那一栏数的是<b>报备过的</b>晚到，不是迟到——它只回答
+      「谁在把 10:00 当成常规到岗时间」。</li>
       <li><b>管理 → 成员</b>（管理员）：审批导师申请、改角色、离组归档，
       以及<b>给某个人开放「待办」页签</b>。收回不删任何数据。</li>
     </ul>

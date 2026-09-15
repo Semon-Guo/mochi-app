@@ -1,11 +1,15 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import * as Sync from "./sync.js";
-import { avatarFallback } from "./avatar.js";
+// Avatar 挪进了自己的模块：报备页也要用它，从这里引会跟本文件成环
+export { Avatar } from "./Avatar.jsx";
+import { Avatar } from "./Avatar.jsx";
 import { downloadFile, fmtBytes } from "./files.js";
 import { Photo } from "./PhotoView.jsx";
 import { loadSeen, persistSeen, freshRecords, FRESH_WINDOW } from "./seen.js";
 import { MS_KINDS } from "./Calendar.jsx";
 import { AdminPanel } from "./AdminPanel.jsx";
+import { LeaveQueue } from "./LeaveView.jsx";
+import * as L from "./leave.js";
 
 /* 导师端：按学生或按项目看全组进展。
  *
@@ -63,25 +67,6 @@ const fmtAgo = (ts) => {
   if (days < 365) return `${Math.floor(days / 30)} 个月前`;
   return `${Math.floor(days / 365)} 年前`;
 };
-
-/* ── 头像 ── */
-export function Avatar({ user, size = 36, ring = false }) {
-  const fb = avatarFallback(user?.displayName || user?.username, user?.id);
-  const common = {
-    width: size, height: size, borderRadius: "50%", flexShrink: 0,
-    boxShadow: ring ? `0 0 0 2px ${C.bg}, 0 0 0 3px ${C.line}` : undefined,
-  };
-  if (user?.avatar) {
-    return <img src={user.avatar} alt="" style={{ ...common, objectFit: "cover", display: "block" }} />;
-  }
-  return (
-    <div style={{
-      ...common, background: fb.bg, color: fb.fg, display: "flex",
-      alignItems: "center", justifyContent: "center",
-      fontSize: size * 0.42, fontWeight: 700, letterSpacing: 0,
-    }}>{fb.initial}</div>
-  );
-}
 
 /* ── 活跃度热力图：最近 16 周，一眼看出谁在推进、谁停了 ── */
 function Heatmap({ records, weeks = 16, color = C.green }) {
@@ -500,6 +485,11 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
 
   const fresh = freshRecords(records, seen, meId);
 
+  // 等着批的条子，以及该补病历而没补的。角标上就是这个数——导师打开这一屏
+  // 首先要知道「有没有人在等我点头」。
+  const leaves = data.leaves || [];
+  const openLeaves = useMemo(() => L.needsAdvisor(leaves), [leaves]);
+
   // 全组接下来的重点节点。同步过来了却不显示的话，那份数据就是死的——
   // 而「谁的截止快到了」正是导师最该一眼看到的东西。
   const upcomingMs = useMemo(() => {
@@ -792,13 +782,18 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
         </Panel>
       )}
 
-      <div style={{ display: "flex", gap: 6, padding: "0 0 10px" }}>
+      {/* 五个页签要在 430px 里排下：不收窄内边距、不加 nowrap，「按成员」会被
+          折成「按成\n员」。overflowX 是兜底——角标涨到三位数时宁可能横滑，
+          也不要换行把下面的内容顶下去。 */}
+      <div style={{ display: "flex", gap: 6, padding: "0 0 10px",
+        overflowX: "auto", scrollbarWidth: "none" }}>
         {[["feed", `新记录${fresh.length ? ` ${fresh.length}` : ""}`],
           ["people", "按成员"], ["projects", "按项目"],
+          ["leaves", `假条${openLeaves.length ? ` ${openLeaves.length}` : ""}`],
           ...(Sync.isAdmin(auth?.user) ? [["admin", "管理"]] : [])].map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} style={{
-            padding: "8px 16px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
-            fontSize: 13, fontWeight: 600,
+            padding: "8px 11px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
             border: tab === k ? `1px solid ${C.ink}` : `1px solid ${C.line}`,
             background: tab === k ? C.ink : "#FFF", color: tab === k ? "#FFF" : C.sub,
           }}>{label}</button>
@@ -925,6 +920,11 @@ export function AdvisorView({ data, onClose, onPhoto, actions = {} }) {
           </div>
         )}
         </>
+      )}
+
+      {tab === "leaves" && (
+        <LeaveQueue leaves={leaves} byId={byId} me={auth?.user} onPhoto={onPhoto}
+          onDecide={(id, status, note) => actions.decideLeave?.(id, status, note)} />
       )}
 
       {tab === "admin" && Sync.isAdmin(auth?.user) && (

@@ -22,8 +22,10 @@ const TODOS_SK = "mochi_sync_todos";
 
 // 实验记录始终同步（课题组共用）；待办是可选项，而且**只在自己的设备之间**
 // 同步——服务端不会把它给导师或任何其他人看。
-export const LAB_KINDS = ["projects", "records", "milestones"];
-export const ALL_KINDS = ["projects", "records", "milestones", "todos"];
+// 请假报备跟实验记录一样始终同步：它是课题组的公务，不是个人时间管理，
+// 没有「不同步」这个选项——条子只存在本机等于没交。
+export const LAB_KINDS = ["projects", "records", "milestones", "leaves"];
+export const ALL_KINDS = ["projects", "records", "milestones", "leaves", "todos"];
 
 export function getSyncTodos() {
   try { return localStorage.getItem(TODOS_SK) !== "0"; } catch { return true; }
@@ -81,7 +83,7 @@ export function setDataOwner(id) {
 export async function resetLocalData() {
   await clearPhotos().catch(() => {});
   return {
-    todos: [], notes: [], projects: [], records: [], milestones: [],
+    todos: [], notes: [], projects: [], records: [], milestones: [], leaves: [],
     _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
   };
 }
@@ -104,7 +106,7 @@ export async function switchAccount(data, prevOwnerId, nextOwnerId) {
 
   await clearPhotos().catch(() => {});
   return {
-    todos: [], notes: [], projects: [], records: [], milestones: [],
+    todos: [], notes: [], projects: [], records: [], milestones: [], leaves: [],
     _sync: { stamps: {}, tombs: {}, pushed: {}, cursor: 0, lastSyncAt: 0, photos: {} },
   };
 }
@@ -388,14 +390,19 @@ function coolingDown(mark, now) {
   return typeof mark === "number" && now - mark < PHOTO_RETRY_AFTER;
 }
 
-export function planPhotoSync({ records = [], localIds, state = {}, myUserId, now = Date.now() }) {
+export function planPhotoSync({ records = [], leaves = [], localIds, state = {}, myUserId, now = Date.now() }) {
   const referenced = new Set();
   const mine = new Set();
-  for (const r of records) {
+  // 病假补传的病历和就诊票据走的也是照片这条路，一并算进来——漏了的话那几张
+  // 在本机躺着永远传不上去，导师那边点开是个空灰块。它们不属于任何项目，
+  // 服务端的 visible_blob 因此只放给本人和导师，同门看不到。
+  const src = [...records.map((r) => [r, r.photos]),
+               ...leaves.map((l) => [l, l.proof?.photos])];
+  for (const [r, list] of src) {
     // 本机新建的记录没有 ownerId；从服务器拉回来的都带着。myUserId 缺失时
     // 退回旧行为（一律当自己的），免得哪个调用点忘了传就把上传整个停掉。
     const isMine = !r.ownerId || !myUserId || r.ownerId === myUserId;
-    for (const pid of r.photos || []) {
+    for (const pid of list || []) {
       referenced.add(pid);
       if (isMine) mine.add(pid);
     }
@@ -415,7 +422,7 @@ export async function syncPhotos(data, token, sync, myUserId) {
   try { localIds = new Set(await localPhotoIds()); } catch { return { uploaded: 0, downloaded: 0, changed: false }; }
 
   const { referenced, toUpload, toDownload } =
-    planPhotoSync({ records: data.records, localIds, state, myUserId });
+    planPhotoSync({ records: data.records, leaves: data.leaves, localIds, state, myUserId });
   if (!referenced.size) return { uploaded: 0, downloaded: 0, changed: false };
 
   let uploaded = 0, downloaded = 0, marked = 0;

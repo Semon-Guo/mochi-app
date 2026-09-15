@@ -9,6 +9,8 @@ import { NC, uid, migrateLab } from "./src/migrate.js";
 import { bjNow, toBJ, dayKeyOf } from "./src/time.js";
 import { Calendar } from "./src/Calendar.jsx";
 import { WallCard, AchievementTree } from "./src/Achievements.jsx";
+import { LeaveView } from "./src/LeaveView.jsx";
+import * as Leave from "./src/leave.js";
 
 // 构建标识：排查「是不是还在用缓存的旧版本」时直接看界面，不用猜
 const BUILD = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
@@ -62,7 +64,7 @@ function dropDeadStamps(sync) {
   return { ...sync, stamps: keep(sync.stamps), tombs: keep(sync.tombs) };
 }
 function loadAll() {
-  let data = { todos: [], notes: [], projects: [], records: [], comments: [], milestones: [] };
+  let data = { todos: [], notes: [], projects: [], records: [], comments: [], milestones: [], leaves: [] };
   try { const r = localStorage.getItem(SK); if (r) data = JSON.parse(r); } catch {}
   const keptSync = data._sync || null;
   data = migrateLab({
@@ -75,6 +77,8 @@ function loadAll() {
     // 点赞和点评已下线，数据跟散记一样原样留着（见上）。不再渲染、也不再同步。
     comments: data.comments || [],
     milestones: data.milestones || [],
+    // 报备与请假的条子。跟实验记录一样始终同步，不受「同步待办」那个开关影响。
+    leaves: data.leaves || [],
   });
   if (keptSync) data._sync = dropDeadStamps(keptSync);
   // Every live session keeps counting while the app is closed — fold the time back in,
@@ -1386,6 +1390,7 @@ export default function MochiApp() {
   // 否则刚拉下来的记录会被当成本地新改动，下一轮又推回服务器。
   const applySync = useCallback((fn) => _setData(fn), []);
   const [advisorOpen, setAdvisorOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   // 登录态进 state（而不是每次渲染读一遍 localStorage）：待办这一半的显隐跟着
   // 它走，管理员在服务器上开放/收回之后，下一次同步刷回身份就得立刻生效。
   const [auth, setAuthState] = useState(() => Sync.getAuth());
@@ -1461,6 +1466,7 @@ export default function MochiApp() {
         if (treeOpen) { setTreeOpen(false); return; }
         if (remindFor) { setRemindFor(null); return; }
         if (advisorOpen) { setAdvisorOpen(false); return; }
+        if (leaveOpen) { setLeaveOpen(false); return; }
         if (showAdd) { setShowAdd(false); return; }
         if (addSubParent) { setAddSubParent(null); return; }
         if (editingTodo) { setEditingTodo(null); return; }
@@ -1486,8 +1492,8 @@ export default function MochiApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [desktop, bgAlert, viewPhoto, treeOpen, remindFor, advisorOpen, showAdd, addSubParent,
-      editingTodo, projForm, view, openProject, tab, todoOn]);
+  }, [desktop, bgAlert, viewPhoto, treeOpen, remindFor, advisorOpen, leaveOpen, showAdd,
+      addSubParent, editingTodo, projForm, view, openProject, tab, todoOn]);
 
   // Away-time watcher — one dialog for all running timers. iOS freezes (or kills) a
   // backgrounded PWA, so on return we ask whether the gap was real focus or a detour.
@@ -1804,6 +1810,27 @@ export default function MochiApp() {
   const createGroupProject = (name) => setData(d => ({ ...d, projects: [
     { id:uid(), name, startedAt:Date.now(), color:NC[d.projects.length % NC.length], members:[] },
     ...d.projects] }));
+  /* ── 报备与请假（2026-09-13 通知第二节）──
+   * 条子一律留痕：不去了是「撤回」（改状态），不是删行——服务端也不接受
+   * 删除 leaves 里的任何一行。能被当事人删掉的痕迹等于没有痕迹。
+   */
+  const submitLeave = (l) => setData(d => ({ ...d, leaves: [...(d.leaves || []), l] }));
+  const patchLeave = (id, patch) => setData(d => ({ ...d,
+    leaves: (d.leaves || []).map(x => x.id === id ? { ...x, ...patch } : x) }));
+  // 导师批条子。服务端只认 status / decisionNote 这几个字段，其余照旧；
+  // 这里把 decidedBy / decidedAt 也先填上，纯粹是为了点完立刻看到结果，
+  // 下一轮同步会被服务器那份盖掉。
+  const decideLeave = (id, status, note) => patchLeave(id, {
+    status, decisionNote: note || "", decidedBy: me?.id, decidedAt: Date.now() });
+  // 病历和就诊票据走照片那条路（压到长边 1600 的 JPEG）。它们不属于任何项目，
+  // 服务端的 visible_blob 因此只放给本人和导师——同门看不到谁病了。
+  const addPhotos = async (files) => {
+    const ids = [];
+    for (const f of files) { const id = uid(); await putPhoto(id, await shrinkImage(f)); ids.push(id); }
+    return ids;
+  };
+  const myOpenLeaves = Leave.myOpen(data.leaves || [], me?.id);
+
   const setProjectMembers = (id, members) => setData(d => ({ ...d,
     projects: d.projects.map(p => p.id === id ? { ...p, members } : p) }));
 
@@ -2245,7 +2272,16 @@ export default function MochiApp() {
   if (advisorOpen) {
     return (<>
       <AdvisorView data={data} onClose={()=>setAdvisorOpen(false)} onPhoto={setViewPhoto}
-        actions={{ createProject: createGroupProject, setProjectMembers }} />
+        actions={{ createProject: createGroupProject, setProjectMembers, decideLeave }} />
+      {photoUI}
+      <style>{CSS}</style>
+    </>);
+  }
+
+  if (leaveOpen) {
+    return (<>
+      <LeaveView data={data} me={me} onClose={()=>setLeaveOpen(false)} onPhoto={setViewPhoto}
+        onSubmit={submitLeave} onPatch={patchLeave} addPhotos={addPhotos} />
       {photoUI}
       <style>{CSS}</style>
     </>);
@@ -2307,6 +2343,25 @@ export default function MochiApp() {
         ):(
           <>
             <SyncBar data={data} applySync={applySync} onOpenAdvisor={()=>setAdvisorOpen(true)} />
+
+            {/* 报备与请假。摆在同步条下面、贡献墙上面：晚到报备要「当晚提交」，
+                藏进二级页面的入口，人想起来的时候找不到就又去发微信了。
+                没登录不显示——条子是交给导师的，还没账号谈不上交给谁。 */}
+            {me && (
+              <button onClick={()=>setLeaveOpen(true)} style={{
+                width:"100%",display:"flex",alignItems:"center",gap:9,marginBottom:10,
+                padding:"12px 13px",borderRadius:13,cursor:"pointer",fontFamily:"inherit",
+                border:"1px solid #E7E2D6",background:"#FFF",textAlign:"left",
+              }}>
+                <span style={{fontSize:15}}>🗓</span>
+                <span style={{fontSize:14,fontWeight:700,color:"#2C2C2C",flex:1}}>报备与请假</span>
+                {myOpenLeaves.length>0 && (
+                  <span style={{fontSize:11.5,fontWeight:700,color:"#FFF",background:"#C08A1E",
+                    borderRadius:999,padding:"2px 9px"}}>{myOpenLeaves.length} 条未了</span>
+                )}
+                <span style={{color:"#D6CFC2",fontSize:15,lineHeight:1}}>›</span>
+              </button>
+            )}
 
             {/* 自己的贡献墙。摆在主页第一屏是刻意的——「今天亮了没有」得一眼看见，
                 藏在二级页面里的话，这个机制一天也用不上。它读的全是本机数据，

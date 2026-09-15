@@ -1,16 +1,19 @@
 # Mochi 同步服务
 
-课题组共用的实验记录同步后端。**只同步实验记录**（`projects` / `records` / 照片）——
-个人待办、专注计时、timeline 全部留在设备本地，不上传、服务器也没有对应的表。
+课题组共用的实验记录同步后端。**只同步实验记录和请假报备**（`projects` / `records` /
+照片 / `leaves`）——个人待办、专注计时、timeline 全部留在设备本地，不上传、
+服务器也没有对应的表。
 
 学生读写自己的记录，导师只读全组的（导师也**不能**修改学生的记录，服务端强制）。
+唯一的例外是请假报备：导师能在学生的条子上写下批准/不批准，但**只能动审批那几个
+字段**，条子正文仍归交条子的人（见「报备与请假」）。
 
 ### 角色
 
 | 角色 | 能做什么 |
 |---|---|
-| `student` | 只读写自己的记录 |
-| `advisor` | 加上：读全组的实验记录（改不了别人的，服务端强制） |
+| `student` | 只读写自己的记录；交自己的假条 |
+| `advisor` | 加上：读全组的实验记录和假条、批假条（**只能批，改不了条子正文**，服务端强制） |
 | `admin` | 加上：成员管理、邀请码、服务器状态、审计日志 |
 
 **注册一律是学生**，导师和管理员由管理员在界面上直接任命。曾经有过「导师邀请码」
@@ -90,7 +93,7 @@ python3 ~/mochi/server/set_role.py <用户名> advisor  # 设为导师
 systemctl --user status mochi        # 状态
 systemctl --user restart mochi       # 重启
 tail -f ~/mochi/server.log           # 看日志
-python3 server/test_server.py   # 服务端 API（237 项）
+python3 server/test_server.py   # 服务端 API（268 项）
 python3 ~/mochi/server/backup.py     # 手动备份一次
 ```
 
@@ -126,8 +129,8 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | POST | `/api/password` | `{oldPassword, newPassword}` 本人改密码 |
 | POST | `/api/avatar` | 设置头像（data URL，≤96KB） |
 | POST | `/api/profile` | 改显示名 |
-| GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, milestones, seq, more}` |
-| POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[], milestones:[]}` |
+| GET | `/api/sync?since=<seq>` | 增量拉取，返回 `{projects, records, photos, milestones, leaves, seq, more}` |
+| POST | `/api/sync` | 推送 `{projects:[], records:[], photos:[], milestones:[], leaves:[]}` |
 | POST | `/api/photo/<id>` | 上传照片二进制（元数据须先经 `/api/sync` 建好） |
 | GET | `/api/photo/<id>` | 下载照片（本人或导师） |
 | POST | `/api/file/<id>/init` | 登记数据文件 `{name, size, mime}` → `{received}` 续传点 |
@@ -177,6 +180,7 @@ vi ~/mochi/server.env && systemctl --user restart mochi
 | 重点节点 | 分两种，靠**建它的人是谁**区分 | 导师建的 = 全员节点，所有人可见；学生建的 = 私人节点，**只有他自己看得到，连导师也看不到**（所以 milestones 不在 `ADVISOR_VISIBLE` 里——个人日程跟待办是一类，不是科研产出）。导师之间可以互相维护全员节点；学生的私人节点谁也改不了。**拒绝时不回传 `current`**，否则等于从拒绝里把私人内容漏出去 |
 | 个人课题和记录 | 组里互相看得到彼此在做什么 | 没有成员名单、且不是导师建的项目 → **全组可见**，连同里面的记录、照片、数据文件 |
 | 有名单的 / 导师建的项目 | 导师圈定了参与范围 | `hidden_projects()`：只给名单内的人 + 项目主人 + 导师。**导师建的项目从创建起就受限**，哪怕名单还空着——只看名单的话，加上第一个人的瞬间它会对所有人消失，这个跳变没法跟人解释 |
+| 请假报备 | 导师得看得到才批得了 | `leaves` 在 `ADVISOR_VISIBLE` 里：导师拿全组的，**学生只拿自己的**（走 `pull()` 的默认分支）。事由里写的是家里的事、身体的事，没有理由摊给同门看 |
 | 项目成员 | 组里谁参与哪个课题本来就是导师在管 | 导师能改**任何**项目的 `members`，但服务端只取这一个字段合并（`merge_members`）——项目名、颜色仍归建它的人，导师也删不掉别人的项目。每次改动写进 `audit_log`，`/api/project-log` 供导师互查 |
 | 导师建的项目 | 学生看不到这个项目就没法往里记 | 成员名单存在项目 `data.members` 里跟着同步走；服务端另存一张 `project_members` 倒排表，拉取时走索引 |
 
@@ -289,6 +293,75 @@ GitHub 那样的贡献墙，今天记了一条就亮一格。要点：
 删除走**墓碑**：置 `deletedAt` 而不是真删行，否则客户端分不清「这条被删了」和
 「这条还没同步过来」。拉取时墓碑记录的 `data` 为 `null`。
 
+## 报备与请假
+
+课题组 2026-09-13《关于启用课题组实验记录与科研数据管理系统的通知》第二节落地。
+晚到、病假、事假、补休统一在系统里办、留痕备查，不再口头请假或托人转告。
+
+一张条子就是 `leaves` 表里的一行，`data` 里带着类型、时间、事由和审批结果。
+
+| 类型 | 规则（通知原文） | 落到代码里 |
+|---|---|---|
+| 晚到报备 `late` | 当晚提交；**10:00 前到岗的系统自动通过**，不需要导师批，但仍留记录 | `arriveMin < 600` → `auto`，否则 `pending` |
+| 病假 `sick` | 口头报备为主；**超过 2 天**的返回后补传病历或就诊票据 | 一律 `filed`；`spanDays > 2` 时算出「欠着病历」，人回来之后才开始催 |
+| 事假 `personal` | 至少提前 24 小时；写明事由和离返时间；**经导师批准后方可离开**；单次原则上不超过 3 天 | 一律 `pending`；24 小时和 3 天只标记，不拦 |
+| 补休 `comp` | 通知开头列进了系统办理，但没有单独给规则 | 按事假办，**不套 24 小时那条**——通知没这么要求 |
+
+### 规则写了两遍，服务端那份说了算
+
+`src/leave.js` 和 `mochi_server.py` 里的 `leave_*` 是同一套规则的两份实现：
+前端那份决定**界面上显示成什么、能不能点提交**，服务端那份决定**库里存成什么**。
+两份必须一起改，`sync.test.mjs` 和 `test_server.py` 里各钉了一遍。
+
+服务端必须自己算，不能信客户端报上来的：
+
+- **`status` 一律重算。** 把 `arriveMin` 填成 9:30、`status` 填成 `auto` 推上来，
+  就是自己批了自己。`leave_sanitize()` 把 `status` / `decidedBy` / `decidedAt` /
+  `decisionNote` 整组剥掉再重算。
+- **`submittedAt` 由服务端定，且只定一次。**「事假至少提前 24 小时」这条规则
+  全靠它，让客户端自己填等于让它自己证明自己提前交了。
+- **导师只能批，改不动正文**（`merge_decision()`，跟 `merge_members` 一个道理）：
+  导师端推的是他本地那整份对象，学生可能刚改过事由而他还没同步到，整推就会把
+  人家的正文盖回旧的。审批状态只接受 `approved` / `rejected`。
+- **改了实质内容，批条自动作废。**「去开会两小时」批完改成「出国两周」，
+  那张批条不能还挂在上面。`LEAVE_CORE` 那几个字段（类型、日期、离返时间、事由）
+  一变就退回 `pending`；只加附件不算。
+- **走不到自己批自己**：`merge_decision` 所在的分支前提就是「这行不是他的」。
+
+### 不合规的不拦，标出来
+
+「提前 24 小时」和「不超过 3 天」都不在服务端拦。拦下来的结果是这条假**根本不进
+系统**，人退回去发微信——那正是这套东西要取消的。所以照收，前端按 `submittedAt`
+算出标记（`flagsOf()`）摆给导师看，批不批是导师的事，不是服务器的事。
+
+格式错误（类型不对、缺事由、返回早于离开）照常挡，那是「填错了」，不是「不合规」。
+
+### 条子删不掉，只能撤回
+
+`push()` 里拦死了 `leaves` 的墓碑，学生和导师都删不掉。通知要的是「留痕备查」，
+而能被当事人删掉的痕迹等于没有痕迹。不去了就 `status = "canceled"`，那一行还在。
+
+拒绝时**回传 `current`**：本地已经删掉了，不回传的话这条在他设备上就此消失。
+
+### 病历走照片那条路
+
+补传的病历和就诊票据用 `photos`（压到长边 1600 的 JPEG），不走数据文件——
+几百 MB 那套是给原始测量结果的，拍张票据用不上，而且 `referenced_file_ids()`
+只扫 `records`，挂在条子上的数据文件会被孤儿回收删掉。
+
+这些照片不属于任何项目（`project_id` 为空），`visible_blob()` 因此只放给本人和
+导师，**同门看不到谁病了**。`planPhotoSync()` 里要一并扫 `leaves` 的 `proof.photos`，
+漏了的话那几张在本机躺着永远传不上去，导师点开是个空灰块。
+
+### 「本月晚到」不是迟到次数
+
+导师端「假条 → 本月晚到」数的是**报备过的晚到**。报了备、按报备的时间到岗，
+是合规的；通知第三节（二）要数的「迟到」是**未报备**或**晚于报备时间到达**——
+系统没有打卡，看不见那件事。
+
+这一栏只回答一个问题：谁在把 10:00 当成常规到岗时间。**界面上必须写明这一点**，
+不然它会被当成违规计数使，冤枉按规矩报备的人。
+
 ## 安全
 
 - 密码用 scrypt（OpenSSL 3 环境）或 PBKDF2-SHA256 600k 迭代（回退），加盐存储，格式自描述
@@ -338,6 +411,9 @@ extendedKeyUsage 含 serverAuth。
 | `src/files.js` | 数据文件的分块上传 / 续传 / 凭票下载 |
 | `src/photos.js` / `src/PhotoView.jsx` | 照片的存取 / 显示组件（主应用和导师端共用） |
 | `src/achievements.js` / `src/Achievements.jsx` | 个人成就树：贡献墙的纯逻辑 / UI |
+| `src/leave.js` | 报备与请假的规则（跟服务端那份对照着改） |
+| `src/LeaveView.jsx` | 学生端整屏 + 导师端「假条」页签，两头共用一张卡片 |
+| `src/Avatar.jsx` | 头像。单独一个模块是为了不成环——导师端和报备页都要用它 |
 | `src/seen.js` | 导师端「哪些记录还没看」，只存本机 |
 | `src/Calendar.jsx` | 日历：月视图 / 周日程 / 重点节点编辑 |
 | `src/time.js` | 北京时间原语（全组按同一时区归日） |
@@ -353,9 +429,9 @@ extendedKeyUsage 含 serverAuth。
 ### 测试
 
 ```bash
-node src/sync.test.mjs      # 同步引擎 + 成就墙的纯逻辑（70 项）
-node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（84 项）
-python3 server/test_server.py   # 服务端 API（236 项；服务器上多一项 scrypt，共 237）
+node src/sync.test.mjs      # 同步引擎 + 成就墙 + 请假规则的纯逻辑（113 项）
+node src/sync.e2e.mjs       # 前端引擎 × 真实后端，模拟多设备（99 项）
+python3 server/test_server.py   # 服务端 API（267 项；服务器上多一项 scrypt，共 268）
 ```
 
 ### 推送
@@ -379,8 +455,9 @@ npm run dev
 node dev/shot.mjs "http://localhost:5173/mochi-app/dev/preview.html?view=按项目" out.png
 ```
 
-`?app=1` 看学生端，`?view=` 切页签，`?open=` 点进详情，`?todo=0` 看「没给这个人开放待办」
-时学生端的样子。
+`?app=1` 看学生端，`?view=` 切页签，`?sub=` 再切一层（假条里那三个），
+`?open=` 点进详情，`?todo=0` 看「没给这个人开放待办」时学生端的样子，
+`?leave=1` 直接进报备那一屏、`?leave=事假` 再把那种类型的表单点开。
 
 `migrateLab` 每次启动抹掉项目 `ownerId`/`members` 那个 bug 就是这么发现的——
 渲染出学生端那一屏，看见本该是「组级项目」标签的位置摆着删除按钮。
